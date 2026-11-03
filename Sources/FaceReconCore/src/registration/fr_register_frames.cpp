@@ -18,6 +18,8 @@
 #include "recon_graph.h"
 #include "../common/fr_internal.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <numeric>
@@ -29,9 +31,10 @@ namespace
 constexpr double kGroupAngleDeg = 12.0;        // initial rotation change that starts a new pose group
 constexpr size_t kBridgesPerGroup = 3;         // frame pairs tried between a group and the frontal group
 constexpr size_t kMaxLoopsPerFrame = 6;        // bound on loop-closure candidates per frame
-constexpr double kMaxCorrectionDeg = 30.0;     // ICP result vs. initial relative pose
-constexpr double kMaxCorrectionM = 0.06;
+constexpr double kMaxCorrectionDeg = 30.0;     // ICP result vs. initial relative pose: rotation and
+constexpr double kMaxCorrectionM = 0.04;       // displacement of the source cloud's centroid
 constexpr size_t kMinFramePoints = 200;
+constexpr float kRelativeRmseLimit = 1.8f;     // edges fitting worse than this times the median are rejected
 
 enum class EdgeKind
 {
@@ -170,6 +173,16 @@ fr_status fr_register_frames( const fr_rgbd_frame * frames, uint32_t count, cons
         } );
         if( prog.cancelled )
             return fail( FR_ERR_CANCELLED, "fr_register_frames: cancelled" );
+        std::vector< Eigen::Vector3d > centroids( n, Eigen::Vector3d::Zero() );
+        for( size_t i = 0; i < n; ++i )
+        {
+            if( ! usable[i] )
+                continue;
+            const fr_cloud & c = pyramids[i].levels[0]->cloud;
+            for( size_t k = 0; k < c.size(); ++k )
+                centroids[i] += c.point( k ).cast< double >();
+            centroids[i] /= double( c.size() );
+        }
         if( ! usable[0] )
             return fail( FR_ERR_NOT_ENOUGH_DATA, "fr_register_frames: the reference frame (0) has too few valid depth points" );
 
@@ -254,21 +267,69 @@ fr_status fr_register_frames( const fr_rgbd_frame * frames, uint32_t count, cons
             if( prog.cancelled.load() )
                 return;
             fr::Candidate & c = edges[k];
-            const Eigen::Matrix4d init = rigid_inverse( initial[c.target] ) * initial[c.source];
-            c.status = icp_pyramids( pyramids[c.source], pyramids[c.target], init, p.icp, c.result, &prog.cancelled );
-            if( c.status == FR_OK )
-            {
-                const Eigen::Matrix4d correction = rigid_inverse( init ) * c.result.target_from_source;
+            auto attempt = [&]( const Eigen::Matrix4d & init, IcpOutput & result ) {
+                if( icp_pyramids( pyramids[c.source], pyramids[c.target], init, p.icp, result, &prog.cancelled ) != FR_OK )
+                    return false;
+                // Judge the correction by how far it moves the observed surface: a few degrees about the head,
+                // 0.6 m in front of the camera, already mean centimeters of translation in the camera frame.
+                const Eigen::Matrix4d correction = rigid_inverse( init ) * result.target_from_source;
+                const Eigen::Vector3d centroid = centroids[c.source];
+                const Eigen::Vector3d moved = correction.block< 3, 3 >( 0, 0 ) * centroid + correction.block< 3, 1 >( 0, 3 );
                 const bool plausible = rotation_angle( correction.block< 3, 3 >( 0, 0 ) ) < deg2rad( kMaxCorrectionDeg )
-                                    && correction.block< 3, 1 >( 0, 3 ).norm() < kMaxCorrectionM;
-                c.accepted = plausible && c.result.fitness >= p.min_fitness && c.result.inlier_rmse <= p.max_rmse_m
-                          && c.result.information.allFinite();
+                                    && ( moved - centroid ).norm() < kMaxCorrectionM;
+                return plausible && result.fitness >= p.min_fitness && result.inlier_rmse <= p.max_rmse_m
+                    && result.information.allFinite();
+            };
+            const Eigen::Matrix4d init = rigid_inverse( initial[c.target] ) * initial[c.source];
+            IcpOutput result;
+            bool accepted = attempt( init, result );
+            if( group[c.source] == group[c.target] )
+            {
+                // Within a pose group the head is held still: the identity rotation (centroids aligned) is often a
+                // better start than two noisy Vision estimates. Keep whichever converges better.
+                Eigen::Matrix4d still = Eigen::Matrix4d::Identity();
+                still.block< 3, 1 >( 0, 3 ) = centroids[c.target] - centroids[c.source];
+                IcpOutput other;
+                const bool other_accepted = attempt( still, other );
+                const bool better = other_accepted > accepted
+                                 || ( other_accepted == accepted && other.fitness / std::max( other.inlier_rmse, 1e-4f )
+                                                                    > result.fitness / std::max( result.inlier_rmse, 1e-4f ) );
+                if( better && other.correspondences > 0 )
+                {
+                    result = other;
+                    accepted = other_accepted;
+                }
             }
+            c.result = result;
+            c.accepted = accepted;
+            c.status = result.correspondences > 0 ? FR_OK : FR_ERR_NOT_ENOUGH_DATA;
             prog.report( 0.25f + 0.6f * float( ++done ) / float( std::max< size_t >( 1, edges.size() ) ), "pairwise registration" );
         } );
         if( prog.cancelled )
             return fail( FR_ERR_CANCELLED, "fr_register_frames: cancelled" );
 
+        // A sliding partial overlap can satisfy the absolute thresholds; it still fits worse than the typical edge,
+        // whose RMSE reflects the depth noise.
+        {
+            std::vector< float > rmse;
+            for( const auto & c : edges )
+                if( c.accepted )
+                    rmse.push_back( c.result.inlier_rmse );
+            if( rmse.size() >= 5 )
+            {
+                std::nth_element( rmse.begin(), rmse.begin() + std::ptrdiff_t( rmse.size() / 2 ), rmse.end() );
+                const float limit = kRelativeRmseLimit * rmse[rmse.size() / 2];
+                for( auto & c : edges )
+                    if( c.accepted && c.result.inlier_rmse > limit )
+                        c.accepted = false;
+            }
+        }
+        if( prog.cancelled )
+            return fail( FR_ERR_CANCELLED, "fr_register_frames: cancelled" );
+
+        if( std::getenv( "FR_DEBUG_REGISTRATION" ) )
+            for( const auto & c : edges )
+                std::fprintf( stderr, "edge %u->%u kind %d primary %d angle %.1f status %d fit %.3f rmse %.3f mm acc %d\n", c.source, c.target, int( c.kind ), int( c.primary ), rad2deg( c.angle ), int( c.status ), c.result.fitness, c.result.inlier_rmse * 1000, int( c.accepted ) );
         // Certain spanning structure: odometry + primary bridges, repaired with the best accepted alternatives.
         for( auto & c : edges )
             c.certain = c.accepted && ( c.kind == EdgeKind::odometry || c.primary );

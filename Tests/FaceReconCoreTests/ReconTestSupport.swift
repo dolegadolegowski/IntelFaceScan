@@ -258,6 +258,10 @@ struct HeadScene: SynthScene {
     }
 
     func intersect(origin: V3, dir: V3) -> SurfaceHit? {
+        // Most rays miss the head: reject them with one bounding-sphere test.
+        let o = origin - center
+        let a = dir.dot(dir), b = 2 * o.dot(dir), c = o.dot(o) - 0.13 * 0.13
+        if b * b - 4 * a * c < 0 { return nil }
         var best: SurfaceHit?
         for e in parts {
             if let h = e.intersect(origin: origin, dir: dir), h.t < (best?.t ?? .infinity) { best = h }
@@ -410,6 +414,19 @@ func lookAtPoses(target: V3, distance: Double, directions: [V3]) -> [Rigid] {
         // Columns x, y, z of the rotation (camera axes in world).
         return Rigid(r: [x.x, y.x, z.x, x.y, y.y, z.y, x.z, y.z, z.z], t: eye)
     }
+}
+
+/// Rotation of a head with the given Vision-style angles in the camera frame (same convention as
+/// ScanKit.HeadPose.cameraFrameRotation: yaw about -Y, pitch about -X, roll about +Z, R = yaw * pitch * roll).
+func headRotation(yaw: Double, pitch: Double, roll: Double = 0) -> Rigid {
+    Rigid(axis: V3(0, -1, 0), angleDeg: yaw) * Rigid(axis: V3(-1, 0, 0), angleDeg: pitch) * Rigid(axis: V3(0, 0, 1), angleDeg: roll)
+}
+
+/// Ground-truth world_from_camera of a static camera looking at a head rotated by R about its center c
+/// (world = camera frame of the frontal view): p_world = R^T (p_cam - c) + c.
+func headPoseInWorld(_ r: Rigid, center: V3) -> Rigid {
+    let rt = r.inverse
+    return Rigid(r: rt.r, t: center - rt.rotate(center))
 }
 
 /// 26 directions: cube faces, edges and corners.
