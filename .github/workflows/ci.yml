@@ -1,0 +1,128 @@
+# License: Apache 2.0. See LICENSE file in root directory.
+#
+# Builds the patched librealsense SDK (cached), the camera helper and the Swift package, runs the test suites
+# (no camera: synthetic data and generated datasets), smoke-tests ifscan and bundles the app.
+# Read-only token, no secrets: safe for pull requests from forks.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test (Apple Silicon, Xcode 27)
+    # Since Xcode 27, GitHub names its macOS images after the major Xcode version instead of the OS: there is no
+    # "macos-27" label. "xcode-27" is the generally available (2026-10-15) GitHub-hosted image with macOS 27 and the
+    # Xcode 27.x toolchains, Apple Silicon only ("xcode-27-xlarge" is the paid larger variant of the same image).
+    # In its October 2026 releases the image reports macOS 27.0.1 with Xcode 27.0, 27.1 and 27.2 installed, so the
+    # job selects the newest Xcode 27 (the macOS 27.2 SDK matches the package's deployment target) and warns while
+    # the image's macOS is older than the 27.2 the app requires to run. Nothing here needs a camera or root.
+    # (actionlint <= 1.7.12 does not know the xcode-* labels yet and reports them as unknown.)
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "27.2"
+    steps:
+      - name: Check out with submodules
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Select the newest Xcode 27
+        run: |
+          set -euo pipefail
+          # Prefer released Xcodes; fall back to a beta/RC only when no release is installed.
+          candidates="$(find /Applications -maxdepth 1 -name 'Xcode_27*.app' | sort -V)"
+          xcode="$(printf '%s\n' "$candidates" | grep -viE 'beta|_rc|release_candidate' | tail -n 1 || true)"
+          [ -n "$xcode" ] || xcode="$(printf '%s\n' "$candidates" | tail -n 1)"
+          if [ -n "$xcode" ]; then
+            sudo xcode-select --switch "$xcode/Contents/Developer"
+          fi
+          echo "Xcode: $(xcode-select -p)"
+          xcodebuild -version
+          swift --version
+          cmake --version | head -n 1
+          os="$(sw_vers -productVersion)"
+          echo "macOS $os ($(uname -m))"
+          if [ "$(printf '%s\n27.2\n' "$os" | sort -V | head -n 1)" != "27.2" ]; then
+            echo "::warning::The runner image runs macOS $os; IntelFaceScan targets macOS 27.2+ (tests still run here)."
+          fi
+
+      # The SDK build takes most of the job: cache build/sdk/install keyed on the librealsense submodule commit, the
+      # patches and the build script. Restore and save are separate steps so a failing test does not lose the cache.
+      - name: Compute the SDK cache key
+        id: sdk-key
+        run: |
+          set -euo pipefail
+          echo "librealsense=$(git rev-parse HEAD:third_party/librealsense)" >> "$GITHUB_OUTPUT"
+      - name: Restore the librealsense build
+        id: sdk-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: build/sdk/install
+          key: librealsense-v1-${{ runner.os }}-${{ runner.arch }}-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ steps.sdk-key.outputs.librealsense }}-${{ hashFiles('patches/**', 'scripts/build-sdk.sh', 'scripts/apply-patches.sh') }}
+      - name: Mark the restored SDK as current
+        if: steps.sdk-cache.outputs.cache-hit == 'true'
+        # build-sdk.sh rebuilds when the library is older than patches/ (whose mtime is the checkout time); the cache
+        # key already pins the submodule commit and the patches.
+        run: touch build/sdk/install/lib/librealsense2*.dylib
+      - name: Build librealsense 2.58.4 with the macOS patches
+        run: scripts/build-sdk.sh
+      - name: Save the librealsense build
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: build/sdk/install
+          key: ${{ steps.sdk-cache.outputs.cache-primary-key }}
+
+      - name: Build the camera helper
+        run: |
+          set -euo pipefail
+          cmake -S helper -B build/helper -DCMAKE_BUILD_TYPE=Release \
+            -DIFS_SDK_DIR="$PWD/build/sdk/install" -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
+          cmake --build build/helper -j "$(sysctl -n hw.ncpu)"
+
+      - name: Build the Swift package
+        run: swift build
+
+      - name: Run the tests
+        run: scripts/test.sh
+
+      - name: Smoke-test ifscan on a synthetic scan
+        run: |
+          set -euo pipefail
+          ifscan="$(swift build --show-bin-path)/ifscan"
+          "$ifscan" synth -o build/ci/synthetic.ifsdataset --width 640 --height 400 --gt-mesh build/ci/ground_truth.obj
+          "$ifscan" info build/ci/synthetic.ifsdataset
+          "$ifscan" info build/ci/ground_truth.obj
+
+      - name: Build the release configuration and bundle the app
+        run: |
+          set -euo pipefail
+          swift build -c release
+          SWIFT_CONFIG=release scripts/bundle-app.sh
+          if [ -d build/IntelFaceScan.app ]; then
+            ditto -c -k --keepParent build/IntelFaceScan.app build/IntelFaceScan.zip
+          fi
+
+      - name: Upload the app bundle
+        if: hashFiles('build/IntelFaceScan.zip') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: IntelFaceScan-${{ github.sha }}
+          path: build/IntelFaceScan.zip
+          if-no-files-found: warn
+          retention-days: 14
