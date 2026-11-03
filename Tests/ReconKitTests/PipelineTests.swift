@@ -182,14 +182,11 @@ struct PipelineTests {
     }
 }
 
-/// Performance of the full pipeline on a scan the size of a real one (40 keyframes at 1280x800, 0.75 mm voxels).
-/// Opt-in: IFS_BENCH=1 scripts/test.sh -c release --filter PipelineBenchmark
-@Suite("PipelineBenchmark", .enabled(if: ProcessInfo.processInfo.environment["IFS_BENCH"] == "1"))
+/// Opt-in benchmarks on a scan the size of a real one (40 keyframes at 1280x800):
+///   IFS_BENCH=1 scripts/test.sh -c release --filter PipelineBenchmark
+@Suite("PipelineBenchmark", .enabled(if: ProcessInfo.processInfo.environment["IFS_BENCH"] == "1"), .serialized)
 struct PipelineBenchmark {
-    @Test func fortyKeyframesAt1280x800() async throws {
-        var o = SynthScanOptions()
-        o.width = 1280
-        o.height = 800
+    static let views: [(ScanPose, Double, Double)] = {
         let base: [(ScanPose, Double, Double)] = [(.front, 0, 0), (.up, 0, 25), (.down, 0, -25), (.left, 45, 0), (.right, -45, 0),
                                                    (.upLeft, 30, 20), (.upRight, -30, 20), (.downLeft, 30, -20), (.downRight, -30, -20)]
         var views: [(ScanPose, Double, Double)] = []
@@ -198,21 +195,110 @@ struct PipelineBenchmark {
             let count = pose == .front ? 8 : 4
             for _ in 0 ..< count { views.append((pose, yaw + 1.5 * rng.gaussian(), pitch + 1.5 * rng.gaussian())) }
         }
+        return views
+    }()
+
+    static let scan: SynthScan = {
+        var o = SynthScanOptions()
+        o.width = 1280
+        o.height = 800
         o.views = views
-        let renderStart = Date()
-        let scan = makeSyntheticScan(o)
-        let renderTime = Date().timeIntervalSince(renderStart)
-        var options = ReconstructionOptions()
-        options.voxelSizeMM = 0.75
+        return makeSyntheticScan(o)
+    }()
+
+    struct Quality {
+        var mean = 0.0, p95 = 0.0, nose = 0.0, boundaryEdges = 0, measured = 0
+    }
+
+    /// Surface error against the true head (the world is the camera frame of keyframe 0, whose head pose is
+    /// jittered), the error around the nose (fine detail), and boundary edges (holes and open borders).
+    static func quality(_ mesh: ReconMesh) -> Quality {
+        let t = scan.truth[0]
+        let r = simd_float3x3(SIMD3(t.columns.0.x, t.columns.0.y, t.columns.0.z), SIMD3(t.columns.1.x, t.columns.1.y, t.columns.1.z),
+                              SIMD3(t.columns.2.x, t.columns.2.y, t.columns.2.z))
+        var errors: [Double] = [], nose: [Double] = []
+        let noseTip = scan.center + P3(0, 0.012, -0.113)
+        for i in stride(from: 0, to: mesh.vertexCount, by: 3) {
+            let q = t * SIMD4(mesh.positions[i], 1)
+            let p = P3(SIMD3(q.x, q.y, q.z))
+            guard let d = distanceToHead(p, normal: P3(r * mesh.normals[i]), center: scan.center) else { continue }
+            errors.append(d)
+            if (p - noseTip).length < 0.02 { nose.append(d) }
+        }
+        errors.sort()
+        var edges: [UInt64: Int] = [:]
+        for k in 0 ..< mesh.triangleCount {
+            let tri = [mesh.indices[3 * k], mesh.indices[3 * k + 1], mesh.indices[3 * k + 2]]
+            for e in 0 ..< 3 {
+                let a = UInt64(tri[e]), b = UInt64(tri[(e + 1) % 3])
+                edges[min(a, b) << 32 | max(a, b), default: 0] += 1
+            }
+        }
+        var q = Quality()
+        q.measured = errors.count
+        q.mean = errors.isEmpty ? .nan : errors.reduce(0, +) / Double(errors.count)
+        q.p95 = errors.isEmpty ? .nan : errors[errors.count * 95 / 100]
+        q.nose = nose.isEmpty ? .nan : nose.reduce(0, +) / Double(nose.count)
+        q.boundaryEdges = edges.values.filter { $0 == 1 }.count
+        return q
+    }
+
+    static func run(_ options: ReconstructionOptions) async throws -> (ReconstructionResult, Double) {
         let start = Date()
         let result = try await ReconstructionPipeline(options: options).run(scan.capture)
-        let elapsed = Date().timeIntervalSince(start)
+        return (result, Date().timeIntervalSince(start))
+    }
+
+    @Test func fortyKeyframesAt1280x800() async throws {
+        var options = ReconstructionOptions()
+        options.voxelSizeMM = 0.75
+        let (result, elapsed) = try await Self.run(options)
         var worst = 0.0
-        for (pose, truth) in zip(result.cameraPoses, scan.truth) { worst = max(worst, PipelineTests.misalignment(pose, truth, center: scan.center)) }
-        print("benchmark: \(views.count) keyframes 1280x800 rendered in \(renderTime) s; pipeline \(elapsed) s; "
+        var perFrame: [String] = []
+        // The world is the camera frame of the first frontal keyframe, whose head pose is jittered here.
+        for (k, (pose, truth)) in zip(result.cameraPoses, Self.scan.truth).enumerated() {
+            let e = PipelineTests.misalignment(pose, Self.scan.truth[0].inverse * truth, center: Self.scan.center)
+            worst = max(worst, e)
+            perFrame.append(String(format: "%d:%@ %.2f", k, Self.views[k].0.rawValue, e * 1000))
+        }
+        print("benchmark per-frame misalignment (mm): \(perFrame.joined(separator: ", "))")
+        print("benchmark: \(Self.views.count) keyframes 1280x800; pipeline \(elapsed) s; "
             + "durations \(result.report.durations.sorted { $0.key < $1.key }); GPU \(result.report.usedGPU); "
             + "\(result.report.vertexCount) vertices; worst misalignment \(worst * 1000) mm; notes \(result.report.notes)")
         #expect(elapsed < 60)
-        #expect(result.report.usedFrames == views.count)
+        #expect(result.report.usedFrames == Self.views.count)
+        #expect(worst < 0.0015)
+    }
+
+    /// TSDF (GPU / CPU, several voxel sizes) against screened Poisson on the same scan (docs/RECONSTRUCTION.md).
+    @Test func tsdfVersusPoisson() async throws {
+        var rows: [String] = ["| method | setting | time total (s) | surface (s) | vertices | mean error (mm) | p95 (mm) | nose (mm) | boundary edges |",
+                              "|---|---|---|---|---|---|---|---|---|"]
+        func row(_ name: String, _ setting: String, _ r: ReconstructionResult, _ elapsed: Double) {
+            let q = Self.quality(r.mesh)
+            let surface = (r.report.durations["fusion"] ?? 0) + (r.report.durations["poisson"] ?? 0)
+            rows.append(String(format: "| %@ | %@ | %.2f | %.2f | %d | %.3f | %.3f | %.3f | %d |", name, setting, elapsed, surface,
+                               r.mesh.vertexCount, q.mean * 1000, q.p95 * 1000, q.nose * 1000, q.boundaryEdges))
+        }
+        for voxel: Float in [1.0, 0.75, 0.5] {
+            var o = ReconstructionOptions()
+            o.voxelSizeMM = voxel
+            let (r, t) = try await Self.run(o)
+            row("TSDF (Metal)", String(format: "voxel %.2f mm", voxel), r, t)
+        }
+        var cpu = ReconstructionOptions()
+        cpu.voxelSizeMM = 0.75
+        cpu.useGPU = false
+        let (rc, tc) = try await Self.run(cpu)
+        row("TSDF (CPU)", "voxel 0.75 mm", rc, tc)
+        for depth in [9, 10, 11] {
+            var o = ReconstructionOptions()
+            o.method = .poisson
+            o.poissonDepth = depth
+            o.voxelSizeMM = 0.75
+            let (r, t) = try await Self.run(o)
+            row("Poisson", "depth \(depth)", r, t)
+        }
+        print("comparison:\n" + rows.joined(separator: "\n"))
     }
 }

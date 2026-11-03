@@ -110,6 +110,29 @@ struct ReconFusionTests {
         #expect(dark < mesh.vertexCount / 100)
     }
 
+    @Test func noisySphereGivesManifoldConsistentlyOrientedMesh() throws {
+        // Depth noise makes ambiguous cube configurations common; their triangles must never overlap a neighbor's.
+        let poses = lookAtPoses(target: Self.center, distance: 0.45, directions: cubeDirections)
+        let views = poses.enumerated().map { i, pose in
+            render(SphereScene(center: Self.center, radius: Self.radius), camera: Self.camera, worldFromCamera: pose,
+                   noiseAt1m: 0.012, seed: UInt64(50 + i))
+        }
+        let (mesh, _) = try Self.fuse(views, params: Self.tsdfParams(voxel: 0.0007, gpu: true))
+        var undirected: [UInt64: Int] = [:]
+        var directed = Set<UInt64>()
+        var duplicateDirected = 0
+        for t in 0 ..< mesh.triangleCount {
+            let (a, b, c) = mesh.triangle(t)
+            for (u, v) in [(a, b), (b, c), (c, a)] {
+                undirected[UInt64(min(u, v)) << 32 | UInt64(max(u, v)), default: 0] += 1
+                if !directed.insert(UInt64(u) << 32 | UInt64(v)).inserted { duplicateDirected += 1 }
+            }
+        }
+        #expect(mesh.triangleCount > 20000)
+        #expect(undirected.values.allSatisfy { $0 <= 2 }, "every edge has at most two triangles")
+        #expect(duplicateDirected == 0, "neighboring triangles have opposite edge directions")
+    }
+
     @Test func gpuAndCpuPathsAgree() throws {
         let views = Array(Self.sphereViews.prefix(10))
         let (gpuMesh, usedGPU) = try Self.fuse(views, params: Self.tsdfParams(voxel: 0.001, gpu: true))

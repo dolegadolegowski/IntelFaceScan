@@ -58,6 +58,9 @@ struct Tables
                     return e;
             throw std::logic_error( "marching cubes: corners are not adjacent" );
         };
+        for( int f = 0; f < 6; ++f )
+            for( int k = 0; k < 4; ++k )
+                edge_faces[edge_between( kFaces[f][k], kFaces[f][( k + 1 ) % 4] )] |= 1 << f;
         for( int config = 0; config < 256; ++config )
         {
             auto inside = [&]( int corner ) { return ( config >> corner ) & 1; };
@@ -94,10 +97,63 @@ struct Tables
                     used[e] = true;
                     loop.push_back( e );
                 }
-                for( size_t i = 1; i + 1 < loop.size(); ++i )
-                    tris.insert( tris.end(), { int8_t( loop[0] ), int8_t( loop[i] ), int8_t( loop[i + 1] ) } );
+                if( ! triangulate( loop, tris ) )
+                {
+                    ++untriangulated;
+                    for( size_t i = 1; i + 1 < loop.size(); ++i )
+                        tris.insert( tris.end(), { int8_t( loop[0] ), int8_t( loop[i] ), int8_t( loop[i + 1] ) } );
+                }
             }
         }
+    }
+
+    // Loops without a triangulation free of in-face diagonals (none for this contour rule: every configuration
+    // triangulates with at most 5 triangles; the tests check the output is manifold).
+    int untriangulated = 0;
+
+private:
+    int edge_faces[12] = {};
+
+    // A diagonal between two loop vertices on a common cube face would lie in that face, where the neighboring cube
+    // triangulates as well: the surfaces would overlap and share edges between more than two triangles. Searches for
+    // a triangulation of the loop (kept in order, so triangles stay counter-clockwise) without such diagonals.
+    bool triangulate( const std::vector< int > & loop, std::vector< int8_t > & out ) const
+    {
+        std::vector< int8_t > result;
+        if( ! triangulate_polygon( loop, result ) )
+            return false;
+        out.insert( out.end(), result.begin(), result.end() );
+        return true;
+    }
+
+    bool valid_diagonal( int a, int b ) const { return ( edge_faces[a] & edge_faces[b] ) == 0; }
+
+    bool triangulate_polygon( const std::vector< int > & poly, std::vector< int8_t > & out ) const
+    {
+        const size_t n = poly.size();
+        if( n < 3 )
+            return true;
+        if( n == 3 )
+        {
+            out.insert( out.end(), { int8_t( poly[0] ), int8_t( poly[1] ), int8_t( poly[2] ) } );
+            return true;
+        }
+        // The triangle on side (poly[0], poly[1]) has some apex k; it splits the rest into two smaller polygons.
+        for( size_t k = 2; k < n; ++k )
+        {
+            if( ( k != 2 && ! valid_diagonal( poly[1], poly[k] ) ) || ( k != n - 1 && ! valid_diagonal( poly[k], poly[0] ) ) )
+                continue;
+            std::vector< int8_t > tris { int8_t( poly[0] ), int8_t( poly[1] ), int8_t( poly[k] ) };
+            const std::vector< int > right( poly.begin() + 1, poly.begin() + std::ptrdiff_t( k ) + 1 );
+            std::vector< int > left( poly.begin() + std::ptrdiff_t( k ), poly.end() );
+            left.push_back( poly[0] );
+            if( triangulate_polygon( right, tris ) && triangulate_polygon( left, tris ) )
+            {
+                out.insert( out.end(), tris.begin(), tris.end() );
+                return true;
+            }
+        }
+        return false;
     }
 };
 
