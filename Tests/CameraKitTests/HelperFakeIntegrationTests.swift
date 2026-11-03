@@ -331,6 +331,24 @@ struct HelperFakeIntegrationTests {
         #expect(client.process.waitForExit(timeout: 5) && client.process.exitStatus == 0)
     }
 
+    @Test func burstsOfCommandsAreQueuedNotRefused() throws {
+        // e.g. a slider sending option changes at display rate while a slow command runs
+        let client = try RawHelperClient(helper: helper)
+        var ids: [UInt64] = []
+        for i in 0..<500 {
+            ids.append(try client.send(HelperMessageType.setOption.rawValue,
+                                       ["sensor": "depth", "option": "Laser Power", "value": (i % 13) * 30]))
+        }
+        var answered = Set<UInt64>()
+        while answered.count < ids.count {
+            let message = try #require(try client.read(until: .reply))
+            let object = try #require(try JSONSerialization.jsonObject(with: message.json) as? [String: Any])
+            #expect(object["ok"] as? Bool == true)
+            if let id = (object["request_id"] as? NSNumber)?.uint64Value { answered.insert(id) }
+        }
+        #expect(answered == Set(ids))
+    }
+
     @Test func protocolViolationsCloseTheConnection() throws {
         // A broken header.
         var client = try RawHelperClient(helper: helper)

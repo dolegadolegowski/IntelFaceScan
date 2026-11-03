@@ -80,11 +80,15 @@ the camera is re-plugged. The termination check runs between commands.
 | `fake_engine.*` | the synthetic camera |
 
 Threads: the main thread waits on the kqueue and runs every command, one at a time; the reader thread receives and
-validates messages (at most 64 unanswered commands); the writer thread sends one ordered queue. Engine callbacks
+validates messages (at most 1024 unanswered commands or 16 MiB of them); the writer thread sends one ordered queue. Engine callbacks
 (librealsense threads) only build messages and queue them. A frameset becomes header + JSON + one `iovec` per plane
 pointing into the engine's frame memory (kept alive until written; no copy); `offset`/`bytes` of each plane are filled
 in here. At most **2 framesets** wait to be sent: a third replaces the oldest queued one. Replies, events, logs and
 BYE are never dropped. Socket buffers are 4 MiB so a 5 MB frameset is not moved in 8 KiB steps.
+
+Measured with the fake camera (M-series Mac, 1280×800 RGB8 + aligned Z16, 5.1 MB per frameset): 30 fps sustained,
+median 2.5–4 ms from the helper creating a frameset to the decoded `CameraFrame` in the app, about 1 ms of app CPU
+per frameset (the reader reuses one receive buffer and copies the planes out once).
 
 Command validation is strict: every command needs an unsigned `request_id` (otherwise the connection is closed),
 fields other than the documented ones are an error reply (`unknown field 'x'`), types are checked (`x` of SET_ROI must
@@ -167,7 +171,7 @@ with `SMAppService` and code-signing requirements on both sides – planned for 
 |---|---|
 | The root helper connects to an attacker's socket | path must be absolute and canonical; every component is opened with `O_NOFOLLOW` from `/`; the final directory must be owned by `--uid` with mode exactly 0700; the socket itself must be a socket owned by `--uid`; the connection is made relative to the verified directory descriptor (`fchdir` + relative `sun_path`, no TOCTOU on the path); then peer uid = `--uid` and peer pid = `--parent-pid` |
 | Something else connects to the app | the socket directory is private to the user; one connection is accepted and listening stops; peer uid (0 for live) and executable identity (`proc_pidpath`, device + inode) are checked |
-| Hostile messages | header validated by the shared C code (magic, version, flags, 256 KiB JSON, 64 MiB payload); commands may not carry payloads; JSON must be an object; unknown fields and wrong types are errors; at most 64 queued commands; no exceptions escape (C++ `noexcept` paths, error replies) |
+| Hostile messages | header validated by the shared C code (magic, version, flags, 256 KiB JSON, 64 MiB payload); commands may not carry payloads; JSON must be an object; unknown fields and wrong types are errors; at most 1024 queued commands (16 MiB); every exception of a command becomes its error reply, and nothing thrown in the IPC layer reaches a librealsense thread |
 | File system access as root | the helper never opens, creates or deletes a path from the app. A recording goes to `mkdtemp` inside root's own Darwin temporary directory (`/var/folders/zz/…/T`, verified root-owned and not accessible to others; fallback `/private/var/run/IntelFaceScanHelper`), and is copied into the descriptor the app opened as itself (`SCM_RIGHTS`, only with `RECORD_START`, only on its first byte, must be a regular file open for writing; any other descriptor is closed and the connection dropped), then the spool is removed without following links |
 | Environment and inherited state | the app starts the helper with `env -i` (no `DYLD_*` or other variables reach root); the helper still clears its environment to a fixed `PATH`/`HOME`, sets `umask 077`, closes every inherited descriptor above 2 and points stdin at `/dev/null`; no `system()`, no shell, no `exec` |
 | Unprivileged modes used to gain or misuse privileges | playback and fake refuse to run as root and require `--uid` to be the caller |

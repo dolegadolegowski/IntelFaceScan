@@ -49,6 +49,7 @@ struct InMessage
     uint64_t request_id = 0;  // valid when has_request_id
     bool has_request_id = false;
     UniqueFd fd;              // only for IFS_CMD_RECORD_START
+    size_t json_bytes = 0;    // size on the wire, for the bound on queued commands
 };
 
 enum class ReadResult

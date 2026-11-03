@@ -26,8 +26,10 @@ class Connection
 {
 public:
     static constexpr size_t kMaxPendingFramesets = 2;
-    // A peer that queues this many unanswered commands is not the app (which waits for its replies).
-    static constexpr size_t kMaxPendingCommands = 64;
+    // Commands queue up while a slow one runs (advanced mode re-enumerates the camera for seconds) and a UI may send
+    // option changes at display rate meanwhile; far beyond that the peer is not the app.
+    static constexpr size_t kMaxPendingCommands = 1024;
+    static constexpr size_t kMaxPendingCommandBytes = 16 * 1024 * 1024;
 
     // 'wake' is called from the reader/writer threads whenever a command arrived or the connection broke.
     Connection( UniqueFd sock, std::function< void() > wake );
@@ -78,6 +80,7 @@ private:
     bool closing_ = false;
     bool writer_done_ = false;
     std::deque< InMessage > in_;
+    size_t in_bytes_ = 0;
     bool broken_ = false;
     std::string broken_reason_;
     uint64_t sent_framesets_ = 0;

@@ -189,6 +189,7 @@ ReadResult read_message( int sock, InMessage & out, std::string & error )
         return ReadResult::error;
     }
     out.type = header.type;
+    out.json_bytes = json.size();
     auto id = out.body.find( "request_id" );
     if( id != out.body.end() && id->is_number_unsigned() )
     {

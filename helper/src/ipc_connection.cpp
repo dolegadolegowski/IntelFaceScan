@@ -77,6 +77,7 @@ std::optional< InMessage > Connection::pop_command()
         return std::nullopt;
     InMessage msg = std::move( in_.front() );
     in_.pop_front();
+    in_bytes_ -= msg.json_bytes;
     return msg;
 }
 
@@ -167,10 +168,13 @@ void Connection::reader_loop()
             std::lock_guard< std::mutex > lock( mutex_ );
             if( closing_ || broken_ )
                 return;
-            if( in_.size() >= kMaxPendingCommands )
+            if( in_.size() >= kMaxPendingCommands || in_bytes_ + msg.json_bytes > kMaxPendingCommandBytes )
                 overflow = true;
             else
+            {
+                in_bytes_ += msg.json_bytes;
                 in_.push_back( std::move( msg ) );
+            }
         }
         if( overflow )
         {
