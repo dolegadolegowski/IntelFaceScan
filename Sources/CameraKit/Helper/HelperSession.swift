@@ -124,6 +124,7 @@ final class HelperCameraSession: @unchecked Sendable {
         return try await withTaskCancellationHandler {
             try await task.value
         } onCancel: {
+            task.cancel()
             self.abortStart()
         }
     }
@@ -222,7 +223,7 @@ final class HelperCameraSession: @unchecked Sendable {
             if cancelled { throw CancellationError() }
         } catch {
             _ = try? await Self.blocking { self.stop(session, timeout: 15) }
-            throw error
+            throw Task.isCancelled ? CancellationError() : error
         }
         // From here the helper stays up even when the device query fails (e.g. no camera plugged in yet): the next
         // connect() asks again without another password prompt.

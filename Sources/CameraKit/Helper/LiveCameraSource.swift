@@ -60,7 +60,10 @@ public final class LiveCameraSource: CameraSource, @unchecked Sendable {
         try HelperLauncher.checkExecutable(helper)
         let handle = HelperLauncher.launchPrivileged(helper: helper, arguments: ["--release", "-w"])
         return try await HelperCameraSession.blocking {
-            handle.waitForExit(timeout: .infinity)
+            // The prompt waits for the user; the release itself takes seconds.
+            guard handle.waitForExit(timeout: 3600) else {
+                throw CameraError.timeout("releasing the camera")
+            }
             if let error = handle.launchError { throw error }
             if let status = handle.exitStatus, status != 0 {
                 throw CameraError.commandFailed("Releasing the camera failed (status \(status)): \(handle.diagnostics)")

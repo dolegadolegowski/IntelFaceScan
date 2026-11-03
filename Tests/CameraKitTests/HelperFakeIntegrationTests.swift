@@ -152,6 +152,23 @@ struct HelperFakeIntegrationTests {
         await source.shutdown()
     }
 
+    @Test func cancelledConnectCleansUp() async throws {
+        let source = FakeCameraSource(helperURL: helper)
+        let attempt = Task { try await source.connect() }
+        attempt.cancel()
+        do {
+            _ = try await attempt.value
+            // The helper may have been faster than the cancellation; then it is simply connected.
+            #expect(source.isConnected)
+        } catch {
+            #expect(error is CancellationError || error is CameraError, "\(error)")
+        }
+        await source.shutdown()
+        #expect(!source.isConnected)
+        #expect(try await source.connect().source == "fake")
+        await source.shutdown()
+    }
+
     @Test func hardwareResetReconnects() async throws {
         let source = FakeCameraSource(helperURL: helper)
         let events = EventRecorder(source.events())
