@@ -148,8 +148,8 @@ private func depthMesh(_ frame: CameraFrame, worldFromCamera: simd_float4x4) -> 
         let cloud = depthMesh(frame, worldFromCamera: pose)
         #expect(cloud.triangleCount > 3_000)
         let d = try MeshEvaluation.distance(from: cloud, to: result.groundTruthMesh, samples: 30_000)
-        #expect(d.meanMM < 0.06, "\(kf.scanPose): \(d)")
-        #expect(d.p95MM < 0.15, "\(kf.scanPose): \(d)")
+        #expect(d.meanMm < 0.06, "\(kf.scanPose): \(d)")
+        #expect(d.p95Mm < 0.15, "\(kf.scanPose): \(d)")
     }
 }
 

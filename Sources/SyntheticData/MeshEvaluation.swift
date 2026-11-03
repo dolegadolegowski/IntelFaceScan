@@ -10,16 +10,16 @@ import simd
 
 /// One-sided surface distance statistics (millimeters).
 public struct SurfaceDistance: Codable, Sendable, Equatable {
-    public var meanMM: Double
-    public var rmsMM: Double
-    public var medianMM: Double
-    public var p95MM: Double
-    public var maxMM: Double
+    public var meanMm: Double
+    public var rmsMm: Double
+    public var medianMm: Double
+    public var p95Mm: Double
+    public var maxMm: Double
     public var samples: Int
 
-    public init(meanMM: Double, rmsMM: Double, medianMM: Double, p95MM: Double, maxMM: Double, samples: Int) {
-        self.meanMM = meanMM; self.rmsMM = rmsMM; self.medianMM = medianMM
-        self.p95MM = p95MM; self.maxMM = maxMM; self.samples = samples
+    public init(meanMm: Double, rmsMm: Double, medianMm: Double, p95Mm: Double, maxMm: Double, samples: Int) {
+        self.meanMm = meanMm; self.rmsMm = rmsMm; self.medianMm = medianMm
+        self.p95Mm = p95Mm; self.maxMm = maxMm; self.samples = samples
     }
 }
 
@@ -52,9 +52,9 @@ public enum MeshEvaluation {
         defer { fr_mesh_free(b) }
         var stats = fr_distance_stats()
         try check(fr_mesh_distance(a, b, UInt32(samples), &stats))
-        return SurfaceDistance(meanMM: stats.mean_m * unitsToMM, rmsMM: stats.rms_m * unitsToMM,
-                               medianMM: stats.median_m * unitsToMM, p95MM: stats.p95_m * unitsToMM,
-                               maxMM: stats.max_m * unitsToMM, samples: Int(stats.samples))
+        return SurfaceDistance(meanMm: stats.mean_m * unitsToMM, rmsMm: stats.rms_m * unitsToMM,
+                               medianMm: stats.median_m * unitsToMM, p95Mm: stats.p95_m * unitsToMM,
+                               maxMm: stats.max_m * unitsToMM, samples: Int(stats.samples))
     }
 
     /// Plane through points (meters); RANSAC-robust when ransacThresholdM > 0.
