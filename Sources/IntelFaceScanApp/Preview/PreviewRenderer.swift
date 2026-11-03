@@ -124,25 +124,60 @@ final class PreviewRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             return
         }
         if let index {
-            let slot = slots[index]
-            if let color = slot.color {
-                var uniforms = Uniforms(width: UInt32(slot.width), height: UInt32(slot.height),
-                                        colorStride: UInt32(slot.width * 3),
-                                        mode: slot.hasDepth ? Self.modeIndex(settings.mode) : 0,
-                                        mirror: settings.mirrored ? 1 : 0, hasDepth: slot.hasDepth ? 1 : 0,
-                                        depthScale: slot.depthScale, nearM: settings.nearM,
-                                        farM: max(settings.farM, settings.nearM + 0.01), blend: settings.blend)
-                encoder.setRenderPipelineState(pipeline)
-                encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
-                encoder.setFragmentBuffer(color, offset: 0, index: 1)
-                encoder.setFragmentBuffer(slot.depth ?? color, offset: 0, index: 2)
-                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            }
+            encodeImage(slots[index], settings: settings, into: encoder)
             commands.addCompletedHandler { [weak self] _ in self?.release(index) }
         }
         encoder.endEncoding()
         commands.present(drawable)
         commands.commit()
+    }
+
+    private func encodeImage(_ slot: Slot, settings: PreviewDisplay, into encoder: MTLRenderCommandEncoder) {
+        guard let color = slot.color else { return }
+        var uniforms = Uniforms(width: UInt32(slot.width), height: UInt32(slot.height),
+                                colorStride: UInt32(slot.width * 3),
+                                mode: slot.hasDepth ? Self.modeIndex(settings.mode) : 0,
+                                mirror: settings.mirrored ? 1 : 0, hasDepth: slot.hasDepth ? 1 : 0,
+                                depthScale: slot.depthScale, nearM: settings.nearM,
+                                farM: max(settings.farM, settings.nearM + 0.01), blend: settings.blend)
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+        encoder.setFragmentBuffer(color, offset: 0, index: 1)
+        encoder.setFragmentBuffer(slot.depth ?? color, offset: 0, index: 2)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    }
+
+    /// Renders a frame into an offscreen BGRA image with the same shaders (snapshots and shader checks).
+    func renderOffscreen(_ frame: CameraFrame, display settings: PreviewDisplay, width: Int, height: Int) -> CGImage? {
+        guard frame.color.isValidRGB8, width > 0, height > 0 else { return nil }
+        let slot = Slot()
+        guard upload(frame, into: slot) else { return nil }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height,
+                                                                  mipmapped: false)
+        descriptor.usage = [.renderTarget]
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor), let commands = queue.makeCommandBuffer() else {
+            return nil
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return nil }
+        encodeImage(slot, settings: settings, into: encoder)
+        encoder.endEncoding()
+        commands.commit()
+        commands.waitUntilCompleted()
+        guard commands.status == .completed else { return nil }
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        texture.getBytes(&bytes, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData) else { return nil }
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                       space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                                    | CGBitmapInfo.byteOrder32Little.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
     }
 
     // MARK: - Frame thread

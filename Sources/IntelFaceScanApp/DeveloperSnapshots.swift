@@ -55,8 +55,76 @@ enum DeveloperSnapshots {
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(fixture.model(screen: .preview))
         if !write(sidebar, to: directory.appendingPathComponent("sidebar.png")) { failures += 1 }
+        failures += checkPreviewShaders(fixture.model(screen: .preview).renderer, directory: directory)
         print("snapshots written to \(directory.path)\(failures > 0 ? " (\(failures) failed)" : "")")
         return failures == 0 ? 0 : 1
+    }
+
+    /// Renders a synthetic frame through the preview shaders and checks orientation, mirroring and the depth
+    /// colors: left half red / right half blue, a green band at the top; depth 0.4 m left, 1.0 m right, no depth
+    /// in the bottom-right quadrant. Returns the number of failed checks.
+    private static func checkPreviewShaders(_ renderer: PreviewRenderer?, directory: URL) -> Int {
+        guard let renderer else {
+            FileHandle.standardError.write(Data("no Metal renderer\n".utf8))
+            return 1
+        }
+        let w = 160, h = 100
+        var rgb = [UInt8](repeating: 0, count: w * h * 3)
+        var depth = [UInt16](repeating: 0, count: w * h)
+        for y in 0 ..< h {
+            for x in 0 ..< w {
+                let i = y * w + x
+                let c: (UInt8, UInt8, UInt8) = y < 10 ? (0, 255, 0) : (x < w / 2 ? (255, 0, 0) : (0, 0, 255))
+                rgb[3 * i] = c.0; rgb[3 * i + 1] = c.1; rgb[3 * i + 2] = c.2
+                depth[i] = x < w / 2 ? 4000 : (y < h / 2 ? 10000 : 0)
+            }
+        }
+        let k = Intrinsics(width: w, height: h, fx: 80, fy: 80, ppx: 80, ppy: 50)
+        let frame = CameraFrame(sequence: 1, timestampMs: 1,
+                                color: ColorImage(width: w, height: h, bytesPerRow: w * 3, pixels: Data(rgb), intrinsics: k),
+                                alignedDepth: DepthImage(width: w, height: h, pixels: depth.withUnsafeBytes { Data($0) },
+                                                         depthScale: 0.0001, intrinsics: k))
+        var failures = 0
+        func check(_ name: String, _ condition: Bool) {
+            if !condition {
+                failures += 1
+                FileHandle.standardError.write(Data("preview shader check failed: \(name)\n".utf8))
+            }
+        }
+        func render(_ name: String, _ display: PreviewDisplay) -> (Int, Int) -> (r: Int, g: Int, b: Int) {
+            guard let image = renderer.renderOffscreen(frame, display: display, width: w, height: h),
+                  let data = image.dataProvider?.data as Data? else {
+                check("\(name) rendered", false)
+                return { _, _ in (0, 0, 0) }
+            }
+            if let destination = CGImageDestinationCreateWithURL(directory.appendingPathComponent("metal-\(name).png") as CFURL,
+                                                                 UTType.png.identifier as CFString, 1, nil) {
+                CGImageDestinationAddImage(destination, image, nil)
+                CGImageDestinationFinalize(destination)
+            }
+            let rowBytes = image.bytesPerRow
+            return { x, y in
+                let o = y * rowBytes + x * 4   // BGRA in memory
+                return (Int(data[o + 2]), Int(data[o + 1]), Int(data[o]))
+            }
+        }
+        let color = render("color", PreviewDisplay(mode: .color, mirrored: false))
+        check("color left is red", color(20, 60).r > 240 && color(20, 60).b < 15)
+        check("color right is blue", color(140, 60).b > 240 && color(140, 60).r < 15)
+        check("color top is green", color(80, 3).g > 240)
+        let mirrored = render("mirrored", PreviewDisplay(mode: .color, mirrored: true))
+        check("mirrored left is blue", mirrored(20, 60).b > 240)
+        check("mirrored right is red", mirrored(140, 60).r > 240)
+        check("mirrored top is green", mirrored(80, 3).g > 240)
+        let depthView = render("depth", PreviewDisplay(mode: .depth, mirrored: false, nearM: 0.3, farM: 1.2))
+        let near = depthView(20, 60), far = depthView(140, 25), none = depthView(140, 80)
+        check("near depth is cool", near.b > near.r)
+        check("far depth is warm", far.r > far.b)
+        check("missing depth is dark", none.r < 30 && none.g < 30 && none.b < 30)
+        let blend = render("blend", PreviewDisplay(mode: .blend, mirrored: false, nearM: 0.3, farM: 1.2, blend: 0.5))
+        check("blend mixes color and depth", blend(20, 60).r < 250 && blend(20, 60).r > 100)
+        check("blend keeps color without depth", blend(140, 80).b > 240)
+        return failures
     }
 
     private static func write<V: View>(_ view: V, to url: URL) -> Bool {
