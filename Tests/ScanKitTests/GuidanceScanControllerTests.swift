@@ -419,6 +419,27 @@ import Testing
         #expect(manual.distanceRange == 0.4 ... 0.9)
     }
 
+    @Test func preparedIdleControllerReportsDistanceWithoutScanning() async {
+        var configuration = ScanConfiguration.offline
+        configuration.autoDistanceRange = true
+        let tracker = ScriptedTracker { _ in nil }
+        let controller = ScanController(configuration: configuration, tracker: tracker)
+        var capture = CaptureConfiguration.faceScanD455
+        capture.disparityShift = 100   // recommended range ~0.33-0.48 m
+        controller.prepare(device: GuidanceDevice.make(), captureConfiguration: capture)
+        #expect(controller.phase == .idle)
+        var sim = ScanSimulation()
+        await sim.run(controller, tracker: tracker, maxFrames: 40, until: { _ in false })
+        let last = sim.updates.last
+        #expect(last?.phase == .idle)
+        #expect(last?.distanceAdvice == .tooFar)          // 0.62 m is beyond the close-range band
+        #expect(last?.distanceRangeM == controller.distanceRange)
+        #expect(controller.keyframeCount == 0)
+        // start() keeps using the prepared camera description.
+        controller.start(device: GuidanceDevice.make(), captureConfiguration: capture)
+        #expect(controller.distanceRange == WorkingDistance.recommendedRange(device: GuidanceDevice.make(), configuration: capture))
+    }
+
     @Test func concurrentControlCallsAreSafe() async {
         let (controller, tracker) = makeController()
         let factory = GuidanceFrameFactory()

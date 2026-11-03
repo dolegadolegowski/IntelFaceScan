@@ -172,14 +172,24 @@ public final class ScanController: @unchecked Sendable {
             let generation = shared.generation &+ 1
             shared = SharedState()
             shared.generation = generation
-            shared.device = device
-            shared.captureConfiguration = captureConfiguration
-            if configuration.autoDistanceRange && (device != nil || captureConfiguration != nil) {
-                shared.distanceRange = WorkingDistance.recommendedRange(device: device, configuration: captureConfiguration)
-            } else {
-                shared.distanceRange = configuration.distanceRangeM
-            }
+            setCamera(device: device, captureConfiguration: captureConfiguration)
             shared.phase = configuration.poses.isEmpty ? .finished : .positioning
+        }
+    }
+
+    /// Sets the camera description (and with it the distance range) without starting a scan: an idle controller
+    /// still tracks the face and reports the distance advice, which the preview shows.
+    public func prepare(device: DeviceInfo?, captureConfiguration: CaptureConfiguration?) {
+        stateLock.withLock { setCamera(device: device, captureConfiguration: captureConfiguration) }
+    }
+
+    private func setCamera(device: DeviceInfo?, captureConfiguration: CaptureConfiguration?) {
+        shared.device = device
+        shared.captureConfiguration = captureConfiguration
+        if configuration.autoDistanceRange && (device != nil || captureConfiguration != nil) {
+            shared.distanceRange = WorkingDistance.recommendedRange(device: device, configuration: captureConfiguration)
+        } else {
+            shared.distanceRange = configuration.distanceRangeM
         }
     }
 
@@ -201,14 +211,15 @@ public final class ScanController: @unchecked Sendable {
         }
     }
 
-    /// Stops the scan and discards the keyframes.
+    /// Stops the scan and discards the keyframes (the camera description is kept).
     public func cancel() {
         stateLock.withLock {
-            let generation = shared.generation &+ 1
-            let range = shared.distanceRange
+            let previous = shared
             shared = SharedState()
-            shared.generation = generation
-            shared.distanceRange = range
+            shared.generation = previous.generation &+ 1
+            shared.device = previous.device
+            shared.captureConfiguration = previous.captureConfiguration
+            shared.distanceRange = previous.distanceRange
         }
     }
 
