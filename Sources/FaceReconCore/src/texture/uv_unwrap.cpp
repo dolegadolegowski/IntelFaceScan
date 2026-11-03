@@ -347,7 +347,7 @@ fr_status fr_mesh_uv_unwrap( fr_mesh * mesh, const fr_uv_params * params, fr_pro
 
         xatlas::ChartOptions charts;
         if( params->max_chart_area > 0 )
-            charts.maxChartArea = params->max_chart_area;
+            charts.maxChartArea = params->max_chart_area * to_atlas_units * to_atlas_units;  // m^2 -> atlas units
         if( params->max_cost > 0 )
             charts.maxCost = params->max_cost;
         charts.fixWinding = true;

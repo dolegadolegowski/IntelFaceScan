@@ -12,7 +12,7 @@ import Testing
 @Suite("Mesh performance", .enabled(if: ProcessInfo.processInfo.environment["IFS_PERF"] != nil))
 struct MeshPerformanceTests {
     @Test func millionTriangleCleanupAndExport() throws {
-        var mesh = MeshFactory.gridSphere(rings: 710, segments: 710)
+        var mesh = MeshFactory.gridSphere(rings: 800, segments: 800)
         var rng = TestRandom(seed: 5)
         mesh.positions = mesh.positions.map { $0 * (1 + 0.002 * rng.gaussian()) }
         mesh.colors = mesh.positions.map { p in SIMD3(UInt8(128 + 1000 * p.x), UInt8(128 + 1000 * p.y), 90) }
@@ -51,6 +51,15 @@ struct MeshPerformanceTests {
         let total = timings.prefix(7).reduce(0) { $0 + $1.1 }
         print("perf 1M: clean + smoothing + holes + normals + OBJ + PLY = \(String(format: "%.2f", total)) s")
         #expect(total < 10)
+
+        // The same through the Swift API the app uses (includes the ReconMesh <-> core copies).
+        var swiftMesh = mesh
+        let clean = try measure { try MeshProcessing.clean(&swiftMesh, options: ReconstructionOptions()) }
+        let result = ReconstructionResult(mesh: swiftMesh, texture: nil, cameraPoses: [], exportTransform: matrix_identity_float4x4,
+                                          report: ReconstructionReport())
+        let export = try measure { try MeshExport.writeOBJ(result, to: dir.url.appendingPathComponent("swift.obj")) }
+        print("perf 1M (ReconKit): MeshProcessing.clean \(String(format: "%.2f", clean)) s, MeshExport.writeOBJ \(String(format: "%.2f", export)) s")
+        #expect(clean + export < 10)
     }
 
     @Test func texture4096FromFortyFrames() throws {
