@@ -4,7 +4,6 @@
 
 #include "test_recording.h"
 
-#include <librealsense2/hpp/rs_internal.hpp>
 #include <librealsense2/rsutil.h>
 
 #include <algorithm>
@@ -372,23 +371,35 @@ float scene_depth_at_depth_pixel( const RecordingOptions & o, int frame, float u
     return scene.trace( {}, dir, hit, normal, c ) ? float( hit.z ) : 0.f;
 }
 
-RecordingInfo write_test_recording( const RecordingOptions & o )
+struct SyntheticCamera::Impl
 {
-    if( o.path.empty() )
-        throw std::runtime_error( "No output path" );
+    RecordingOptions o;
+    RecordingInfo info;
+    rs2::software_device dev;
+    std::optional< rs2::software_sensor > stereo, rgb, motion;
+    rs2::stream_profile depth_profile, ir_profile, color_profile, accel_profile, gyro_profile;
+    bool per_frame = false;
+    FrameImages still;
+    int accel_index = 0, gyro_index = 0;
+};
+
+SyntheticCamera::SyntheticCamera( const RecordingOptions & o )
+    : m( std::make_unique< Impl >() )
+{
     if( o.frames < 1 || o.fps < 1 || o.depth_width < 16 || o.depth_height < 16 || o.color_width < 16
         || o.color_height < 16 || ! ( o.depth_units > 0 ) )
         throw std::runtime_error( "Invalid recording options" );
     if( o.scene != "head" && o.scene != "plane" )
         throw std::runtime_error( "Unknown scene '" + o.scene + "' (head or plane)" );
-
-    RecordingInfo info;
+    m->o = o;
+    RecordingInfo & info = m->info;
     info.depth_intrinsics = synthetic_depth_intrinsics( o.depth_width, o.depth_height );
     info.color_intrinsics = synthetic_color_intrinsics( o.color_width, o.color_height );
     info.depth_to_color = synthetic_depth_to_color();
     info.first_timestamp_ms = k_first_timestamp_ms;
+    info.frames = o.frames;
 
-    rs2::software_device dev;
+    rs2::software_device & dev = m->dev;
     set_info( dev, RS2_CAMERA_INFO_NAME, "Intel RealSense D455 (synthetic)" );
     set_info( dev, RS2_CAMERA_INFO_SERIAL_NUMBER, k_synthetic_serial );
     set_info( dev, RS2_CAMERA_INFO_FIRMWARE_VERSION, "5.17.0.10" );
@@ -397,18 +408,19 @@ RecordingInfo write_test_recording( const RecordingOptions & o )
     set_info( dev, RS2_CAMERA_INFO_PRODUCT_LINE, "D400" );
     set_info( dev, RS2_CAMERA_INFO_USB_TYPE_DESCRIPTOR, "3.2" );
 
-    rs2::software_sensor stereo = dev.add_sensor( "Stereo Module" );
-    rs2::software_sensor rgb = dev.add_sensor( "RGB Camera" );
+    m->stereo = dev.add_sensor( "Stereo Module" );
+    m->rgb = dev.add_sensor( "RGB Camera" );
+    rs2::software_sensor & stereo = *m->stereo;
+    rs2::software_sensor & rgb = *m->rgb;
 
     rs2_video_stream depth_stream{ RS2_STREAM_DEPTH, 0, 0, o.depth_width, o.depth_height, o.fps, 2,
                                    RS2_FORMAT_Z16, info.depth_intrinsics };
-    auto depth_profile = stereo.add_video_stream( depth_stream, true ).as< rs2::video_stream_profile >();
-    rs2::stream_profile ir_profile;
+    m->depth_profile = stereo.add_video_stream( depth_stream, true );
     if( o.infrared )
     {
         rs2_video_stream ir_stream{ RS2_STREAM_INFRARED, 1, 1, o.depth_width, o.depth_height, o.fps, 1,
                                     RS2_FORMAT_Y8, info.depth_intrinsics };
-        ir_profile = stereo.add_video_stream( ir_stream );
+        m->ir_profile = stereo.add_video_stream( ir_stream );
     }
     // Depth units + baseline make the sensor a depth (stereo) sensor for librealsense, also in the recording.
     stereo.add_read_only_option( RS2_OPTION_DEPTH_UNITS, o.depth_units );
@@ -423,23 +435,21 @@ RecordingInfo write_test_recording( const RecordingOptions & o )
 
     rs2_video_stream color_stream{ RS2_STREAM_COLOR, 0, 2, o.color_width, o.color_height, o.fps, 3,
                                    RS2_FORMAT_RGB8, info.color_intrinsics };
-    auto color_profile = rgb.add_video_stream( color_stream, true );
+    m->color_profile = rgb.add_video_stream( color_stream, true );
     rgb.add_option( RS2_OPTION_ENABLE_AUTO_EXPOSURE, rs2::option_range{ 0, 1, 1, 1 } );
     rgb.add_option( RS2_OPTION_EXPOSURE, rs2::option_range{ 1, 10000, 156, 1 } );
     rgb.set_metadata( RS2_FRAME_METADATA_ACTUAL_EXPOSURE, 80 );  // UVC: 100 us units
 
-    depth_profile.register_extrinsics_to( color_profile, info.depth_to_color );
-    if( ir_profile )
+    m->depth_profile.register_extrinsics_to( m->color_profile, info.depth_to_color );
+    if( m->ir_profile )
     {
         rs2_extrinsics identity{ { 1, 0, 0, 0, 1, 0, 0, 0, 1 }, { 0, 0, 0 } };
-        ir_profile.register_extrinsics_to( depth_profile, identity );
+        m->ir_profile.register_extrinsics_to( m->depth_profile, identity );
     }
 
-    std::optional< rs2::software_sensor > motion;
-    rs2::stream_profile accel_profile, gyro_profile;
     if( o.imu )
     {
-        motion = dev.add_sensor( "Motion Module" );
+        m->motion = dev.add_sensor( "Motion Module" );
         rs2_motion_device_intrinsic mi{};
         for( int r = 0; r < 3; ++r )
             mi.data[r][r] = 1.f;
@@ -448,87 +458,116 @@ RecordingInfo write_test_recording( const RecordingOptions & o )
             mi.noise_variances[r] = 1e-4f;
             mi.bias_variances[r] = 1e-6f;
         }
-        accel_profile = motion->add_motion_stream(
+        m->accel_profile = m->motion->add_motion_stream(
             rs2_motion_stream{ RS2_STREAM_ACCEL, 0, 3, k_accel_fps, RS2_FORMAT_MOTION_XYZ32F, mi } );
-        gyro_profile = motion->add_motion_stream(
+        m->gyro_profile = m->motion->add_motion_stream(
             rs2_motion_stream{ RS2_STREAM_GYRO, 0, 4, k_gyro_fps, RS2_FORMAT_MOTION_XYZ32F, mi } );
     }
 
     // Static scenes are rendered once; noise and motion need a render per frame.
-    bool per_frame = o.noise_m > 0 || o.yaw_deg_per_frame != 0;
-    FrameImages still;
-    if( ! per_frame )
-        still = render( o, 0, info.depth_intrinsics, info.color_intrinsics, info.depth_to_color );
+    m->per_frame = o.noise_m > 0 || o.yaw_deg_per_frame != 0;
+    if( ! m->per_frame )
+        m->still = render( o, 0, info.depth_intrinsics, info.color_intrinsics, info.depth_to_color );
+}
 
+SyntheticCamera::~SyntheticCamera() = default;
+
+rs2::software_device & SyntheticCamera::device()
+{
+    return m->dev;
+}
+
+const RecordingInfo & SyntheticCamera::info() const
+{
+    return m->info;
+}
+
+void SyntheticCamera::start_all()
+{
+    std::vector< rs2::stream_profile > stereo_profiles{ m->depth_profile };
+    if( m->ir_profile )
+        stereo_profiles.push_back( m->ir_profile );
+    m->stereo->open( stereo_profiles );
+    m->rgb->open( m->color_profile );
+    if( m->motion )
+        m->motion->open( { m->accel_profile, m->gyro_profile } );
+    // A recorder hooks the sensors' frame callbacks, so each sensor needs one.
+    auto ignore = []( rs2::frame ) {};
+    m->rgb->start( ignore );
+    m->stereo->start( ignore );
+    if( m->motion )
+        m->motion->start( ignore );
+}
+
+void SyntheticCamera::stop_all()
+{
+    m->stereo->stop();
+    m->rgb->stop();
+    if( m->motion )
+        m->motion->stop();
+    m->stereo->close();
+    m->rgb->close();
+    if( m->motion )
+        m->motion->close();
+}
+
+void SyntheticCamera::emit_frame( int i )
+{
+    const RecordingOptions & o = m->o;
+    const RecordingInfo & info = m->info;
+    const double period_ms = 1000.0 / o.fps;
+    double ts = k_first_timestamp_ms + i * period_ms;
+    int depth_number = o.restart_at >= 0 && i >= o.restart_at ? 1 + ( i - o.restart_at ) : 100 + i;
+    FrameImages rendered;
+    const FrameImages & img
+        = m->per_frame ? ( rendered = render( o, i, info.depth_intrinsics, info.color_intrinsics, info.depth_to_color ) )
+                       : m->still;
+
+    // IMU samples up to this frame's time: gravity along -Y of the camera (held upright), a slight tremor.
+    while( m->motion && k_first_timestamp_ms + m->accel_index * 1000.0 / k_accel_fps <= ts )
     {
-        rs2::recorder recorder( o.path, dev, o.compress );
-        std::vector< rs2::stream_profile > stereo_profiles{ depth_profile };
-        if( ir_profile )
-            stereo_profiles.push_back( ir_profile );
-        stereo.open( stereo_profiles );
-        rgb.open( color_profile );
-        if( o.imu )
-            motion->open( { accel_profile, gyro_profile } );
-        // The recorder hooks the sensors' frame callbacks, so each sensor needs one.
-        auto ignore = []( rs2::frame ) {};
-        rgb.start( ignore );
-        stereo.start( ignore );
-        if( o.imu )
-            motion->start( ignore );
+        float * d = new float[3]{ 0.02f * float( std::sin( m->accel_index * 0.3 ) ), -9.81f, 0.05f };
+        m->motion->on_motion_frame( { d, []( void * p ) { delete[] static_cast< float * >( p ); },
+                                      k_first_timestamp_ms + m->accel_index * 1000.0 / k_accel_fps,
+                                      RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, m->accel_index, m->accel_profile.get() } );
+        ++m->accel_index;
+    }
+    while( m->motion && k_first_timestamp_ms + m->gyro_index * 1000.0 / k_gyro_fps <= ts )
+    {
+        float * d = new float[3]{ 0.001f, -0.002f, 0.0005f };
+        m->motion->on_motion_frame( { d, []( void * p ) { delete[] static_cast< float * >( p ); },
+                                      k_first_timestamp_ms + m->gyro_index * 1000.0 / k_gyro_fps,
+                                      RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, m->gyro_index, m->gyro_profile.get() } );
+        ++m->gyro_index;
+    }
 
-        const double period_ms = 1000.0 / o.fps;
+    m->rgb->on_video_frame( { heap_copy( img.color ), free_bytes, o.color_width * 3, 3, ts,
+                              RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, 200 + i, m->color_profile.get(), 0.f } );
+    m->stereo->on_video_frame( { heap_copy( img.depth ), free_bytes, o.depth_width * 2, 2, ts,
+                                 RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, depth_number, m->depth_profile.get(), o.depth_units } );
+    if( m->ir_profile )
+        m->stereo->on_video_frame( { heap_copy( img.infrared ), free_bytes, o.depth_width, 1, ts,
+                                     RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, depth_number, m->ir_profile.get(), 0.f } );
+}
+
+RecordingInfo write_test_recording( const RecordingOptions & o )
+{
+    if( o.path.empty() )
+        throw std::runtime_error( "No output path" );
+    SyntheticCamera camera( o );
+    {
+        rs2::recorder recorder( o.path, camera.device(), o.compress );
+        camera.start_all();
         auto started = std::chrono::steady_clock::now();
-        int accel_index = 0, gyro_index = 0;
         for( int i = 0; i < o.frames; ++i )
         {
             if( o.pace )
-                std::this_thread::sleep_until( started + std::chrono::microseconds( int64_t( i * period_ms * 1000 ) ) );
-            double ts = k_first_timestamp_ms + i * period_ms;
-            int depth_number = o.restart_at >= 0 && i >= o.restart_at ? 1 + ( i - o.restart_at ) : 100 + i;
-            FrameImages rendered;
-            const FrameImages & img = per_frame
-                                        ? ( rendered = render( o, i, info.depth_intrinsics, info.color_intrinsics,
-                                                               info.depth_to_color ) )
-                                        : still;
-
-            // IMU samples up to this frame's time: gravity along -Y of the camera (held upright), a slight tremor.
-            while( o.imu && k_first_timestamp_ms + accel_index * 1000.0 / k_accel_fps <= ts )
-            {
-                float * d = new float[3]{ 0.02f * float( std::sin( accel_index * 0.3 ) ), -9.81f, 0.05f };
-                motion->on_motion_frame( { d, []( void * p ) { delete[] static_cast< float * >( p ); },
-                                           k_first_timestamp_ms + accel_index * 1000.0 / k_accel_fps,
-                                           RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, accel_index, accel_profile.get() } );
-                ++accel_index;
-            }
-            while( o.imu && k_first_timestamp_ms + gyro_index * 1000.0 / k_gyro_fps <= ts )
-            {
-                float * d = new float[3]{ 0.001f, -0.002f, 0.0005f };
-                motion->on_motion_frame( { d, []( void * p ) { delete[] static_cast< float * >( p ); },
-                                           k_first_timestamp_ms + gyro_index * 1000.0 / k_gyro_fps,
-                                           RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, gyro_index, gyro_profile.get() } );
-                ++gyro_index;
-            }
-
-            rgb.on_video_frame( { heap_copy( img.color ), free_bytes, o.color_width * 3, 3, ts,
-                                  RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, 200 + i, color_profile.get(), 0.f } );
-            stereo.on_video_frame( { heap_copy( img.depth ), free_bytes, o.depth_width * 2, 2, ts,
-                                     RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, depth_number, depth_profile.get(), o.depth_units } );
-            if( ir_profile )
-                stereo.on_video_frame( { heap_copy( img.infrared ), free_bytes, o.depth_width, 1, ts,
-                                         RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, depth_number, ir_profile.get(), 0.f } );
+                std::this_thread::sleep_until( started + std::chrono::microseconds( int64_t( i * 1e6 / o.fps ) ) );
+            camera.emit_frame( i );
         }
-
-        stereo.stop();
-        rgb.stop();
-        if( o.imu )
-            motion->stop();
-        stereo.close();
-        rgb.close();
-        if( o.imu )
-            motion->close();
+        camera.stop_all();
     }  // the recorder's destruction flushes and closes the file
-    info.frames = o.frames;
-    return info;
+    return camera.info();
 }
 
 }  // namespace test

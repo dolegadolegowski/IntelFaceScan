@@ -8,9 +8,11 @@
 
 #pragma once
 
+#include <librealsense2/hpp/rs_internal.hpp>
 #include <librealsense2/rs.hpp>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace ifs
@@ -57,6 +59,29 @@ rs2_intrinsics synthetic_color_intrinsics( int width, int height );
 rs2_extrinsics synthetic_depth_to_color();
 constexpr float k_synthetic_baseline_mm = 95.f;
 constexpr const char * k_synthetic_serial = "000000000455";
+
+// The software device with the D455 sensor layout, which can also stand in for a live camera.
+class SyntheticCamera
+{
+public:
+    explicit SyntheticCamera( const RecordingOptions & options );  // 'path' is not used
+    ~SyntheticCamera();
+    SyntheticCamera( const SyntheticCamera & ) = delete;
+    SyntheticCamera & operator=( const SyntheticCamera & ) = delete;
+
+    rs2::software_device & device();
+    const RecordingInfo & info() const;
+    // Opens and starts every sensor with a callback that ignores the frames (for rs2::recorder).
+    void start_all();
+    void stop_all();
+    // Feeds frame i to the sensors that stream (IMU samples up to its timestamp, color, depth, infrared); frames
+    // of stopped sensors are dropped by librealsense.
+    void emit_frame( int i );
+
+private:
+    struct Impl;
+    std::unique_ptr< Impl > m;
+};
 
 // Throws std::runtime_error (or rs2::error) on failure.
 RecordingInfo write_test_recording( const RecordingOptions & options );

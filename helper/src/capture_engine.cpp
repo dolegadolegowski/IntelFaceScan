@@ -15,6 +15,7 @@
 #include "capture_engine.h"
 #include "capture_config.h"
 #include "capture_processing.h"
+#include "capture_testing.h"
 #include "capture_util.h"
 
 #include <librealsense2/rs.hpp>
@@ -327,6 +328,7 @@ public:
     }
 
     void open_live();
+    void open_device( const rs2::device & device );
     void open_playback( const std::string & file, bool real_time );
 
     json device_info() override;
@@ -359,6 +361,7 @@ private:
     void log( const char * level, const std::string & message ) const { emit_log( callbacks(), level, message ); }
 
     void check_open_locked() const;
+    void open_device_locked( const rs2::device & device );
     void ensure_device_locked();
     void adopt_device_locked( const rs2::device & device );
     void release_device_locked();
@@ -434,9 +437,11 @@ void RealSenseEngine::open_live()
             continue;
         }
         // The D455 is the camera this app is tuned for; other D400 models work with the same code path.
-        int rank = camera_info( d, RS2_CAMERA_INFO_PRODUCT_ID ) == k_d455_product_id         ? 2
-                 : camera_info( d, RS2_CAMERA_INFO_PRODUCT_LINE ) == "D400" ? 1
-                                                                            : 0;
+        int rank = 0;
+        if( camera_info( d, RS2_CAMERA_INFO_PRODUCT_ID ) == k_d455_product_id )
+            rank = 2;
+        else if( camera_info( d, RS2_CAMERA_INFO_PRODUCT_LINE ) == "D400" )
+            rank = 1;
         if( rank > chosen_rank )
         {
             chosen = d;
@@ -452,7 +457,19 @@ void RealSenseEngine::open_live()
                                   "Mac with a USB-C cable and try again." );
     }
 
-    adopt_device_locked( chosen );
+    open_device_locked( chosen );
+}
+
+void RealSenseEngine::open_device( const rs2::device & device )
+{
+    std::lock_guard< std::mutex > lock( m_mutex );
+    m_ctx = std::make_unique< rs2::context >();
+    open_device_locked( device );
+}
+
+void RealSenseEngine::open_device_locked( const rs2::device & device )
+{
+    adopt_device_locked( device );
     install_device_callback_locked();
 
     std::string firmware = camera_info( m_device, RS2_CAMERA_INFO_FIRMWARE_VERSION );
@@ -1551,6 +1568,13 @@ std::unique_ptr< CaptureEngine > CaptureEngine::create_playback( const std::stri
 {
     auto engine = std::make_unique< RealSenseEngine >( std::move( callbacks ), true );
     engine->open_playback( file, real_time );
+    return engine;
+}
+
+std::unique_ptr< CaptureEngine > create_live_engine_for_device( rs2::device device, CaptureCallbacks callbacks )
+{
+    auto engine = std::make_unique< RealSenseEngine >( std::move( callbacks ), false );
+    engine->open_device( device );
     return engine;
 }
 

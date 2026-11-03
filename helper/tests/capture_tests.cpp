@@ -6,6 +6,7 @@
 #include "capture_config.h"
 #include "capture_engine.h"
 #include "capture_measure.h"
+#include "capture_testing.h"
 #include "capture_util.h"
 #include "probe.h"
 #include "test_framework.h"
@@ -860,6 +861,208 @@ TEST_CASE( playback_rejects_live_only_commands )
     engine->set_auto_exposure_roi( 10, 10, 100, 100, 0.5f );  // accepted and ignored
     CHECK_THROWS_WITH( engine->set_auto_exposure_roi( 0, 0, 0, 10, 0.5f ), "Invalid" );
     engine->shutdown();
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The live code path, with a software device standing in for the camera
+
+namespace
+{
+// A "live" engine around a SyntheticCamera. Frames are fed from the test thread between engine calls (librealsense
+// software sensors must not receive frames while another thread starts or stops them).
+struct LiveRig
+{
+    RecordingOptions options;
+    SyntheticCamera camera;
+    Collector col;
+    std::unique_ptr< CaptureEngine > engine;
+    int next_frame = 0;
+
+    explicit LiveRig( const RecordingOptions & o, size_t pixels_every = 1 )
+        : options( o )
+        , camera( o )
+        , col( pixels_every )
+    {
+        engine = create_live_engine_for_device( camera.device(), col.callbacks() );
+    }
+
+    // At the frame rate: frames that come faster than the processing thread takes them are dropped (live
+    // behavior), which would make counts flaky.
+    void feed( int n )
+    {
+        for( int i = 0; i < n; ++i )
+        {
+            camera.emit_frame( next_frame++ );
+            std::this_thread::sleep_for( std::chrono::milliseconds( 1000 / options.fps ) );
+        }
+        std::this_thread::sleep_for( 100ms );
+    }
+
+    // What a software device can do: no presets, fixed depth units, no advanced mode.
+    static CaptureConfig config()
+    {
+        CaptureConfig c;
+        c.preset = "Custom";
+        c.filters = FilterConfig::none();
+        return c;
+    }
+};
+
+const json * find_option( const json & info, const std::string & kind, const std::string & name )
+{
+    for( auto & s : info["sensors"] )
+        if( s["kind"] == kind )
+            for( auto & o : s["options"] )
+                if( o["name"] == name )
+                    return &o;
+    return nullptr;
+}
+}  // namespace
+
+TEST_CASE( live_configure_and_options )
+{
+    RecordingOptions o;
+    o.frames = 1;
+    LiveRig rig( o );
+    CaptureEngine & engine = *rig.engine;
+    json info = engine.device_info();
+    CHECK( info["source"] == "live" );
+    CHECK( info["serial"] == k_synthetic_serial );
+    CHECK( info["presets"].empty() );
+
+    CHECK_THROWS_WITH( engine.configure( to_json( CaptureConfig() ) ), "does not support visual presets ('High Accuracy')" );
+    CaptureConfig c = LiveRig::config();
+    c.depth = { 640, 480, 30 };
+    CHECK_THROWS_WITH( engine.configure( to_json( c ) ), "Depth 640x480@30 Z16 is not available (USB 3.2). Available: 1280x720@30" );
+    c = LiveRig::config();
+    c.color = { 1920, 1080, 30 };
+    CHECK_THROWS_WITH( engine.configure( to_json( c ) ), "Color 1920x1080@30 RGB8 is not available" );
+    c = LiveRig::config();
+    c.depth_units = 0.001f;
+    CHECK_THROWS_WITH( engine.configure( to_json( c ) ), "Depth Units cannot be changed" );
+    c = LiveRig::config();
+    c.disparity_shift = 50;
+    CHECK_THROWS_WITH( engine.configure( to_json( c ) ), "Disparity shift needs the camera's advanced mode" );
+    c = LiveRig::config();
+    c.laser_power = 400.f;
+    CHECK_THROWS_WITH( engine.configure( to_json( c ) ), "Laser Power: value out of range [0, 360]" );
+
+    // Valid: laser power null = the maximum, values snap to the option's step, emitter and auto exposure apply.
+    c = LiveRig::config();
+    engine.configure( to_json( c ) );
+    CHECK( ( *find_option( engine.device_info(), "depth", "Laser Power" ) )["value"] == 360 );
+    c.laser_power = 100.f;
+    c.depth_auto_exposure = false;
+    c.color_auto_exposure = false;
+    engine.configure( to_json( c ) );
+    info = engine.device_info();
+    CHECK( ( *find_option( info, "depth", "Laser Power" ) )["value"] == 90 );
+    CHECK( ( *find_option( info, "depth", "Enable Auto Exposure" ) )["value"] == 0 );
+    CHECK( ( *find_option( info, "color", "Enable Auto Exposure" ) )["value"] == 0 );
+    CHECK( ( *find_option( info, "depth", "Emitter Enabled" ) )["value"] == 1 );
+    c.emitter_enabled = false;
+    engine.configure( to_json( c ) );
+    CHECK( ( *find_option( engine.device_info(), "depth", "Emitter Enabled" ) )["value"] == 0 );
+
+    CHECK_THROWS_WITH( engine.set_option( "depth", "Laser Power", 500 ), "Laser Power: value out of range [0, 360]" );
+    CHECK_THROWS_WITH( engine.set_option( "depth", "Depth Units", 0.001f ), "Depth Units is read-only" );
+    CHECK_THROWS_WITH( engine.set_option( "depth", "Warp Drive", 1 ), "has no option 'Warp Drive'" );
+    CHECK_THROWS_WITH( engine.set_option( "left", "Laser Power", 1 ), "Unknown sensor 'left'" );
+    CHECK_THROWS_WITH( engine.set_option( "depth", "Laser Power", std::nanf( "" ) ), "not a number" );
+    engine.set_option( "color", "exposure", 200 );
+    CHECK( ( *find_option( engine.device_info(), "color", "Exposure" ) )["value"] == 200 );
+    CHECK_THROWS_WITH( engine.playback_control( true, true ), "only available when playing" );
+    engine.shutdown();
+}
+
+TEST_CASE( live_streaming_and_recording )
+{
+    TempDir dir;
+    RecordingOptions o;
+    o.frames = 1000;
+    LiveRig rig( o, 1 );
+    CaptureEngine & engine = *rig.engine;
+    CaptureConfig c = LiveRig::config();
+    c.enable_ir = true;
+    c.send_ir = true;
+    engine.configure( to_json( c ) );
+    engine.set_auto_exposure_roi( 500, 220, 300, 380, 0.5f );  // no ROI support on the software device: ignored
+    engine.start();
+    CHECK( engine.streaming() );
+    rig.feed( 10 );
+    CHECK_MSG( rig.col.frameset_count() >= 8, rig.col.frameset_count() );
+    auto sets = rig.col.framesets();
+    REQUIRE( ! sets.empty() );
+    CHECK( sets.back().planes.size() == 3 );  // color, depth_aligned, ir_left
+    CHECK( sets.back().metadata["imu"].is_object() );
+    AlignmentScore score = score_alignment( o, sets.back().planes[1], o.depth_units, 0.003 );
+    CHECK_MSG( score.agree > 0.97, score.agree );
+
+    CHECK_THROWS_WITH( engine.start_recording( dir.file( "a.mp4" ), "mp4" ), "Unknown recording format" );
+    CHECK_THROWS_WITH( engine.start_recording( dir.file( "a.bag" ), "db3" ), "must end with .db3" );
+    CHECK_THROWS_WITH( engine.stop_recording(), "No recording" );
+
+    // .db3 while streaming: the streams restart with the recorder and again without it.
+    std::string db3 = dir.file( "live.db3" );
+    engine.start_recording( db3, "db3" );
+    CHECK( engine.streaming() );
+    CHECK( rig.col.event_count( "recording_started" ) == 1 );
+    CHECK_THROWS_WITH( engine.start_recording( dir.file( "b.db3" ), "db3" ), "already running" );
+    rig.feed( 15 );
+    engine.stop_recording();
+    CHECK( engine.streaming() );
+    REQUIRE( rig.col.event_count( "recording_finished" ) == 1 );
+    uint64_t bytes = 0;
+    for( auto & e : rig.col.events() )
+        if( e.first == "recording_finished" )
+            bytes = e.second["bytes"].get< uint64_t >();
+    CHECK( bytes > 0 && bytes == fs::file_size( db3 ) );
+    size_t before = rig.col.frameset_count();
+    rig.feed( 5 );
+    CHECK( rig.col.frameset_count() >= before + 4 );
+
+    // .bag needs patches/0002 in the SDK build.
+    std::string bag = dir.file( "live.bag" );
+    bool bag_supported = true;
+    try
+    {
+        engine.start_recording( bag, "bag" );
+    }
+    catch( const std::exception & e )
+    {
+        CHECK_MSG( std::string( e.what() ).find( "patches/0002" ) != std::string::npos, e.what() );
+        bag_supported = false;
+    }
+    CHECK( engine.streaming() );
+    if( bag_supported )
+    {
+        rig.feed( 10 );
+        engine.stop_recording();
+    }
+    engine.stop();
+    CHECK( ! engine.streaming() );
+    engine.shutdown();
+
+    // The recordings play back through the same engine code.
+    for( const std::string & file : { db3, bag } )
+    {
+        if( file == bag && ! bag_supported )
+            continue;
+        Collector col( 1 );
+        CaptureConfig pc;
+        pc.enable_ir = true;
+        pc.send_ir = true;
+        pc.filters = FilterConfig::none();
+        auto played = play_all( file, pc, col );
+        size_t expected = file == db3 ? 15 : 10;
+        CHECK_MSG( played.size() + 2 >= expected && played.size() <= expected, file << ": " << played.size() );
+        REQUIRE( ! played.empty() );
+        CHECK( played.front().planes.size() == 3 );
+        check_intrinsics( played.front().planes[0].desc["intrinsics"], rig.camera.info().color_intrinsics );
+        CHECK( played.front().metadata["imu"].is_object() );
+        AlignmentScore s = score_alignment( o, played.front().planes[1], o.depth_units, 0.003 );
+        CHECK_MSG( s.agree > 0.97, s.agree );
+    }
 }
 
 TEST_CASE( probe_runs_on_a_recording )
