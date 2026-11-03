@@ -137,6 +137,7 @@ func errnoDescription(_ code: Int32 = errno) -> String {
 final class HelperSocketIO: @unchecked Sendable {
     let fd: Int32
     private let writeLock = NSLock()
+    private var payloadBuffer = UnsafeMutableRawBufferPointer(start: nil, count: 0)  // reader thread only
     private let stateLock = NSLock()
     private var closed = false
 
@@ -152,11 +153,14 @@ final class HelperSocketIO: @unchecked Sendable {
 
     deinit {
         close()
+        payloadBuffer.deallocate()
     }
 
     /// Reads one message; nil when the peer closed the connection between two messages. Descriptors are rejected
     /// (closed, protocol error) unless `acceptDescriptor`, and then only on the first byte of the message.
-    func readMessage(acceptDescriptor: Bool = false) throws -> WireMessage? {
+    /// `reusePayloadBuffer`: the payload aliases a buffer owned by this object that the next read overwrites (the
+    /// reader copies the planes out right away; saves a fresh zero-filled 5 MB buffer per frameset).
+    func readMessage(acceptDescriptor: Bool = false, reusePayloadBuffer: Bool = false) throws -> WireMessage? {
         var headerBytes = [UInt8](repeating: 0, count: HelperWire.headerSize)
         var descriptors: [Int32] = []
         let complete = try headerBytes.withUnsafeMutableBytes { raw in
@@ -180,8 +184,19 @@ final class HelperSocketIO: @unchecked Sendable {
             try readExact($0, descriptors: &none, acceptDescriptors: false, eofOK: false)
         }
         var payload = Data()
-        if header.payloadBytes > 0 {
-            payload = Data(count: Int(header.payloadBytes))
+        let payloadCount = Int(header.payloadBytes)
+        if payloadCount > 0 && reusePayloadBuffer {
+            if payloadBuffer.count < payloadCount {
+                payloadBuffer.deallocate()
+                payloadBuffer = .allocate(byteCount: payloadCount, alignment: 64)
+            }
+            let target = UnsafeMutableRawBufferPointer(rebasing: payloadBuffer[0..<payloadCount])
+            _ = try readExact(target, descriptors: &none, acceptDescriptors: false, eofOK: false)
+            if let base = target.baseAddress {
+                payload = Data(bytesNoCopy: base, count: payloadCount, deallocator: .none)
+            }
+        } else if payloadCount > 0 {
+            payload = Data(count: payloadCount)
             _ = try payload.withUnsafeMutableBytes {
                 try readExact($0, descriptors: &none, acceptDescriptors: false, eofOK: false)
             }

@@ -417,7 +417,14 @@ struct HelperFakeIntegrationTests {
         let frames = source.frames(bufferingNewest: 64)
         try await source.start()
         _ = try await collectFrames(frames, count: 1)
+        func cpuMs() -> Double {
+            var usage = rusage()
+            getrusage(RUSAGE_SELF, &usage)
+            return Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1000
+                + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1000
+        }
         let t0 = Date()
+        let cpu0 = cpuMs()
         var latencies: [Double] = []
         let received = try await withTimeout(10, "45 frames") {
             var count = 0
@@ -430,10 +437,11 @@ struct HelperFakeIntegrationTests {
             }
             return (count, lat)
         }
+        let cpuPerFrame = (cpuMs() - cpu0) / Double(received.0)
         latencies = received.1.sorted()
         let fps = Double(received.0) / Date().timeIntervalSince(t0)
         let median = latencies[latencies.count / 2]
-        print("fake helper: \(String(format: "%.1f", fps)) fps, frameset latency median \(String(format: "%.1f", median)) ms, max \(String(format: "%.1f", latencies.last ?? 0)) ms")
+        print("fake helper: \(String(format: "%.1f", fps)) fps, frameset latency median \(String(format: "%.1f", median)) ms, max \(String(format: "%.1f", latencies.last ?? 0)) ms, app CPU \(String(format: "%.2f", cpuPerFrame)) ms per frameset")
         #expect(fps > 20, "received \(fps) fps")
         #expect(median < 100, "median latency \(median) ms")
         await source.shutdown()

@@ -177,7 +177,7 @@ final class HelperConnection: @unchecked Sendable {
         while true {
             let message: WireMessage?
             do {
-                message = try io.readMessage()
+                message = try io.readMessage(reusePayloadBuffer: true)
             } catch let error as CameraError {
                 finish(error)
                 return
