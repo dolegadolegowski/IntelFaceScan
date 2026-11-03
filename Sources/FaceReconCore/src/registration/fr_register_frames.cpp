@@ -34,7 +34,7 @@ constexpr size_t kMaxLoopsPerFrame = 6;        // bound on loop-closure candidat
 constexpr double kMaxCorrectionDeg = 30.0;     // ICP result vs. initial relative pose: rotation and
 constexpr double kMaxCorrectionM = 0.04;       // displacement of the source cloud's centroid
 constexpr size_t kMinFramePoints = 200;
-constexpr float kRelativeRmseLimit = 1.8f;     // edges fitting worse than this times the median are rejected
+constexpr float kRelativeRmseLimit = 1.5f;     // edges fitting worse than this times the median are rejected
 
 enum class EdgeKind
 {
@@ -47,7 +47,6 @@ struct Candidate
 {
     uint32_t source = 0, target = 0;
     EdgeKind kind = EdgeKind::loop;
-    bool primary = false;   // the certain bridge of its group
     double angle = 0;
     IcpOutput result;
     fr_status status = FR_ERR_FAILED;
@@ -196,19 +195,18 @@ fr_status fr_register_frames( const fr_rgbd_frame * frames, uint32_t count, cons
         // Candidate edges.
         std::vector< fr::Candidate > edges;
         std::vector< std::vector< char > > paired( n, std::vector< char >( n, 0 ) );
-        auto add_edge = [&]( size_t s, size_t t, EdgeKind kind, bool primary ) {
+        auto add_edge = [&]( size_t s, size_t t, EdgeKind kind ) {
             fr::Candidate c;
             c.source = uint32_t( s );
             c.target = uint32_t( t );
             c.kind = kind;
-            c.primary = primary;
             c.angle = relative_angle( initial[s], initial[t] );
             edges.push_back( c );
             paired[s][t] = paired[t][s] = 1;
         };
         for( size_t i = 1; i < n; ++i )
             if( group[i] == group[i - 1] && usable[i] && usable[i - 1] )
-                add_edge( i, i - 1, EdgeKind::odometry, false );
+                add_edge( i, i - 1, EdgeKind::odometry );
         for( int g = 0; g < group_count; ++g )
         {
             if( g == front )
@@ -226,7 +224,7 @@ fr_status fr_register_frames( const fr_rgbd_frame * frames, uint32_t count, cons
                 const size_t a = pr.second.first, b = pr.second.second;
                 if( added >= kBridgesPerGroup || used[a] || used[b] )
                     continue;
-                add_edge( a, b, EdgeKind::bridge, added == 0 );
+                add_edge( a, b, EdgeKind::bridge );
                 used[a] = used[b] = 1;
                 ++added;
             }
@@ -254,7 +252,7 @@ fr_status fr_register_frames( const fr_rgbd_frame * frames, uint32_t count, cons
                 const size_t s = pr.second.first, t = pr.second.second;
                 if( per_frame[s] >= kMaxLoopsPerFrame || per_frame[t] >= kMaxLoopsPerFrame )
                     continue;
-                add_edge( s, t, EdgeKind::loop, false );
+                add_edge( s, t, EdgeKind::loop );
                 ++per_frame[s];
                 ++per_frame[t];
             }
@@ -329,10 +327,27 @@ fr_status fr_register_frames( const fr_rgbd_frame * frames, uint32_t count, cons
 
         if( std::getenv( "FR_DEBUG_REGISTRATION" ) )
             for( const auto & c : edges )
-                std::fprintf( stderr, "edge %u->%u kind %d primary %d angle %.1f status %d fit %.3f rmse %.3f mm acc %d\n", c.source, c.target, int( c.kind ), int( c.primary ), rad2deg( c.angle ), int( c.status ), c.result.fitness, c.result.inlier_rmse * 1000, int( c.accepted ) );
-        // Certain spanning structure: odometry + primary bridges, repaired with the best accepted alternatives.
+                std::fprintf( stderr, "edge %u->%u kind %d angle %.1f status %d fit %.3f rmse %.3f mm accepted %d\n", c.source, c.target,
+                              int( c.kind ), rad2deg( c.angle ), int( c.status ), c.result.fitness, c.result.inlier_rmse * 1000, int( c.accepted ) );
+        // Certain spanning structure: odometry, plus per group the bridge that fits best after ICP (a pre-chosen
+        // bridge may have slid into a wrong minimum that still passes the thresholds), repaired with the best
+        // accepted alternatives where a group or frame stays disconnected.
+        auto quality = []( const fr::Candidate & c ) { return c.result.fitness / std::max( c.result.inlier_rmse, 1e-4f ); };
         for( auto & c : edges )
-            c.certain = c.accepted && ( c.kind == EdgeKind::odometry || c.primary );
+            c.certain = c.accepted && c.kind == EdgeKind::odometry;
+        std::vector< int > best_bridge( size_t( group_count ), -1 );
+        for( size_t k = 0; k < edges.size(); ++k )
+        {
+            const auto & c = edges[k];
+            if( ! c.accepted || c.kind != EdgeKind::bridge )
+                continue;
+            int & b = best_bridge[size_t( group[c.source] )];
+            if( b < 0 || quality( c ) > quality( edges[size_t( b )] ) )
+                b = int( k );
+        }
+        for( int b : best_bridge )
+            if( b >= 0 )
+                edges[size_t( b )].certain = true;
         std::vector< char > reached( n, 0 );
         auto flood = [&]() {
             std::fill( reached.begin(), reached.end(), 0 );
@@ -357,9 +372,8 @@ fr_status fr_register_frames( const fr_rgbd_frame * frames, uint32_t count, cons
             {
                 if( ! c.accepted || c.certain || reached[c.source] == reached[c.target] )
                     continue;
-                const bool better = ! best || ( c.kind == EdgeKind::bridge ) > ( best->kind == EdgeKind::bridge )
-                                 || ( ( c.kind == EdgeKind::bridge ) == ( best->kind == EdgeKind::bridge ) && c.result.fitness > best->result.fitness );
-                if( better )
+                const bool bridge = c.kind == EdgeKind::bridge, best_bridge_kind = best && best->kind == EdgeKind::bridge;
+                if( ! best || bridge > best_bridge_kind || ( bridge == best_bridge_kind && quality( c ) > quality( *best ) ) )
                     best = &c;
             }
             if( ! best )

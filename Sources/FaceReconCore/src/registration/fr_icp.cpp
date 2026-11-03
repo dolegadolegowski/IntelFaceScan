@@ -155,7 +155,7 @@ fr_status icp_pyramids( const CloudPyramid & source, const CloudPyramid & target
         const double scale = double( 1 << level );
         const float max_d2 = float( p.max_correspondence_m * scale ) * float( p.max_correspondence_m * scale );
         const double kernel = double( p.robust_scale_m ) * scale;
-        const bool colored = p.colored && src.has_intensity() && dst.has_intensity() && dst.has_gradients();
+        const bool colored = p.colored && level == 0 && src.has_intensity() && dst.has_intensity() && dst.has_gradients();
         const size_t n = src.size();
         const size_t chunks = chunk_count( n, 2048 );
         converged = false;
