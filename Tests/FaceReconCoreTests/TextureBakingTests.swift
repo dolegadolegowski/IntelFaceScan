@@ -23,13 +23,13 @@ struct TextureBakingTests {
         return mesh
     }
 
-    static func bake(_ mesh: ReconMesh, views: [SyntheticView], size: Int32 = 1024,
+    static func bake(_ mesh: ReconMesh, views: [SyntheticView], size: Int32 = 1024, withDepth: Bool = true,
                      configure: (inout fr_texture_params) -> Void = { _ in }) throws -> TextureImage {
         var params = fr_texture_params()
         fr_texture_params_default(&params)
         params.texture_size = size
         configure(&params)
-        let store = FrameStore(views)
+        let store = FrameStore(views, withDepth: withDepth)
         let core = try mesh.makeCoreMesh()
         defer { fr_mesh_free(core) }
         var texture: UnsafeMutablePointer<fr_texture>?
@@ -164,6 +164,38 @@ struct TextureBakingTests {
         let psnr = Self.psnr(mesh, try Self.bake(mesh, views: views))
         print("occluder psnr: \(psnr) dB")
         #expect(psnr > 30)
+    }
+
+    @Test func selfOcclusionUsesTheMeshDepth() throws {
+        // A ball in front of the sphere is part of the mesh; the frames carry no depth, so only the mesh z-buffer can
+        // keep the ball's green off the sphere behind it.
+        var mesh = MeshFactory.icosphere(level: 4, radius: TexturedSphere.radius)
+        let sphereTriangles = mesh.triangleCount
+        let ballCenter = SIMD3<Float>(0.01, 0, -0.2)
+        let ball = MeshFactory.icosphere(level: 3, radius: 0.04, center: ballCenter)
+        let offset = UInt32(mesh.vertexCount)
+        mesh.positions += ball.positions
+        mesh.indices += ball.indices.map { $0 + offset }
+        var params = fr_uv_params()
+        fr_uv_params_default(&params)
+        params.texture_size = 1024
+        try mesh.withCoreMesh {
+            try check(fr_mesh_compute_normals($0))
+            try check(fr_mesh_uv_unwrap($0, &params, nil, nil))
+        }
+        let occluder = SyntheticView.Occluder(center: ballCenter, radius: 0.04, color: [0, 255, 0])
+        let views = TexturedSphere.surroundingPoses().map { SyntheticView.render(pose: $0, occluder: occluder) }
+        let texture = try Self.bake(mesh, views: views, withDepth: false)
+        // Only the sphere's triangles (xatlas keeps the face order).
+        var sphere = mesh
+        sphere.indices = Array(mesh.indices.prefix(3 * sphereTriangles))
+        let psnr = Self.psnr(sphere, texture)
+        // Control: with a huge occlusion tolerance the depth test passes everything and the ball bleeds through.
+        let leaky = try Self.bake(mesh, views: views, withDepth: false) { $0.occlusion_epsilon_m = 10 }
+        let control = Self.psnr(sphere, leaky)
+        print("self-occlusion psnr: \(psnr) dB (without the depth test: \(control) dB)")
+        #expect(psnr > 30)
+        #expect(control < psnr - 10)
     }
 
     @Test func vertexColorsMatchTheSurface() throws {
