@@ -27,7 +27,8 @@ void recompute_normals( mesh_buffers & b )
     if( ! b.has_normals )
         return;
     b.normals.resize( size_t( b.vertex_count() ) * 3 );
-    compute_vertex_normals( b.positions.data(), b.vertex_count(), b.indices.data(), b.triangle_count(), b.normals.data() );
+    compute_vertex_normals( b.positions.data(), b.vertex_count(), b.indices.data(), b.triangle_count(), b.normals.data(),
+                            b.has_uvs );
 }
 
 // Open-addressing hash map from a grid cell key to the first vertex of that cell's chain.
@@ -217,7 +218,7 @@ fr_status fr_mesh_compute_normals( fr_mesh * mesh )
             return s;
         if( mesh->vertex_count )
             compute_vertex_normals( mesh->positions, mesh->vertex_count, mesh->indices, mesh->triangle_count,
-                                    mesh->normals );
+                                    mesh->normals, mesh->uvs != nullptr );
         return FR_OK;
     } );
 }

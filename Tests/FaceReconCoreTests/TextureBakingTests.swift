@@ -87,6 +87,23 @@ struct TextureBakingTests {
         #expect(Double(covered) / Double(n * n) > 0.5)
     }
 
+    @Test func normalsStayContinuousAcrossSeams() throws {
+        var mesh = try Self.unwrappedSphere(level: 3, size: 512)
+        try mesh.withCoreMesh { try check(fr_mesh_compute_normals($0)) }
+        var byPosition: [SIMD3<Float>: SIMD3<Float>] = [:]
+        var seamVertices = 0
+        for (p, n) in zip(mesh.positions, mesh.normals) {
+            if let other = byPosition[p] {
+                seamVertices += 1
+                #expect(other == n)
+            } else {
+                byPosition[p] = n
+            }
+            #expect(simd_dot(n, simd_normalize(p)) > 0.99)
+        }
+        #expect(seamVertices > 0)
+    }
+
     /// Dense smooth closed surfaces used to collapse into one orthographic "planar" xatlas chart (and crash the
     /// packer); the charts must stay small enough to be overlap-free.
     @Test func denseSmoothSurfacesGetProperCharts() throws {

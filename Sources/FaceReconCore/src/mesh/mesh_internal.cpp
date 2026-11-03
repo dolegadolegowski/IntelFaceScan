@@ -295,7 +295,8 @@ double mean_edge_length( const float * p, const uint32_t * idx, uint32_t t )
     return sum / ( 3.0 * t );
 }
 
-void compute_vertex_normals( const float * p, uint32_t n, const uint32_t * idx, uint32_t t, float * normals )
+void compute_vertex_normals( const float * p, uint32_t n, const uint32_t * idx, uint32_t t, float * normals,
+                             bool share_coincident )
 {
     // The cross product's length is twice the triangle area, which gives the area weighting for free.
     std::vector< vec3 > acc( n );
@@ -310,6 +311,40 @@ void compute_vertex_normals( const float * p, uint32_t n, const uint32_t * idx, 
         acc[tri[0]] += fn;
         acc[tri[1]] += fn;
         acc[tri[2]] += fn;
+    }
+    if( share_coincident && n > 1 )
+    {
+        // Runs of bit-identical positions after sorting share their accumulated normal.
+        std::vector< uint32_t > order( n );
+        for( uint32_t v = 0; v < n; ++v )
+            order[v] = v;
+        auto key = [p]( uint32_t v, int k ) {
+            uint32_t bits;
+            std::memcpy( &bits, p + size_t( v ) * 3 + k, 4 );
+            return bits;
+        };
+        std::sort( order.begin(), order.end(), [&]( uint32_t a, uint32_t b ) {
+            for( int k = 0; k < 3; ++k )
+                if( key( a, k ) != key( b, k ) )
+                    return key( a, k ) < key( b, k );
+            return a < b;
+        } );
+        auto same = [&]( uint32_t a, uint32_t b ) { return key( a, 0 ) == key( b, 0 ) && key( a, 1 ) == key( b, 1 ) && key( a, 2 ) == key( b, 2 ); };
+        for( uint32_t i = 0; i < n; )
+        {
+            uint32_t j = i + 1;
+            while( j < n && same( order[i], order[j] ) )
+                ++j;
+            if( j - i > 1 )
+            {
+                vec3 sum;
+                for( uint32_t k = i; k < j; ++k )
+                    sum += acc[order[k]];
+                for( uint32_t k = i; k < j; ++k )
+                    acc[order[k]] = sum;
+            }
+            i = j;
+        }
     }
     parallel_for( n, 16384, [&]( size_t b, size_t e ) {
         for( size_t v = b; v < e; ++v )

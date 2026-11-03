@@ -205,7 +205,7 @@ const float * vertex_normals( const fr_mesh & m, std::vector< float > & storage 
     if( m.normals )
         return m.normals;
     storage.resize( size_t( m.vertex_count ) * 3 );
-    compute_vertex_normals( m.positions, m.vertex_count, m.indices, m.triangle_count, storage.data() );
+    compute_vertex_normals( m.positions, m.vertex_count, m.indices, m.triangle_count, storage.data(), m.uvs != nullptr );
     return storage.data();
 }
 

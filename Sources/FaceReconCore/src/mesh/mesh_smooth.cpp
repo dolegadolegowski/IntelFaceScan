@@ -253,7 +253,7 @@ fr_status fr_mesh_smooth( fr_mesh * mesh, const fr_smooth_params * params )
             taubin_smooth( mesh, p.taubin_iterations, p.taubin_lambda, p.taubin_mu, p.bilateral_iterations > 0, sigma_r );
         if( mesh->normals )
             compute_vertex_normals( mesh->positions, mesh->vertex_count, mesh->indices, mesh->triangle_count,
-                                    mesh->normals );
+                                    mesh->normals, mesh->uvs != nullptr );
         return FR_OK;
     } );
 }

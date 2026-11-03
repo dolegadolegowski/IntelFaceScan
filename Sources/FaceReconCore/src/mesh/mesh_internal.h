@@ -275,9 +275,10 @@ inline bool has_edge( const csr & out, uint32_t a, uint32_t b )
 // Mean edge length (each undirected edge counted once per incident triangle; 0 for an empty mesh).
 double mean_edge_length( const float * positions, const uint32_t * indices, uint32_t triangle_count );
 
-// Area-weighted vertex normals into normals (3 * vertex_count floats).
+// Area-weighted vertex normals into normals (3 * vertex_count floats). share_coincident: vertices at exactly the same
+// position (UV seam splits) get one common normal, so seams do not show in the shading.
 void compute_vertex_normals( const float * positions, uint32_t vertex_count, const uint32_t * indices,
-                             uint32_t triangle_count, float * normals );
+                             uint32_t triangle_count, float * normals, bool share_coincident = false );
 
 }  // namespace mesh
 }  // namespace fr

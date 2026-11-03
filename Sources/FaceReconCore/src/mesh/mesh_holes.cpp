@@ -476,7 +476,7 @@ fr_status fr_mesh_fill_holes( fr_mesh * mesh, uint32_t max_hole_edges, uint32_t 
             return FR_OK;
         if( b.has_normals )
             compute_vertex_normals( b.positions.data(), b.vertex_count(), b.indices.data(), b.triangle_count(),
-                                    b.normals.data() );
+                                    b.normals.data(), b.has_uvs );
         s = store( b, mesh );
         if( s == FR_OK && filled_holes )
             *filled_holes = filled;

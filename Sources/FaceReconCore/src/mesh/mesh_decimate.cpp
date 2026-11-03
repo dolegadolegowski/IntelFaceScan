@@ -83,7 +83,7 @@ fr_status fr_mesh_decimate( fr_mesh * mesh, uint32_t target_triangles, float max
         b.remove_unreferenced();
         if( b.has_normals )
             compute_vertex_normals( b.positions.data(), b.vertex_count(), b.indices.data(), b.triangle_count(),
-                                    b.normals.data() );
+                                    b.normals.data(), b.has_uvs );
         return store( b, mesh );
     } );
 }
