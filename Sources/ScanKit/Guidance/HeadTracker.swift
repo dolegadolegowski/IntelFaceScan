@@ -232,10 +232,7 @@ public final class HeadTracker: HeadTracking, @unchecked Sendable {
         landmarksRequest.revision = VNDetectFaceLandmarksRequestRevision3
         landmarksRequest.constellation = .constellation76Points
         landmarksRequest.inputFaceObservations = [face]
-        var requests: [VNRequest] = [landmarksRequest]
-        let segmentationRequest = segmentation ? makeSegmentationRequest() : nil
-        if let segmentationRequest { requests.append(segmentationRequest) }
-        do { try handler.perform(requests) } catch { throw HeadTrackerError.vision(error.localizedDescription) }
+        do { try handler.perform([landmarksRequest]) } catch { throw HeadTrackerError.vision(error.localizedDescription) }
 
         let pose = convention.headPose(visionYaw: face.yaw?.doubleValue, visionPitch: face.pitch?.doubleValue,
                                        visionRoll: face.roll?.doubleValue, confidence: face.confidence)
@@ -258,32 +255,28 @@ public final class HeadTracker: HeadTracking, @unchecked Sendable {
                 signCheck.record(pose: pose, cues: cues)
             }
         }
-        var mask: Data?
-        if let segmentationRequest {
-            mask = try segmentationRequest.results?.first.map {
-                try MaskResampler.binaryMask($0.pixelBuffer, width: color.width, height: color.height)
-            }
-        }
+        // The mask is optional (the head mask falls back to an ellipse): a segmentation failure must not cost the
+        // face observation.
+        let mask = segmentation ? try? personMask(handler: handler, width: color.width, height: color.height) : nil
         return HeadObservation(pose: pose, faceRect: faceRect, landmarks: landmarks, personMask: mask, regions: regions)
     }
 
     public func segmentPerson(in frame: CameraFrame) throws -> Data? {
         let buffer = try pixelBuffer(for: frame)
         let handler = VNImageRequestHandler(cvPixelBuffer: buffer, orientation: .up, options: [:])
-        let request = makeSegmentationRequest()
-        do { try handler.perform([request]) } catch { throw HeadTrackerError.vision(error.localizedDescription) }
-        guard let result = request.results?.first else { return nil }
-        return try MaskResampler.binaryMask(result.pixelBuffer, width: frame.color.width, height: frame.color.height)
+        return try personMask(handler: handler, width: frame.color.width, height: frame.color.height)
     }
 
     // MARK: - Helpers
 
-    private func makeSegmentationRequest() -> VNGeneratePersonSegmentationRequest {
+    private func personMask(handler: VNImageRequestHandler, width: Int, height: Int) throws -> Data? {
         let request = VNGeneratePersonSegmentationRequest()
         request.revision = VNGeneratePersonSegmentationRequestRevision1
         request.qualityLevel = segmentationQuality
         request.outputPixelFormat = kCVPixelFormatType_OneComponent8
-        return request
+        do { try handler.perform([request]) } catch { throw HeadTrackerError.vision(error.localizedDescription) }
+        guard let result = request.results?.first else { return nil }
+        return try MaskResampler.binaryMask(result.pixelBuffer, width: width, height: height)
     }
 
     private func pixelBuffer(for frame: CameraFrame) throws -> CVPixelBuffer {
