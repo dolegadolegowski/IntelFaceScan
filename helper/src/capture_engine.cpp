@@ -625,8 +625,9 @@ rs2::device RealSenseEngine::wait_for_reenumeration_locked( const char * what )
     rs2::device arrived;
     {
         std::unique_lock< std::mutex > lock( m_watch->mutex );
-        m_watch->cv.wait_for( lock, k_reenumeration_timeout,
-                              [&] { return m_watch->closed || ( m_watch->lost && m_watch->arrived ); } );
+        // expect_reenumeration_locked() cleared 'arrived', so any instance with our serial is the camera coming
+        // back (the watcher may report the removal and the arrival in one event, or miss the removal).
+        m_watch->cv.wait_for( lock, k_reenumeration_timeout, [&] { return m_watch->closed || bool( m_watch->arrived ); } );
         arrived = m_watch->arrived;
     }
     if( ! arrived )
