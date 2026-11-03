@@ -198,13 +198,16 @@ struct PipelineBenchmark {
         return views
     }()
 
-    static let scan: SynthScan = {
+    static func makeScan(noiseAt1m: Double) -> SynthScan {
         var o = SynthScanOptions()
         o.width = 1280
         o.height = 800
         o.views = views
+        o.noiseAt1m = noiseAt1m
         return makeSyntheticScan(o)
-    }()
+    }
+
+    static let scan = makeScan(noiseAt1m: 0.0025)   // 0.9 mm RMS at 0.6 m
 
     struct Quality {
         var mean = 0.0, p95 = 0.0, nose = 0.0, boundaryEdges = 0, measured = 0
@@ -212,7 +215,7 @@ struct PipelineBenchmark {
 
     /// Surface error against the true head (the world is the camera frame of keyframe 0, whose head pose is
     /// jittered), the error around the nose (fine detail), and boundary edges (holes and open borders).
-    static func quality(_ mesh: ReconMesh) -> Quality {
+    static func quality(_ mesh: ReconMesh, scan: SynthScan = PipelineBenchmark.scan) -> Quality {
         let t = scan.truth[0]
         let r = simd_float3x3(SIMD3(t.columns.0.x, t.columns.0.y, t.columns.0.z), SIMD3(t.columns.1.x, t.columns.1.y, t.columns.1.z),
                               SIMD3(t.columns.2.x, t.columns.2.y, t.columns.2.z))
@@ -268,6 +271,24 @@ struct PipelineBenchmark {
         #expect(elapsed < 60)
         #expect(result.report.usedFrames == Self.views.count)
         #expect(worst < 0.0015)
+    }
+
+    /// Voxel size against depth noise (D455 at 0.6 m: 0.5 - 1.5 mm RMS before filtering).
+    @Test func voxelSizeVersusNoise() async throws {
+        var rows = ["| depth noise at 0.6 m | voxel | mean error (mm) | p95 (mm) | nose (mm) | vertices |", "|---|---|---|---|---|---|"]
+        for noiseAt06 in [0.5, 0.9, 1.5] {
+            let scan = Self.makeScan(noiseAt1m: noiseAt06 / 1000 / 0.36)
+            for voxel: Float in [1.0, 0.75, 0.5] {
+                var o = ReconstructionOptions()
+                o.voxelSizeMM = voxel
+                o.truncationMM = max(4, Float(3 * noiseAt06))
+                let r = try await ReconstructionPipeline(options: o).run(scan.capture)
+                let q = Self.quality(r.mesh, scan: scan)
+                rows.append(String(format: "| %.1f mm | %.2f mm | %.3f | %.3f | %.3f | %d |", noiseAt06, voxel, q.mean * 1000, q.p95 * 1000,
+                                   q.nose * 1000, r.mesh.vertexCount))
+            }
+        }
+        print("voxel sweep:\n" + rows.joined(separator: "\n"))
     }
 
     /// TSDF (GPU / CPU, several voxel sizes) against screened Poisson on the same scan (docs/RECONSTRUCTION.md).

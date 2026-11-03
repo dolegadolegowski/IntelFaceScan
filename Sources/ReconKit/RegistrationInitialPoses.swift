@@ -18,12 +18,18 @@ enum InitialPoseEstimator {
 
     struct Result {
         var worldFromCamera: [simd_float4x4]
-        /// Frames whose translation came from landmarks (the others from the head centroid).
-        var landmarkFrames: Int
+        /// Frames whose pose came from a landmark Kabsch fit (rotation and translation).
+        var kabschFrames: Int
+        /// Frames with the Vision rotation and a landmark translation.
+        var landmarkTranslationFrames: Int
     }
 
-    /// Head rotation in the camera frame (ScanKit.HeadPose convention).
-    static func rotation(_ pose: HeadPose) -> simd_float3x3 { simd_float3x3(pose.cameraFrameRotation) }
+    /// Head rotation in the camera frame (ScanKit.HeadPose convention); non-finite angles count as 0.
+    static func rotation(_ pose: HeadPose) -> simd_float3x3 {
+        let clean = HeadPose(yaw: pose.yaw.isFinite ? pose.yaw : 0, pitch: pose.pitch.isFinite ? pose.pitch : 0,
+                             roll: pose.roll.isFinite ? pose.roll : 0)
+        return simd_float3x3(clean.cameraFrameRotation)
+    }
 
     /// Initial world_from_camera per keyframe; world = camera frame of keyframes[reference].
     static func estimate(keyframes: [Keyframe], segments: [SegmentedKeyframe], reference: Int) -> Result {
@@ -31,20 +37,26 @@ enum InitialPoseEstimator {
         let centers = segments.map { headCenter($0) }
         let landmarks = zip(keyframes, segments).map { landmarkPoints($0.0, $0.1) }
         var poses: [simd_float4x4] = []
-        var fromLandmarks = 0
+        var kabsch = 0, translated = 0
         for i in keyframes.indices {
+            if i == reference {
+                poses.append(matrix_identity_float4x4)
+                continue
+            }
             // A head point p (world) appears in frame i at R_i R_ref^T (p - c_ref) + c_i: world_from_camera_i has
             // rotation R_ref R_i^T.
             let r = rRef * rotation(keyframes[i].headPose).transpose
-            var t = centers[reference] - r * centers[i]
-            if i != reference, let lt = landmarkTranslation(rotation: r, reference: landmarks[reference], frame: landmarks[i]) {
-                t = lt
-                fromLandmarks += 1
+            if let fit = landmarkKabsch(reference: landmarks[reference], frame: landmarks[i], visionRotation: r) {
+                poses.append(fit)
+                kabsch += 1
+            } else if let t = landmarkTranslation(rotation: r, reference: landmarks[reference], frame: landmarks[i]) {
+                poses.append(simd_float4x4(rotation: r, translation: t))
+                translated += 1
+            } else {
+                poses.append(simd_float4x4(rotation: r, translation: centers[reference] - r * centers[i]))
             }
-            if i == reference { t = .zero }
-            poses.append(simd_float4x4(rotation: i == reference ? matrix_identity_float3x3 : r, translation: t))
         }
-        return Result(worldFromCamera: poses, landmarkFrames: fromLandmarks)
+        return Result(worldFromCamera: poses, kabschFrames: kabsch, landmarkTranslationFrames: translated)
     }
 
     /// Approximate head center in the camera frame: centroid of the head-mask points pushed back along the ray.
@@ -76,6 +88,120 @@ enum InitialPoseEstimator {
             guard let z = s.depth.median(around: l, radius: 2, band: band) else { return nil }
             return s.depth.point(l, depth: z)
         }
+    }
+
+    /// Rigid fit of the frame's 3D landmarks onto the reference's (Horn's closed form, iteratively trimmed against
+    /// landmarks Vision places on occluded parts of a turned face). Accepted only when well supported, spread in 3D,
+    /// and within 12 degrees of the Vision rotation; Vision is noisier, but never wildly wrong.
+    static func landmarkKabsch(reference: [SIMD3<Float>?], frame: [SIMD3<Float>?], visionRotation: simd_float3x3) -> simd_float4x4? {
+        guard reference.count == frame.count else { return nil }
+        var pairs: [(SIMD3<Float>, SIMD3<Float>)] = []
+        for (a, b) in zip(reference, frame) {
+            if let a, let b { pairs.append((a, b)) }
+        }
+        guard pairs.count >= 8 else { return nil }
+        var inliers = pairs
+        var pose = matrix_identity_float4x4
+        var rms: Float = .infinity
+        for _ in 0 ..< 5 {
+            guard inliers.count >= 8, let fit = horn(inliers) else { return nil }
+            pose = fit
+            let residuals = pairs.map { simd_length($0.0 - transform(fit, $0.1)) }
+            let median = residuals.sorted()[residuals.count / 2]
+            let limit = max(3 * median, 0.004)
+            inliers = zip(pairs, residuals).filter { $0.1 < limit }.map(\.0)
+            let used = residuals.filter { $0 < limit }
+            rms = used.isEmpty ? .infinity : (used.map { $0 * $0 }.reduce(0, +) / Float(used.count)).squareRoot()
+        }
+        guard inliers.count >= 8, rms < 0.004 else { return nil }
+        // Spread: landmarks along a line (or on a tiny patch) do not fix the rotation. Require a covariance whose
+        // geometric-mean standard deviation exceeds 6 mm.
+        let mean = inliers.map(\.1).reduce(.zero, +) / Float(inliers.count)
+        var cov = simd_float3x3()
+        for (_, b) in inliers {
+            let d = b - mean
+            cov += simd_float3x3(columns: (d * d.x, d * d.y, d * d.z))
+        }
+        cov *= 1 / Float(inliers.count)
+        let det = cov.determinant
+        guard det.isFinite, det > 0, pow(det, 1.0 / 6.0) > 0.006 else { return nil }
+        let rotationError = simd_quatf(visionRotation.transpose * pose.upperLeft3x3).angle
+        guard min(rotationError, 2 * .pi - rotationError) < 12 * .pi / 180 else { return nil }
+        return pose
+    }
+
+    static func transform(_ m: simd_float4x4, _ p: SIMD3<Float>) -> SIMD3<Float> {
+        let q = m * SIMD4(p, 1)
+        return SIMD3(q.x, q.y, q.z)
+    }
+
+    /// Least-squares rigid transform mapping pairs.1 onto pairs.0 (Horn 1987: the rotation quaternion is the
+    /// dominant eigenvector of a symmetric 4x4 matrix built from the cross-covariance).
+    static func horn(_ pairs: [(SIMD3<Float>, SIMD3<Float>)]) -> simd_float4x4? {
+        let n = Double(pairs.count)
+        var ca = SIMD3<Double>.zero, cb = SIMD3<Double>.zero
+        for (a, b) in pairs {
+            ca += SIMD3<Double>(a)
+            cb += SIMD3<Double>(b)
+        }
+        ca /= n
+        cb /= n
+        var s = [[Double]](repeating: [0, 0, 0], count: 3)   // s[i][j] = sum of b_i a_j (centered)
+        for (a, b) in pairs {
+            let da = SIMD3<Double>(a) - ca, db = SIMD3<Double>(b) - cb
+            for i in 0 ..< 3 { for j in 0 ..< 3 { s[i][j] += db[i] * da[j] } }
+        }
+        let (sxx, sxy, sxz) = (s[0][0], s[0][1], s[0][2])
+        let (syx, syy, syz) = (s[1][0], s[1][1], s[1][2])
+        let (szx, szy, szz) = (s[2][0], s[2][1], s[2][2])
+        var m: [[Double]] = [
+            [sxx + syy + szz, syz - szy, szx - sxz, sxy - syx],
+            [syz - szy, sxx - syy - szz, sxy + syx, szx + sxz],
+            [szx - sxz, sxy + syx, -sxx + syy - szz, syz + szy],
+            [sxy - syx, szx + sxz, syz + szy, -sxx - syy + szz],
+        ]
+        guard let q = dominantEigenvector(&m) else { return nil }
+        let quat = simd_quatd(ix: q[1], iy: q[2], iz: q[3], r: q[0]).normalized
+        let r = simd_double3x3(quat)
+        let t = ca - r * cb
+        let rf = simd_float3x3(SIMD3<Float>(r.columns.0), SIMD3<Float>(r.columns.1), SIMD3<Float>(r.columns.2))
+        return simd_float4x4(rotation: rf, translation: SIMD3<Float>(t))
+    }
+
+    /// Eigenvector of the largest eigenvalue of a symmetric 4x4 matrix (cyclic Jacobi rotations).
+    static func dominantEigenvector(_ a: inout [[Double]]) -> [Double]? {
+        var v: [[Double]] = (0 ..< 4).map { i in (0 ..< 4).map { $0 == i ? 1 : 0 } }
+        for _ in 0 ..< 50 {
+            var off = 0.0
+            for p in 0 ..< 4 { for q in (p + 1) ..< 4 { off += a[p][q] * a[p][q] } }
+            if off < 1e-24 { break }
+            for p in 0 ..< 4 {
+                for q in (p + 1) ..< 4 where abs(a[p][q]) > 1e-300 {
+                    let theta = (a[q][q] - a[p][p]) / (2 * a[p][q])
+                    let t = (theta >= 0 ? 1.0 : -1.0) / (abs(theta) + (theta * theta + 1).squareRoot())
+                    let c = 1 / (t * t + 1).squareRoot(), sn = t * c
+                    for k in 0 ..< 4 {
+                        let akp = a[k][p], akq = a[k][q]
+                        a[k][p] = c * akp - sn * akq
+                        a[k][q] = sn * akp + c * akq
+                    }
+                    for k in 0 ..< 4 {
+                        let apk = a[p][k], aqk = a[q][k]
+                        a[p][k] = c * apk - sn * aqk
+                        a[q][k] = sn * apk + c * aqk
+                    }
+                    for k in 0 ..< 4 {
+                        let vkp = v[k][p], vkq = v[k][q]
+                        v[k][p] = c * vkp - sn * vkq
+                        v[k][q] = sn * vkp + c * vkq
+                    }
+                }
+            }
+        }
+        var best = 0
+        for i in 1 ..< 4 where a[i][i] > a[best][best] { best = i }
+        let vec = (0 ..< 4).map { v[$0][best] }
+        return vec.allSatisfy { $0.isFinite } ? vec : nil
     }
 
     /// Least-squares translation for a fixed rotation over corresponding landmarks, robust to landmarks Vision

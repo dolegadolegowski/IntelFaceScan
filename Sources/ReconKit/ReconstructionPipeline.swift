@@ -157,8 +157,9 @@ final class PipelineRun: @unchecked Sendable {
         }
         let regSegments = usable.compactMap { segments[$0] }
         let initial = InitialPoseEstimator.estimate(keyframes: regKeyframes, segments: regSegments, reference: 0)
-        report.notes.append("initial translations: \(initial.landmarkFrames) from landmarks, "
-                            + "\(usable.count - 1 - initial.landmarkFrames) from head centroids")
+        report.notes.append("initial poses: \(initial.kabschFrames) landmark fits, \(initial.landmarkTranslationFrames) Vision "
+                            + "rotation + landmark translation, "
+                            + "\(usable.count - 1 - initial.kabschFrames - initial.landmarkTranslationFrames) Vision rotation + head centroid")
         let weights = Self.frameWeights(regKeyframes)
         let regFrames = RGBDFrameSet(keyframes: regKeyframes, initialPoses: initial.worldFromCamera, weights: weights,
                                      includeColor: options.useColoredICP)
@@ -264,7 +265,7 @@ final class PipelineRun: @unchecked Sendable {
         }
         try checkCancelled()
 
-        let exportTransform = Self.exportTransform(mesh: mesh, headFrame: headFrame)
+        let exportTransform = Self.exportTransform(mesh: mesh, headFrame: headFrame, belowChin: Self.chinCropOffset)
         report.vertexCount = mesh.vertexCount
         report.triangleCount = mesh.triangleCount
         report.durations["total"] = Double(DispatchTime.now().uptimeNanoseconds - total) / 1e9
@@ -417,16 +418,20 @@ final class PipelineRun: @unchecked Sendable {
     }
 
     /// World (camera frame of the reference keyframe: +Y down, face toward -Z) -> export frame (+Y up, face toward
-    /// +Z, origin at the center of the head's bounding box in that orientation). Rigid.
-    static func exportTransform(mesh: ReconMesh, headFrame: HeadFrame) -> simd_float4x4 {
+    /// +Z, origin at the center of the head's bounding box in that orientation). Rigid. With shoulders kept, only the
+    /// part above the chin plane counts as the head.
+    static func exportTransform(mesh: ReconMesh, headFrame: HeadFrame, belowChin: Float) -> simd_float4x4 {
         let r = headFrame.exportRotation
         var lo = SIMD3<Float>(repeating: .infinity), hi = SIMD3<Float>(repeating: -.infinity)
+        var count = 0
         for p in mesh.positions {
+            if let chin = headFrame.chin, simd_dot(p - chin, headFrame.up) < -belowChin { continue }
             let q = r * p
             lo = simd_min(lo, q)
             hi = simd_max(hi, q)
+            count += 1
         }
-        let center = mesh.positions.isEmpty ? SIMD3<Float>.zero : (lo + hi) / 2
+        let center = count == 0 ? SIMD3<Float>.zero : (lo + hi) / 2
         return simd_float4x4(rotation: r, translation: -center)
     }
 }
