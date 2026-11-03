@@ -1008,6 +1008,12 @@ TEST_CASE( live_streaming_and_recording )
     CHECK( engine.streaming() );
     CHECK( rig.col.event_count( "recording_started" ) == 1 );
     CHECK_THROWS_WITH( engine.start_recording( dir.file( "b.db3" ), "db3" ), "already running" );
+    CaptureConfig other = c;
+    other.enable_ir = false;
+    other.send_ir = false;
+    CHECK_THROWS_WITH( engine.configure( to_json( other ) ), "Stop the recording before changing the streams" );
+    engine.set_filters( to_json( FilterConfig() ) );  // filters may change while recording
+    engine.set_filters( to_json( FilterConfig::none() ) );
     rig.feed( 15 );
     engine.stop_recording();
     CHECK( engine.streaming() );
@@ -1062,6 +1068,68 @@ TEST_CASE( live_streaming_and_recording )
         CHECK( played.front().metadata["imu"].is_object() );
         AlignmentScore s = score_alignment( o, played.front().planes[1], o.depth_units, 0.003 );
         CHECK_MSG( s.agree > 0.97, s.agree );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Throughput (printed for docs/CAMERA.md; the bounds only catch gross regressions)
+
+TEST_CASE( bench_processing_and_recording )
+{
+    TempDir dir;
+    RecordingOptions o;
+    o.frames = 90;
+    o.pace = false;
+    o.imu = false;
+
+    // Recording: uncompressed and compressed .db3 of 1280x720 Z16 + 1280x800 RGB8 (the scene is rendered once).
+    for( bool compress : { false, true } )
+    {
+        o.path = dir.file( compress ? "bench-z.db3" : "bench.db3" );
+        o.compress = compress;
+        auto t0 = std::chrono::steady_clock::now();
+        write_test_recording( o );
+        double s = std::chrono::duration< double >( std::chrono::steady_clock::now() - t0 ).count();
+        double mb = double( fs::file_size( o.path ) ) / ( 1024.0 * 1024.0 );
+        std::printf( "    record .db3 %s: %d frames in %.2f s (%.0f fps), %.2f MB/frame\n",
+                     compress ? "compressed  " : "uncompressed", o.frames, s, o.frames / s, mb / o.frames );
+    }
+
+    // Processing: playback without real time is bounded by the reader and the processing thread.
+    o.path = dir.file( "bench.db3" );
+    std::vector< std::pair< const char *, FilterConfig > > variants;
+    variants.emplace_back( "no filters", FilterConfig::none() );
+    FilterConfig f = FilterConfig::none();
+    f.threshold.enabled = true;
+    variants.emplace_back( "threshold", f );
+    f = FilterConfig::none();
+    f.spatial.enabled = true;
+    variants.emplace_back( "spatial (disparity)", f );
+    f = FilterConfig::none();
+    f.temporal.enabled = true;
+    variants.emplace_back( "temporal (disparity)", f );
+    f = FilterConfig::none();
+    f.hole_filling.enabled = true;
+    variants.emplace_back( "hole filling", f );
+    variants.emplace_back( "face-scan filters", FilterConfig() );
+    double none_ms = 0;
+    for( auto & v : variants )
+    {
+        CaptureConfig config;
+        config.enable_imu = false;
+        config.filters = v.second;
+        Collector col( 1000000 );
+        auto t0 = std::chrono::steady_clock::now();
+        auto sets = play_all( o.path, config, col );
+        double s = std::chrono::duration< double >( std::chrono::steady_clock::now() - t0 ).count();
+        double ms = s * 1000.0 / std::max< size_t >( sets.size(), 1 );
+        if( v.second.threshold.enabled == false && ! v.second.spatial.enabled && ! v.second.temporal.enabled
+            && ! v.second.hole_filling.enabled )
+            none_ms = ms;
+        std::printf( "    playback + %-22s + align: %5.1f ms/frameset (%3.0f fps), filters %+5.1f ms\n", v.first, ms,
+                     1000.0 / ms, ms - none_ms );
+        CHECK( sets.size() == size_t( o.frames ) );
+        CHECK_MSG( 1000.0 / ms > 15, ms );
     }
 }
 

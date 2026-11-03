@@ -521,11 +521,17 @@ void RealSenseEngine::open_playback( const std::string & file, bool real_time )
                      + ( real_time ? "real time" : "every frame" ) + ")" );
 }
 
+// Device objects replaced in the watch are destroyed only after its mutex is released: destroying a device runs
+// librealsense code that must not wait on the devices-changed thread while that thread waits for the mutex.
+
 void RealSenseEngine::adopt_device_locked( const rs2::device & device )
 {
     m_device = device;
     m_serial = camera_info( device, RS2_CAMERA_INFO_SERIAL_NUMBER );
+    rs2::device old_current, old_arrived;
     std::lock_guard< std::mutex > lock( m_watch->mutex );
+    old_current = m_watch->current;
+    old_arrived = m_watch->arrived;
     m_watch->serial = m_serial;
     m_watch->current = device;
     m_watch->arrived = rs2::device();
@@ -535,9 +541,13 @@ void RealSenseEngine::adopt_device_locked( const rs2::device & device )
 
 void RealSenseEngine::release_device_locked()
 {
+    rs2::device old;
+    {
+        std::lock_guard< std::mutex > lock( m_watch->mutex );
+        old = m_watch->current;
+        m_watch->current = rs2::device();
+    }
     m_device = rs2::device();
-    std::lock_guard< std::mutex > lock( m_watch->mutex );
-    m_watch->current = rs2::device();
 }
 
 void RealSenseEngine::install_device_callback_locked()
@@ -545,34 +555,50 @@ void RealSenseEngine::install_device_callback_locked()
     auto watch = m_watch;
     CaptureCallbacks cb = callbacks();
     m_ctx->set_devices_changed_callback( [watch, cb]( rs2::event_information & info ) {
-        bool disconnected = false, connected = false;
+        // librealsense is called without holding the watch's mutex (the engine's thread takes it while it calls
+        // librealsense), the results are applied under it.
+        rs2::device current;
         std::string serial;
         {
             std::lock_guard< std::mutex > lock( watch->mutex );
             if( watch->closed )
                 return;
+            current = watch->current;
             serial = watch->serial;
-            try
+        }
+        bool removed = false;
+        rs2::device match;
+        try
+        {
+            removed = current && info.was_removed( current );
+            rs2::device_list added = info.get_new_devices();
+            for( uint32_t i = 0; i < added.size(); ++i )
             {
-                if( watch->current && ! watch->lost && info.was_removed( watch->current ) )
-                {
-                    watch->lost = true;
-                    disconnected = ! watch->expected;
-                }
-                rs2::device_list added = info.get_new_devices();
-                for( uint32_t i = 0; i < added.size(); ++i )
-                {
-                    rs2::device d = added[i];
-                    if( ! d.is< rs2::update_device >() && camera_info( d, RS2_CAMERA_INFO_SERIAL_NUMBER ) == serial )
-                    {
-                        watch->arrived = d;
-                        connected = watch->lost && ! watch->expected;
-                    }
-                }
+                rs2::device d = added[i];
+                if( ! d.is< rs2::update_device >() && camera_info( d, RS2_CAMERA_INFO_SERIAL_NUMBER ) == serial )
+                    match = d;
             }
-            catch( const std::exception & )
+        }
+        catch( const std::exception & )
+        {
+            // A device that vanishes again while being inspected; the next event tells the rest.
+        }
+        bool disconnected = false, connected = false;
+        rs2::device replaced;
+        {
+            std::lock_guard< std::mutex > lock( watch->mutex );
+            if( watch->closed )
+                return;
+            if( removed && ! watch->lost && watch->current.get() == current.get() )
             {
-                // A device that vanishes again while being inspected; the next event tells the rest.
+                watch->lost = true;
+                disconnected = ! watch->expected;
+            }
+            if( match )
+            {
+                replaced = watch->arrived;
+                watch->arrived = match;
+                connected = watch->lost && ! watch->expected;
             }
             watch->cv.notify_all();
         }
@@ -586,7 +612,9 @@ void RealSenseEngine::install_device_callback_locked()
 
 void RealSenseEngine::expect_reenumeration_locked()
 {
+    rs2::device old;
     std::lock_guard< std::mutex > lock( m_watch->mutex );
+    old = m_watch->arrived;
     m_watch->expected = true;
     m_watch->lost = false;
     m_watch->arrived = rs2::device();
@@ -1122,7 +1150,19 @@ uint64_t RealSenseEngine::finish_recording_locked()
     emit_event( callbacks(), "recording_finished", { { "bytes", bytes } } );
     m_recording_path.clear();
     if( restart )
-        start_session_locked( false );
+    {
+        // The file is complete whatever happens now; a failed restart is reported, not thrown.
+        try
+        {
+            start_session_locked( false );
+        }
+        catch( const std::exception & e )
+        {
+            log( "error", e.what() );
+            emit_event( callbacks(), "error", { { "message", e.what() } } );
+            emit_event( callbacks(), "streaming_stopped" );
+        }
+    }
     return bytes;
 }
 
@@ -1283,6 +1323,9 @@ void RealSenseEngine::configure( const json & configuration )
     try
     {
         bool restart = was_streaming && ( ! m_configured || ! config.same_streams( m_config ) );
+        // A recording keeps the streams it started with (a file with changing stream profiles does not play back).
+        if( m_recorder && m_configured && ! config.same_streams( m_config ) )
+            throw std::runtime_error( "Stop the recording before changing the streams" );
         select_streams_locked( config );
         if( needs_advanced_mode_locked( config ) )
         {
@@ -1430,7 +1473,19 @@ void RealSenseEngine::start_recording( const std::string & path, const std::stri
         throw std::runtime_error( message );
     }
     if( restart )
-        start_session_locked( false );
+    {
+        try
+        {
+            start_session_locked( false );
+        }
+        catch( ... )
+        {
+            m_recorder.reset();
+            m_recording_path.clear();
+            emit_event( callbacks(), "streaming_stopped" );
+            throw;
+        }
+    }
     log( "info", "Recording (" + format + ")" );
     emit_event( callbacks(), "recording_started", { { "format", format } } );
 }
@@ -1521,13 +1576,18 @@ void RealSenseEngine::shutdown()
         log( "error", std::string( "Stopping the streams: " ) + e.what() );
     }
     m_recorder.reset();
+    rs2::device old_current, old_arrived;
     {
         std::lock_guard< std::mutex > watch_lock( m_watch->mutex );
         m_watch->closed = true;
+        old_current = m_watch->current;
+        old_arrived = m_watch->arrived;
         m_watch->current = rs2::device();
         m_watch->arrived = rs2::device();
         m_watch->cv.notify_all();
     }
+    old_current = rs2::device();
+    old_arrived = rs2::device();
     if( m_ctx )
     {
         try
