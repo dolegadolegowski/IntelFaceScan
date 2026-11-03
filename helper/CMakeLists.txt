@@ -23,10 +23,16 @@ file(GLOB IFS_HELPER_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/
 add_executable(IntelFaceScanHelper ${IFS_HELPER_SOURCES})
 target_include_directories(IntelFaceScanHelper PRIVATE
     src
-    "${CMAKE_CURRENT_SOURCE_DIR}/../Sources/IFSProtocol/include"
-    "${IFS_SDK_DIR}/include")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../Sources/IFSProtocol/include")
+# Third-party headers: their warnings are not ours to fix.
+target_include_directories(IntelFaceScanHelper SYSTEM PRIVATE "${IFS_SDK_DIR}/include")
 target_sources(IntelFaceScanHelper PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../Sources/IFSProtocol/ifs_protocol.c")
-target_compile_options(IntelFaceScanHelper PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_compile_options(IntelFaceScanHelper PRIVATE -Wall -Wextra -Wno-unused-parameter
+    # The live helper runs as root: keep the cheap memory-safety checks on in every build.
+    -fstack-protector-strong
+    # No absolute build paths (with the user name) in the binary.
+    "-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/..=.")
+target_compile_definitions(IntelFaceScanHelper PRIVATE $<$<NOT:$<CONFIG:Debug>>:_FORTIFY_SOURCE=2>)
 target_link_libraries(IntelFaceScanHelper PRIVATE realsense2::realsense2 "-framework IOKit" "-framework CoreFoundation")
 # The bundled helper loads librealsense from the app's Frameworks folder only.
 set_target_properties(IntelFaceScanHelper PROPERTIES

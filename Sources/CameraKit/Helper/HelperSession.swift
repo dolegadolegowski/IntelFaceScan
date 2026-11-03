@@ -171,7 +171,11 @@ final class HelperCameraSession: @unchecked Sendable {
             throw error
         }
         let session = Active(server: server, process: process)
-        lock.withLock { starting = session }
+        let raced: Bool = lock.withLock {
+            starting = session
+            return shuttingDown
+        }
+        if raced { server.abort() }
         defer { lock.withLock { if starting === session { starting = nil } } }
         // A helper that ends before connecting (cancelled prompt, bad arguments) must not leave us waiting.
         process.onExit { [weak self, weak server] status, error in
@@ -281,11 +285,16 @@ final class HelperCameraSession: @unchecked Sendable {
                 events.yield(.log(.warning, "dropped invalid frameset: \(reason)"))
             }
         }
-        h.bye = { [weak self] reason in
-            self?.lock.withLock { session.byeReceived = true }
-            self?.logger.info("camera helper said goodbye: \(reason ?? "", privacy: .public)")
+        // Weak: the session record owns the connection that owns these handlers.
+        h.bye = { [weak self, weak session] reason in
+            guard let self, let session else { return }
+            lock.withLock { session.byeReceived = true }
+            logger.info("camera helper said goodbye: \(reason ?? "", privacy: .public)")
         }
-        h.closed = { [weak self] error in self?.connectionClosed(session, error: error) }
+        h.closed = { [weak self, weak session] error in
+            guard let self, let session else { return }
+            connectionClosed(session, error: error)
+        }
         return h
     }
 

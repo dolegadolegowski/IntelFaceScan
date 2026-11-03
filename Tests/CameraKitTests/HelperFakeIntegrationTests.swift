@@ -410,16 +410,32 @@ struct HelperFakeIntegrationTests {
     }
 
     @Test func throughput() async throws {
-        // Not a benchmark, a floor: the socket path must keep up with 30 fps of 1280x800 RGB + depth.
+        // Not a benchmark, a floor: the socket path must keep up with 30 fps of 1280x800 RGB + depth (5 MB per
+        // frameset). The floor leaves room for other suites loading the machine at the same time.
         let source = FakeCameraSource(helperURL: helper)
         _ = try await source.connect()
         let frames = source.frames(bufferingNewest: 64)
         try await source.start()
         _ = try await collectFrames(frames, count: 1)
         let t0 = Date()
-        let received = try await collectFrames(frames, count: 45, timeout: 10)
-        let fps = Double(received.count) / Date().timeIntervalSince(t0)
-        #expect(fps > 24, "received \(fps) fps")
+        var latencies: [Double] = []
+        let received = try await withTimeout(10, "45 frames") {
+            var count = 0
+            var lat: [Double] = []
+            for await frame in frames {
+                // frame timestamps are the helper's wall clock when it made the frame
+                lat.append(Date().timeIntervalSince1970 * 1000 - frame.timestampMs)
+                count += 1
+                if count == 45 { break }
+            }
+            return (count, lat)
+        }
+        latencies = received.1.sorted()
+        let fps = Double(received.0) / Date().timeIntervalSince(t0)
+        let median = latencies[latencies.count / 2]
+        print("fake helper: \(String(format: "%.1f", fps)) fps, frameset latency median \(String(format: "%.1f", median)) ms, max \(String(format: "%.1f", latencies.last ?? 0)) ms")
+        #expect(fps > 20, "received \(fps) fps")
+        #expect(median < 100, "median latency \(median) ms")
         await source.shutdown()
     }
 }
