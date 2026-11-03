@@ -87,6 +87,43 @@ struct TextureBakingTests {
         #expect(Double(covered) / Double(n * n) > 0.5)
     }
 
+    /// Dense smooth closed surfaces used to collapse into one orthographic "planar" xatlas chart (and crash the
+    /// packer); the charts must stay small enough to be overlap-free.
+    @Test func denseSmoothSurfacesGetProperCharts() throws {
+        for closed in [true, false] {
+            var mesh = MeshFactory.icosphere(level: 6, radius: TexturedSphere.radius)
+            if !closed {
+                try mesh.withCoreMesh { try check(fr_mesh_crop_plane($0, [0, 0.07, 0], [0, -1, 0])) }
+            }
+            var params = fr_uv_params()
+            fr_uv_params_default(&params)
+            params.texture_size = 2048
+            try mesh.withCoreMesh { try check(fr_mesh_uv_unwrap($0, &params, nil, nil)) }
+            let n = 512
+            var coverage = [UInt8](repeating: 0, count: n * n)
+            var overlaps = 0, covered = 0
+            for t in 0 ..< mesh.triangleCount {
+                let uv = (0 ..< 3).map { mesh.uvs[Int(mesh.indices[3 * t + $0])] * Float(n) }
+                let lo = simd_min(simd_min(uv[0], uv[1]), uv[2]), hi = simd_max(simd_max(uv[0], uv[1]), uv[2])
+                let area = (uv[1].x - uv[0].x) * (uv[2].y - uv[0].y) - (uv[1].y - uv[0].y) * (uv[2].x - uv[0].x)
+                guard abs(area) > 0, lo.x >= 0, lo.y >= 0 else { continue }
+                for y in max(0, Int(lo.y)) ... min(n - 1, Int(hi.y)) {
+                    for x in max(0, Int(lo.x)) ... min(n - 1, Int(hi.x)) {
+                        let p = SIMD2(Float(x) + 0.5, Float(y) + 0.5)
+                        let l0 = ((uv[2].x - uv[1].x) * (p.y - uv[1].y) - (uv[2].y - uv[1].y) * (p.x - uv[1].x)) / area
+                        let l1 = ((uv[0].x - uv[2].x) * (p.y - uv[2].y) - (uv[0].y - uv[2].y) * (p.x - uv[2].x)) / area
+                        guard l0 > 1e-4, l1 > 1e-4, 1 - l0 - l1 > 1e-4 else { continue }
+                        if coverage[y * n + x] > 0 { overlaps += 1 } else { covered += 1 }
+                        coverage[y * n + x] = 1
+                    }
+                }
+            }
+            print("dense \(closed ? "closed" : "open") sphere: \(mesh.vertexCount) vertices, coverage \(Double(covered) / Double(n * n)), overlaps \(overlaps)")
+            #expect(overlaps < covered / 1000)
+            #expect(Double(covered) / Double(n * n) > 0.4)
+        }
+    }
+
     @Test func bakedTextureReproducesTheSurface() throws {
         let mesh = try Self.unwrappedSphere()
         let views = TexturedSphere.surroundingPoses().map { SyntheticView.render(pose: $0) }
