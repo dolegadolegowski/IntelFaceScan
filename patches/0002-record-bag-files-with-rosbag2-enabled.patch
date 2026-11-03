@@ -1,0 +1,28 @@
+diff --git a/src/media/ros_factory.cpp b/src/media/ros_factory.cpp
+index c1988cd..95ce154 100644
+--- a/src/media/ros_factory.cpp
++++ b/src/media/ros_factory.cpp
+@@ -85,6 +85,10 @@ namespace librealsense
+         const std::string& file, bool compress)
+     {
+ #ifdef BUILD_ROSBAG2
++        // Pick the writer by extension, like create_reader_for_file does, so a .bag recording is written in the ROS1
++        // format the reader expects for that extension (ros2_writer only accepts .db3 and would throw)
++        if (!is_db3_file(file))
++            return std::make_shared<ros_writer>(file, compress);
+         rcutils_logging_set_output_handler(rcutils_to_librealsense_log);
+         return std::make_shared<ros2_writer>(file, compress);
+ #else
+diff --git a/src/media/ros_factory.h b/src/media/ros_factory.h
+index 7d03d42..0fa41f8 100644
+--- a/src/media/ros_factory.h
++++ b/src/media/ros_factory.h
+@@ -17,7 +17,7 @@ namespace librealsense
+     std::shared_ptr<device_serializer::reader> create_reader_for_file(
+         const std::string& filename, const std::shared_ptr<context>& ctx);
+ 
+-    // With BUILD_ROSBAG2: always ros2_writer (requires .db3 extension)
++    // With BUILD_ROSBAG2: ros2_writer for .db3, ros_writer (deprecated ROS1 format) for anything else
+     // Without BUILD_ROSBAG2: ros_writer (rejects .db3)
+     std::shared_ptr<device_serializer::writer> create_writer_for_file(
+         const std::string& file, bool compress);
