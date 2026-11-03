@@ -18,11 +18,9 @@ endif()
 set(IFS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../build/sdk/install" CACHE PATH "librealsense install prefix")
 find_package(realsense2 REQUIRED PATHS "${IFS_SDK_DIR}" NO_DEFAULT_PATH)
 
-add_executable(IntelFaceScanHelper
-    src/main.cpp
-    src/capture_engine.cpp
-    src/probe.cpp
-)
+# All sources in src/ (the platform and capture work streams add files there independently).
+file(GLOB IFS_HELPER_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c")
+add_executable(IntelFaceScanHelper ${IFS_HELPER_SOURCES})
 target_include_directories(IntelFaceScanHelper PRIVATE
     src
     "${CMAKE_CURRENT_SOURCE_DIR}/../Sources/IFSProtocol/include"
