@@ -1,0 +1,22 @@
+/build/
+/dist/
+/.build/
+/.swiftpm/
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+.DS_Store
+# scan output and recordings stay local (test recordings are referenced by path, see docs/TESTING.md)
+*.db3
+*.bag
+*.ifsdataset/
+/scans/
+# local tool settings and anything credential-like must never be committed
+/.claude/
+.env
+.env.*
+.netrc
+*.pem
+*.p12
+*.key
+*.mobileprovision

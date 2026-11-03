@@ -1,0 +1,28 @@
+[submodule "third_party/librealsense"]
+	path = third_party/librealsense
+	url = https://github.com/realsenseai/librealsense.git
+	shallow = true
+[submodule "third_party/eigen"]
+	path = third_party/eigen
+	url = https://gitlab.com/libeigen/eigen.git
+	shallow = true
+[submodule "third_party/nanoflann"]
+	path = third_party/nanoflann
+	url = https://github.com/jlblancoc/nanoflann.git
+	shallow = true
+[submodule "third_party/meshoptimizer"]
+	path = third_party/meshoptimizer
+	url = https://github.com/zeux/meshoptimizer.git
+	shallow = true
+[submodule "third_party/xatlas"]
+	path = third_party/xatlas
+	url = https://github.com/jpcy/xatlas.git
+	shallow = true
+[submodule "third_party/stb"]
+	path = third_party/stb
+	url = https://github.com/nothings/stb.git
+	shallow = true
+[submodule "third_party/PoissonRecon"]
+	path = third_party/PoissonRecon
+	url = https://github.com/mkazhdan/PoissonRecon.git
+	shallow = true
