@@ -32,7 +32,10 @@ inline std::vector< TestCase > & registry()
 
 struct Registrar
 {
-    Registrar( const char * name, std::function< void() > body ) { registry().push_back( { name, std::move( body ) } ); }
+    Registrar( const char * name, std::function< void() > body )
+    {
+        registry().push_back( { name, std::move( body ) } );
+    }
 };
 
 struct Failure : std::runtime_error

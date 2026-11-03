@@ -306,34 +306,38 @@ TEST_CASE( config_defaults_roundtrip )
 
 TEST_CASE( config_rejects_invalid_input )
 {
-    json good = to_json( CaptureConfig() );
-    auto with = [&]( const std::function< void( json & ) > & change ) {
-        json j = good;
-        change( j );
-        return j;
-    };
     CHECK_THROWS_WITH( parse_capture_config( json::array() ), "expected a JSON object" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["bogus"] = 1; } ) ), "CaptureConfiguration.bogus: unknown key" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j.erase( "preset" ); } ) ), "CaptureConfiguration.preset: missing" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["depth"]["width"] = "1280"; } ) ), "depth.width: expected an integer" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["depth"]["fps"] = 29.5; } ) ), "depth.fps: expected an integer" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["depth"]["height"] = 0; } ) ), "out of range" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["enable_ir"] = 1; } ) ), "enable_ir: expected true or false" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["preset"] = ""; } ) ), "preset" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["preset"] = "High\nAccuracy"; } ) ), "control characters" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["laser_power"] = -1; } ) ), "laser_power" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["depth_units"] = 0.5; } ) ), "depth_units" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["disparity_shift"] = 600; } ) ), "disparity_shift" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["align_to_color"] = false; } ) ), "align_to_color" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["send_ir"] = true; } ) ), "send_ir: requires enable_ir" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["filters"]["spatial"]["alpha"] = 2; } ) ),
-                       "CaptureConfiguration.filters.spatial.alpha: 2 is out of range [0.25, 1]" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["filters"]["temporal"]["persistence"] = 9; } ) ), "persistence" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["filters"]["hole_filling"]["mode"] = 3; } ) ), "mode" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["filters"]["threshold"]["min_m"] = 2.0; } ) ),
-                       "min_m must be smaller than max_m" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["filters"]["spatial"]["extra"] = 0; } ) ), "unknown key" );
-    CHECK_THROWS_WITH( parse_capture_config( with( []( json & j ) { j["depth_units"] = nullptr; } ) ), "expected a number" );
+
+    // A valid configuration with one thing wrong, and the message that must name it.
+    using Change = std::function< void( json & ) >;
+    const std::vector< std::pair< Change, std::string > > cases = {
+        { []( json & j ) { j["bogus"] = 1; }, "CaptureConfiguration.bogus: unknown key" },
+        { []( json & j ) { j.erase( "preset" ); }, "CaptureConfiguration.preset: missing" },
+        { []( json & j ) { j["depth"]["width"] = "1280"; }, "depth.width: expected an integer" },
+        { []( json & j ) { j["depth"]["fps"] = 29.5; }, "depth.fps: expected an integer" },
+        { []( json & j ) { j["depth"]["height"] = 0; }, "out of range" },
+        { []( json & j ) { j["enable_ir"] = 1; }, "enable_ir: expected true or false" },
+        { []( json & j ) { j["preset"] = ""; }, "preset" },
+        { []( json & j ) { j["preset"] = "High\nAccuracy"; }, "control characters" },
+        { []( json & j ) { j["laser_power"] = -1; }, "laser_power" },
+        { []( json & j ) { j["depth_units"] = 0.5; }, "depth_units" },
+        { []( json & j ) { j["depth_units"] = nullptr; }, "expected a number" },
+        { []( json & j ) { j["disparity_shift"] = 600; }, "disparity_shift" },
+        { []( json & j ) { j["align_to_color"] = false; }, "align_to_color" },
+        { []( json & j ) { j["send_ir"] = true; }, "send_ir: requires enable_ir" },
+        { []( json & j ) { j["filters"]["spatial"]["alpha"] = 2; },
+          "CaptureConfiguration.filters.spatial.alpha: 2 is out of range [0.25, 1]" },
+        { []( json & j ) { j["filters"]["temporal"]["persistence"] = 9; }, "persistence" },
+        { []( json & j ) { j["filters"]["hole_filling"]["mode"] = 3; }, "mode" },
+        { []( json & j ) { j["filters"]["threshold"]["min_m"] = 2.0; }, "min_m must be smaller than max_m" },
+        { []( json & j ) { j["filters"]["spatial"]["extra"] = 0; }, "unknown key" },
+    };
+    for( auto & c : cases )
+    {
+        json j = to_json( CaptureConfig() );
+        c.first( j );
+        CHECK_THROWS_WITH( parse_capture_config( j ), c.second );
+    }
 }
 
 TEST_CASE( config_filters_roundtrip )
@@ -351,7 +355,8 @@ TEST_CASE( config_filters_roundtrip )
     CHECK( ! g.temporal.enabled && g.temporal.delta == 40 && g.temporal.persistence == 5 );
     CHECK( g.hole_filling.enabled && g.hole_filling.mode == 2 );
     FilterConfig none = FilterConfig::none();
-    CHECK( ! none.threshold.enabled && ! none.spatial.enabled && ! none.temporal.enabled && ! none.hole_filling.enabled );
+    CHECK( ! none.threshold.enabled && ! none.spatial.enabled );
+    CHECK( ! none.temporal.enabled && ! none.hole_filling.enabled );
     CHECK_THROWS_WITH( parse_filter_config( json{ { "threshold", 1 } } ), "FilterConfiguration" );
 }
 
@@ -574,7 +579,8 @@ TEST_CASE( playback_db3_end_to_end )
         for( int k = 0; k < 9; ++k )
             CHECK( near( md["depth_to_color"]["rotation"][k].get< double >(), info.depth_to_color.rotation[k], 1e-6 ) );
         for( int k = 0; k < 3; ++k )
-            CHECK( near( md["depth_to_color"]["translation"][k].get< double >(), info.depth_to_color.translation[k], 1e-6 ) );
+            CHECK( near( md["depth_to_color"]["translation"][k].get< double >(), info.depth_to_color.translation[k],
+                         1e-6 ) );
         REQUIRE( md["imu"].is_object() );
         CHECK( near( md["imu"]["accel"][1].get< double >(), -9.81, 1e-4 ) );
         CHECK( md["imu"]["gyro"].size() == 3 );
@@ -659,7 +665,8 @@ TEST_CASE( playback_device_info )
     bool has_depth = false, has_color = false, has_accel = false;
     for( auto & p : info["profiles"] )
     {
-        if( p["stream"] == "depth" && p["format"] == "z16" && p["width"] == 1280 && p["height"] == 720 && p["fps"] == 30 )
+        if( p["stream"] == "depth" && p["format"] == "z16" && p["width"] == 1280 && p["height"] == 720
+            && p["fps"] == 30 )
             has_depth = true;
         if( p["stream"] == "color" && p["format"] == "rgb8" && p["width"] == 1280 && p["height"] == 800 )
             has_color = true;
@@ -847,7 +854,8 @@ TEST_CASE( playback_rejects_live_only_commands )
     o.pace = false;
     write_test_recording( o );
     Collector col;
-    CHECK_THROWS_WITH( CaptureEngine::create_playback( dir.file( "missing.db3" ), true, col.callbacks() ), "not found" );
+    CHECK_THROWS_WITH( CaptureEngine::create_playback( dir.file( "missing.db3" ), true, col.callbacks() ),
+                       "not found" );
     std::string txt = dir.file( "notes.txt" );
     { std::FILE * f = std::fopen( txt.c_str(), "w" ); std::fputs( "x", f ); std::fclose( f ); }
     CHECK_THROWS_WITH( CaptureEngine::create_playback( txt, true, col.callbacks() ), "Unsupported recording" );
@@ -930,10 +938,12 @@ TEST_CASE( live_configure_and_options )
     CHECK( info["serial"] == k_synthetic_serial );
     CHECK( info["presets"].empty() );
 
-    CHECK_THROWS_WITH( engine.configure( to_json( CaptureConfig() ) ), "does not support visual presets ('High Accuracy')" );
+    CHECK_THROWS_WITH( engine.configure( to_json( CaptureConfig() ) ),
+                       "does not support visual presets ('High Accuracy')" );
     CaptureConfig c = LiveRig::config();
     c.depth = { 640, 480, 30 };
-    CHECK_THROWS_WITH( engine.configure( to_json( c ) ), "Depth 640x480@30 Z16 is not available (USB 3.2). Available: 1280x720@30" );
+    CHECK_THROWS_WITH( engine.configure( to_json( c ) ),
+                       "Depth 640x480@30 Z16 is not available (USB 3.2). Available: 1280x720@30" );
     c = LiveRig::config();
     c.color = { 1920, 1080, 30 };
     CHECK_THROWS_WITH( engine.configure( to_json( c ) ), "Color 1920x1080@30 RGB8 is not available" );
@@ -1177,7 +1187,8 @@ TEST_CASE( probe_runs_on_a_recording )
     // Noise 2 mm at 1 m -> 0.72 mm at 0.6 m on a flat target; the plane fit sees it, the median sees 0.6 m.
     CHECK_MSG( near( raw["median_m"].get< double >(), 0.6 / std::cos( 10 * 3.14159265 / 180 ), 0.02 ), raw.dump() );
     CHECK_MSG( raw["plane_rms_mm"].get< double >() > 0.5 && raw["plane_rms_mm"].get< double >() < 1.0, raw.dump() );
-    CHECK_MSG( raw["temporal_noise_mm"].get< double >() > 0.5 && raw["temporal_noise_mm"].get< double >() < 1.0, raw.dump() );
+    double temporal = raw["temporal_noise_mm"].get< double >();
+    CHECK_MSG( temporal > 0.5 && temporal < 1.0, raw.dump() );
     CHECK( raw["fill_rate"].get< double >() > 0.99 );
     const json & filtered = report["results"][0]["filtered"];
     CHECK_MSG( filtered["plane_rms_mm"].get< double >() < raw["plane_rms_mm"].get< double >(), filtered.dump() );

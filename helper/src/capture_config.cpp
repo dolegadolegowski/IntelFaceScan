@@ -224,7 +224,8 @@ CaptureConfig parse_capture_config( const json & j )
 json to_json( const FilterConfig & f )
 {
     return json{
-        { "threshold", { { "enabled", f.threshold.enabled }, { "min_m", f.threshold.min_m }, { "max_m", f.threshold.max_m } } },
+        { "threshold",
+          { { "enabled", f.threshold.enabled }, { "min_m", f.threshold.min_m }, { "max_m", f.threshold.max_m } } },
         { "disparity_domain", f.disparity_domain },
         { "spatial",
           { { "enabled", f.spatial.enabled },

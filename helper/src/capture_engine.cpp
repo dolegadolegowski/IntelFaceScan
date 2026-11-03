@@ -217,7 +217,8 @@ void run_worker( std::shared_ptr< Session > session, std::shared_ptr< Shared > s
     std::vector< std::pair< rs2_stream, int > > expected;
     for( auto & p : session->streams.depth_profiles )
         expected.emplace_back( p.stream_type(), p.stream_index() );
-    expected.emplace_back( session->streams.color_profile.stream_type(), session->streams.color_profile.stream_index() );
+    const rs2::stream_profile & color = session->streams.color_profile;
+    expected.emplace_back( color.stream_type(), color.stream_index() );
     FramesetPairer pairer( expected );
 
     auto handle = [&]( const rs2::frameset & synced ) {
@@ -632,7 +633,8 @@ rs2::device RealSenseEngine::wait_for_reenumeration_locked( const char * what )
         std::unique_lock< std::mutex > lock( m_watch->mutex );
         // expect_reenumeration_locked() cleared 'arrived', so any instance with our serial is the camera coming
         // back (the watcher may report the removal and the arrival in one event, or miss the removal).
-        m_watch->cv.wait_for( lock, k_reenumeration_timeout, [&] { return m_watch->closed || bool( m_watch->arrived ); } );
+        m_watch->cv.wait_for( lock, k_reenumeration_timeout,
+                              [&] { return m_watch->closed || bool( m_watch->arrived ); } );
         arrived = m_watch->arrived;
     }
     if( ! arrived )

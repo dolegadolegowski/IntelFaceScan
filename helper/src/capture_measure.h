@@ -25,7 +25,8 @@ struct DepthView
 
     uint16_t at( int x, int y ) const
     {
-        return reinterpret_cast< const uint16_t * >( reinterpret_cast< const uint8_t * >( data ) + y * stride_bytes )[x];
+        auto row = reinterpret_cast< const uint8_t * >( data ) + size_t( y ) * stride_bytes;
+        return reinterpret_cast< const uint16_t * >( row )[x];
     }
 };
 

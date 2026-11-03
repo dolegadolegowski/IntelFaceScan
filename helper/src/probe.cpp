@@ -234,7 +234,8 @@ public:
     std::optional< DepthFrame > pop( std::chrono::milliseconds timeout, bool & finished )
     {
         std::unique_lock< std::mutex > lock( m_mutex );
-        m_cv.wait_for( lock, timeout, [&] { return ! m_frames.empty() || m_finished || ! m_error.empty() || g_interrupted; } );
+        m_cv.wait_for( lock, timeout,
+                       [&] { return ! m_frames.empty() || m_finished || ! m_error.empty() || g_interrupted; } );
         if( ! m_error.empty() )
             throw std::runtime_error( m_error );
         finished = m_finished;
@@ -329,7 +330,8 @@ json theory( double fx, double baseline_m, int shift, double z )
     return { { "focal_px", fx },
              { "min_z_m", r.min_z_m },
              { "max_z_m", r.max_z_m > 0 ? json( r.max_z_m ) : json( nullptr ) },
-             { "rms_mm_at_median", z > 0 ? json( stereo_rms_error_m( z, fx, baseline_m ) * 1000.0 ) : json( nullptr ) } };
+             { "rms_mm_at_median",
+               z > 0 ? json( stereo_rms_error_m( z, fx, baseline_m ) * 1000.0 ) : json( nullptr ) } };
 }
 
 std::string fmt( const json & v, int decimals, double scale = 1.0, const char * suffix = "" )
@@ -391,10 +393,10 @@ void print_enumeration( const json & info )
             std::string rates;
             for( int f : it->second )
                 rates += ( rates.empty() ? "" : "/" ) + std::to_string( f );
-            list += ( list.empty() ? "" : ", " )
-                  + ( it->first.first ? std::to_string( it->first.first ) + "x" + std::to_string( it->first.second ) + "@"
-                                      : std::string() )
-                  + rates;
+            std::string size;
+            if( it->first.first )
+                size = std::to_string( it->first.first ) + "x" + std::to_string( it->first.second ) + "@";
+            list += ( list.empty() ? "" : ", " ) + size + rates;
         }
         std::printf( "| %s (%s) | %s | %s |\n", stream.c_str(), index.c_str(), format.c_str(), list.c_str() );
     }
@@ -422,13 +424,17 @@ void print_results( const json & report )
                 continue;
             const json & m = r[kind];
             const json & t = r["theory"];
+            std::string max_z = t["max_z_m"].is_null() ? "inf" : fmt( t["max_z_m"], 2, 1, " m" );
             std::printf( "| %s | %s | %s / %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", name.c_str(), kind,
-                         fmt( t["min_z_m"], 3, 1, " m" ).c_str(),
-                         t["max_z_m"].is_null() ? "inf" : fmt( t["max_z_m"], 2, 1, " m" ).c_str(),
-                         fmt( m["median_m"], 3, 1, " m" ).c_str(), fmt( m["fill_rate"], 1, 100, " %" ).c_str(),
-                         fmt( m["full_fill_rate"], 1, 100, " %" ).c_str(), fmt( m["plane_rms_mm"], 2, 1, " mm" ).c_str(),
-                         fmt( m["subpixel_rms"], 3, 1, " px" ).c_str(), fmt( m["temporal_noise_mm"], 2, 1, " mm" ).c_str(),
-                         fmt( m["nearest_m"], 3, 1, " m" ).c_str(), fmt( t["rms_mm_at_median"], 2, 1, " mm" ).c_str() );
+                         fmt( t["min_z_m"], 3, 1, " m" ).c_str(), max_z.c_str(),
+                         fmt( m["median_m"], 3, 1, " m" ).c_str(),
+                         fmt( m["fill_rate"], 1, 100, " %" ).c_str(),
+                         fmt( m["full_fill_rate"], 1, 100, " %" ).c_str(),
+                         fmt( m["plane_rms_mm"], 2, 1, " mm" ).c_str(),
+                         fmt( m["subpixel_rms"], 3, 1, " px" ).c_str(),
+                         fmt( m["temporal_noise_mm"], 2, 1, " mm" ).c_str(),
+                         fmt( m["nearest_m"], 3, 1, " m" ).c_str(),
+                         fmt( t["rms_mm_at_median"], 2, 1, " mm" ).c_str() );
         }
     }
     if( report.contains( "minz" ) )
@@ -471,9 +477,10 @@ int run( const Options & opt )
             filters.threshold.enabled = false;
             for( auto & c : opt.configs )
             {
+                json depth = { { "width", c.depth.width }, { "height", c.depth.height }, { "fps", c.depth.fps } };
                 json row = { { "config",
                                { { "name", c.name },
-                                 { "depth", { { "width", c.depth.width }, { "height", c.depth.height }, { "fps", c.depth.fps } } },
+                                 { "depth", depth },
                                  { "preset", c.preset },
                                  { "disparity_shift", c.disparity_shift } } } };
                 try
@@ -540,7 +547,8 @@ int run( const Options & opt )
             if( ! opt.json_only )
                 std::fprintf( stderr, "Min-Z test: move the wall slowly toward the camera (%g s)\n", opt.minz_seconds );
             queue.clear();
-            auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds( int64_t( opt.minz_seconds * 1000 ) );
+            auto end = std::chrono::steady_clock::now()
+                     + std::chrono::milliseconds( int64_t( opt.minz_seconds * 1000 ) );
             auto next_report = std::chrono::steady_clock::now();
             double nearest_ok = 0, fx = 0;
             size_t samples = 0;

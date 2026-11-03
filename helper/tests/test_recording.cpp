@@ -358,7 +358,8 @@ float scene_depth_at_color_pixel( const RecordingOptions & o, int frame, float u
     Scene scene( o, frame );
     Vec3 origin, dir, hit, normal;
     Rgb c;
-    color_ray( synthetic_depth_to_color(), synthetic_color_intrinsics( o.color_width, o.color_height ), u, v, origin, dir );
+    rs2_intrinsics color = synthetic_color_intrinsics( o.color_width, o.color_height );
+    color_ray( synthetic_depth_to_color(), color, u, v, origin, dir );
     return scene.trace( origin, dir, hit, normal, c ) ? float( hit.z ) : 0.f;
 }
 
@@ -519,9 +520,9 @@ void SyntheticCamera::emit_frame( int i )
     double ts = k_first_timestamp_ms + i * period_ms;
     int depth_number = o.restart_at >= 0 && i >= o.restart_at ? 1 + ( i - o.restart_at ) : 100 + i;
     FrameImages rendered;
-    const FrameImages & img
-        = m->per_frame ? ( rendered = render( o, i, info.depth_intrinsics, info.color_intrinsics, info.depth_to_color ) )
-                       : m->still;
+    if( m->per_frame )
+        rendered = render( o, i, info.depth_intrinsics, info.color_intrinsics, info.depth_to_color );
+    const FrameImages & img = m->per_frame ? rendered : m->still;
 
     // IMU samples up to this frame's time: gravity along -Y of the camera (held upright), a slight tremor.
     while( m->motion && k_first_timestamp_ms + m->accel_index * 1000.0 / k_accel_fps <= ts )
@@ -544,7 +545,8 @@ void SyntheticCamera::emit_frame( int i )
     m->rgb->on_video_frame( { heap_copy( img.color ), free_bytes, o.color_width * 3, 3, ts,
                               RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, 200 + i, m->color_profile.get(), 0.f } );
     m->stereo->on_video_frame( { heap_copy( img.depth ), free_bytes, o.depth_width * 2, 2, ts,
-                                 RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, depth_number, m->depth_profile.get(), o.depth_units } );
+                                 RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, depth_number, m->depth_profile.get(),
+                                 o.depth_units } );
     if( m->ir_profile )
         m->stereo->on_video_frame( { heap_copy( img.infrared ), free_bytes, o.depth_width, 1, ts,
                                      RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, depth_number, m->ir_profile.get(), 0.f } );
