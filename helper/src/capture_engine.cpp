@@ -419,6 +419,7 @@ void RealSenseEngine::open_live()
     rs2::device chosen;
     int chosen_rank = -1;
     bool recovery = false;
+    std::string open_error;
     for( uint32_t i = 0; i < list.size(); ++i )
     {
         rs2::device d;
@@ -428,7 +429,9 @@ void RealSenseEngine::open_live()
         }
         catch( const rs2::error & e )
         {
-            log( "warning", std::string( "Skipping a RealSense device that could not be opened: " ) + e.what() );
+            // e.g. not running as root: libusb lists the camera but cannot take it from the macOS drivers
+            open_error = e.what();
+            log( "warning", "Skipping a RealSense device that could not be opened: " + open_error );
             continue;
         }
         if( d.is< rs2::update_device >() )
@@ -453,6 +456,8 @@ void RealSenseEngine::open_live()
         if( recovery )
             throw std::runtime_error( "The RealSense camera is in firmware recovery mode. Update its firmware with "
                                       "rs-fw-update (or the RealSense Viewer) and reconnect it." );
+        if( ! open_error.empty() )
+            throw std::runtime_error( "A RealSense camera is connected but could not be opened: " + open_error );
         throw std::runtime_error( "No Intel RealSense camera found. Connect the D455 directly to a USB 3 port of the "
                                   "Mac with a USB-C cable and try again." );
     }
