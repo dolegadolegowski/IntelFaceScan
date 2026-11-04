@@ -167,6 +167,23 @@ final class HelperPlaybackBackpressureTests {
         try quit(client, &log)
     }
 
+    @Test func commandsRunWhileTheAppReadsNothing() throws {
+        // STOP and PLAYBACK pause wait for the engine's processing thread; the helper must finish them although that
+        // thread waits for room and the app does not read at all, or it could not even react to a signal.
+        for command in [(HelperMessageType.stop, [String: Any]()), (.playback, ["action": "pause"])] {
+            let client = try playbackClient(try TestHelper.makeRecording(in: dir, frames: 60))
+            var log = RawPlaybackLog()
+            try startAndStall(client, &log, seconds: 1.0)
+            try client.send(command.0.rawValue, command.1)
+            Thread.sleep(forTimeInterval: 1.0)
+            let t0 = Date()
+            client.process.terminate()
+            #expect(client.process.waitForExit(timeout: 6), "\(command.0): the helper is stuck in the command")
+            #expect(client.process.exitStatus == 0)
+            #expect(Date().timeIntervalSince(t0) < 6)
+        }
+    }
+
     @Test func quitWhileTheHelperWaitsForRoomIsPrompt() throws {
         let client = try playbackClient(try TestHelper.makeRecording(in: dir, frames: 60))
         var log = RawPlaybackLog()
@@ -221,6 +238,34 @@ final class HelperPlaybackBackpressureTests {
         await source.shutdown()
         #expect(await consumer.wait(timeout: 2) { $0.streamEnded }, "shutdown ends the frame stream")
         #expect(await events.waitUntilFinished(timeout: 2), "shutdown ends the event stream")
+    }
+
+    @Test func pauseAndResumeWhileTheHelperWaitsKeepEveryFrame() async throws {
+        let frames = 40
+        let file = try TestHelper.makeRecording(in: dir, frames: frames)
+        let source = PlaybackCameraSource(file: file, helperURL: helper, realTime: false)
+        let events = EventRecorder(source.events())
+        _ = try await source.connect()
+        let consumer = FrameConsumer(source.frames(bufferingNewest: 2), holdAfter: 5)
+        try await source.start()
+        #expect(await consumer.wait(timeout: 10) { $0.count == 5 })
+        try await Task.sleep(for: .milliseconds(1000))  // the helper waits in send_frameset now
+        // pause() flushes the playback's reader, which waits for the processing thread: must not deadlock.
+        try await withTimeout(5, "pause() while the helper waits") { try await source.pause() }
+        consumer.resume()
+        try await Task.sleep(for: .milliseconds(300))
+        try await withTimeout(5, "resume()") { try await source.resume() }
+        let complete = await consumer.wait(timeout: 60) { c in
+            events.events.contains { if case .playbackFinished = $0 { return true }; return false }
+                && c.secondsSinceLastFrame > 2
+        }
+        #expect(complete)
+        // librealsense resumes at the last frame it delivered, which may come again; none may be missing.
+        let colors = consumer.receivedColorFrames
+        #expect(Set(colors) == Set(200..<200 + UInt64(frames)), "\(colors)")
+        #expect(zip(colors, colors.dropFirst()).allSatisfy { $1 >= $0 }, "\(colors)")
+        #expect(isConsecutive(consumer.received), "\(consumer.received)")
+        await source.shutdown()
     }
 
     @Test func stopAndShutdownWhileTheConsumerHoldsArePrompt() async throws {

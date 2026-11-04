@@ -42,8 +42,10 @@ public final class PlaybackCameraSource: CameraSource, @unchecked Sendable {
     public func stopRecording() async throws -> Int64 { throw CameraError.unsupported("recording during playback") }
     public func hardwareReset() async throws { throw CameraError.unsupported("hardware reset during playback") }
     /// Real time: the newest `bufferingNewest` undelivered frames, as with the live camera. Not real time: every frame
-    /// in order - at most `bufferingNewest` wait for this consumer, then the helper waits until it takes one (the
-    /// stream ends at `shutdown()`; dropping it or cancelling its task unsubscribes).
+    /// in order - at most `bufferingNewest` wait for this consumer, then the helper waits until it takes one. Events
+    /// sent after those frames (e.g. `.playbackFinished`) wait with them, so consume the stream or drop it; command
+    /// replies and `shutdown()` never wait for it. The stream ends at `shutdown()`; dropping it or cancelling the task
+    /// that iterates it unsubscribes.
     public func frames(bufferingNewest: Int) -> AsyncStream<CameraFrame> {
         session.subscribeFrames(bufferingNewest: bufferingNewest)
     }
