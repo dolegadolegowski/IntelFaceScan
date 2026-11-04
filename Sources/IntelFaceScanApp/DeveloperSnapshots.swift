@@ -74,7 +74,7 @@ enum DeveloperSnapshots {
             let model = fixture.model(screen: screen, sourceKind: .live, recording: screen == .preview, dataset: false)
             // The voxel size changed after the reconstruction: the result panel offers to reconstruct again.
             if name.hasSuffix("-settings-changed") { model.settings.voxelSizeMM += 0.25 }
-            let view = ContentView().environment(model)
+            let view = ContentView().environment(model).environment(\.poseGuideAnimates, false)
             if !writeHosted(view, size: size, to: directory.appendingPathComponent("\(name).png")) { failures += 1 }
         }
         // The scan panel scrolls in the app; ImageRenderer cannot draw AppKit scroll views, so render its content.
@@ -92,11 +92,10 @@ enum DeveloperSnapshots {
                 .background(Color(nsColor: .windowBackgroundColor))
             if !write(view, to: directory.appendingPathComponent("report.png")) { failures += 1 }
         }
-        let sidebar = SidebarView()
-            .frame(width: 330, height: 1500)
-            .background(Color(nsColor: .windowBackgroundColor))
-            .environment(fixture.model(screen: .preview))
-        if !write(sidebar, to: directory.appendingPathComponent("sidebar.png")) { failures += 1 }
+        // The sidebar is a grouped Form (an AppKit scroll view): ImageRenderer draws it blank, AppKit draws it.
+        let sidebar = SidebarView().environment(fixture.model(screen: .preview))
+        if !writeHosted(sidebar, size: CGSize(width: 330, height: 1500),
+                        to: directory.appendingPathComponent("sidebar.png")) { failures += 1 }
         failures += checkPreviewShaders(fixture.model(screen: .preview).renderer, directory: directory)
         print("snapshots written to \(directory.path)\(failures > 0 ? " (\(failures) failed)" : "")")
         return failures == 0 ? 0 : 1

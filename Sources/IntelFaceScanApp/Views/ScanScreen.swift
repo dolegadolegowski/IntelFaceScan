@@ -135,10 +135,24 @@ private struct PoseProgressRow: View {
 
 /// Animated head turning toward the current pose, an arrow toward the remaining correction and a ring that fills
 /// while the pose is held.
+/// false holds the pose guide's head still (developer snapshots: AppKit's cacheDisplay drops 3D layer transforms and
+/// draws the rotated head at the wrong place). A plain key: the @Entry macro's plugin is not in the Command Line Tools.
+private struct PoseGuideAnimatesKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    var poseGuideAnimates: Bool {
+        get { self[PoseGuideAnimatesKey.self] }
+        set { self[PoseGuideAnimatesKey.self] = newValue }
+    }
+}
+
 struct PoseGuideView: View {
     let update: ScanUpdate?
     let mirrored: Bool
     let tolerance: Float
+    @Environment(\.poseGuideAnimates) private var animates
 
     var body: some View {
         let pose = currentPose
@@ -151,7 +165,7 @@ struct PoseGuideView: View {
         TimelineView(.animation) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             // The head swings from the front toward the target and back, easing at both ends.
-            let swing = CGFloat((1 - cos(t * 2 * .pi / 2.2)) / 2)
+            let swing = animates ? CGFloat((1 - cos(t * 2 * .pi / 2.2)) / 2) : 0
             let dx = CGFloat(poseDirection.x), dy = CGFloat(poseDirection.y)
             ZStack {
                 Circle()
