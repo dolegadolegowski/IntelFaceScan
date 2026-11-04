@@ -147,7 +147,8 @@ struct HelperSessionLaunchTests {
         // The live helper's handle ends only when the in-process AppleScript returns, i.e. after the administrator
         // prompt. A stand-in that never connects and never exits plays the prompt that is still showing (no real
         // prompt in tests). Closing the source used to wait ~15 s for it; the socket is removed instead, so a helper
-        // started after all could not connect and would exit by itself (or with the app).
+        // started after all could not connect and would exit by itself (or with the app). The bound stays below
+        // those 15 s with room for a loaded 3-core runner (4.6 s there in CI run 41797620726).
         let sleep = URL(fileURLWithPath: "/bin/sleep")
         let session = HelperCameraSession(mode: .live, helperURL: sleep)
         let launched = LaunchRecord()
@@ -162,7 +163,7 @@ struct HelperSessionLaunchTests {
         let t0 = Date()
         await session.shutdown(timeout: 20)
         let elapsed = Date().timeIntervalSince(t0)
-        #expect(elapsed < 3, "closing waited \(elapsed) s for a helper that never connected")
+        #expect(elapsed < 10, "closing waited \(elapsed) s for a helper that never connected")
         do {
             _ = try await attempt.value
             Issue.record("connect() succeeded without a helper")

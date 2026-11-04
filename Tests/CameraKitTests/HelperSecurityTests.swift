@@ -336,23 +336,25 @@ struct HelperSecurityLaunchTests {
 
     @Test func scriptsRunThroughOSAScriptWithoutAppKit() throws {
         // The test runner has no NSApplication: the administrator launch would go through /usr/bin/osascript, whose
-        // results must mean what the in-process ones mean.
+        // results must mean what the in-process ones mean. The scripts share the launcher's serial authorization
+        // queue with the release test's; on the 3-core runner each osascript took ~7 s, so the first wait here
+        // exceeded 30 s (CI run 41797620726). The timeouts only catch an osascript that never ends.
         #expect(!HelperLauncher.hasAppKitApplication)
 
         let cancelled = HelperLauncher.runAppleScript("error \"User canceled.\" number -128", inProcess: false)
-        #expect(cancelled.waitForExit(timeout: 30))
+        #expect(cancelled.waitForExit(timeout: 120))
         #expect(cancelled.launchError == .authorizationCancelled)
 
         let failed = HelperLauncher.runAppleScript(
             HelperLauncher.appleScriptSource(command: "echo out; echo 'no camera' >&2; exit 69", prompt: "",
                                              privileged: false), inProcess: false)
-        #expect(failed.waitForExit(timeout: 30))
+        #expect(failed.waitForExit(timeout: 120))
         #expect(failed.launchError == nil)
         #expect(failed.exitStatus == 69)
         #expect(failed.diagnostics == "no camera")
 
         let other = HelperLauncher.runAppleScript("error \"odd\" number -1743", inProcess: false)
-        #expect(other.waitForExit(timeout: 30))
+        #expect(other.waitForExit(timeout: 120))
         #expect(other.launchError == .launchFailed("odd (-1743)"))
 
         #expect(HelperLauncher.parseOSAScriptError("0:48: execution error: a (b) c (2)")! == (2, "a (b) c"))
