@@ -3,6 +3,8 @@
 import Foundation
 import ModelIO
 import ReconKit
+import SceneKit
+import SceneKit.ModelIO
 import simd
 import Testing
 
@@ -49,6 +51,43 @@ struct ExportTests {
         asset.loadTextures()
         let submesh = try #require(mesh.submeshes?.firstObject as? MDLSubmesh)
         #expect(submesh.material?.property(with: .baseColor)?.textureSamplerValue?.texture?.dimensions == [256, 256])
+    }
+
+    /// SceneKit (QuickLook, Preview) multiplies the diffuse texture by imported vertex colors: a textured OBJ must not
+    /// carry any, or the head renders about twice as dark (measured on a synthetic head: forehead 210/157/131 in the
+    /// keyframe, 203/132/100 rendered with vertex colors, 218/163/135 without).
+    @Test func texturedOBJHasNoVertexColorsThatSceneKitWouldMultiply() throws {
+        let result = try Self.result()
+        #expect(result.mesh.colors.count == result.mesh.vertexCount)
+        let dir = try ScratchDirectory()
+        let files = try MeshExport.writeOBJ(result, to: dir.url.appendingPathComponent("head.obj"))
+        let text = try String(contentsOf: files[0], encoding: .utf8)
+        let vertexLines = text.split(separator: "\n").filter { $0.hasPrefix("v ") }
+        #expect(vertexLines.count == result.mesh.vertexCount)
+        #expect(vertexLines.allSatisfy { $0.split(separator: " ").count == 4 })
+
+        let asset = MDLAsset(url: files[0])
+        let mesh = try #require(asset.childObjects(of: MDLMesh.self).first as? MDLMesh)
+        #expect(mesh.vertexDescriptor.attributeNamed(MDLVertexAttributeColor) == nil)
+        #expect(mesh.vertexDescriptor.attributeNamed(MDLVertexAttributeTextureCoordinate) != nil)
+        let scene = SCNScene(mdlAsset: asset)
+        var colorSources = 0, texcoordSources = 0
+        scene.rootNode.enumerateHierarchy { node, _ in
+            colorSources += node.geometry?.sources(for: .color).count ?? 0
+            texcoordSources += node.geometry?.sources(for: .texcoord).count ?? 0
+        }
+        #expect(colorSources == 0 && texcoordSources == 1)
+
+        // Without the texture, the vertex colors are the model's color and stay in the OBJ.
+        var untextured = ExportOptions()
+        untextured.includeTexture = false
+        let plain = try MeshExport.writeOBJ(result, to: dir.url.appendingPathComponent("plain.obj"), options: untextured)
+        #expect(plain.count == 1)
+        let plainText = try String(contentsOf: plain[0], encoding: .utf8)
+        #expect(plainText.split(separator: "\n").filter { $0.hasPrefix("v ") }.allSatisfy { $0.split(separator: " ").count == 7 })
+        let plainAsset = MDLAsset(url: plain[0])
+        let plainMesh = try #require(plainAsset.childObjects(of: MDLMesh.self).first as? MDLMesh)
+        #expect(plainMesh.vertexDescriptor.attributeNamed(MDLVertexAttributeColor) != nil)
     }
 
     @Test func optionsControlTheContent() throws {
