@@ -250,11 +250,11 @@ private let smallSynth = ["--width", "320", "--height", "200", "--frames-per-pos
 
 /// The animated synthetic head loops forever; the guided scan must not keep `reconstruct synthetic-camera` running
 /// when it cannot capture every pose (here: 5 s cover at most the first poses). Without the limit the command never
-/// ends, which the time limit trait catches. No tighter wall-clock bound: the tool runs in-process next to the other
-/// ReconKit tests, whose synchronous reconstructions can occupy every thread of Swift's cooperative pool on a
-/// small machine; on the GitHub runner the scan with its 5 s watchdog then took 184 s (CI run 41765277127). The
-/// limit includes the wait for a heavy test slot (HeavyTestSlots.swift).
-@Test(.timeLimit(.minutes(30)), .heavyReconstruction) func cliSyntheticCameraScanStopsAtTheTimeLimit() async throws {
+/// ends, which the time limit trait catches. The tool runs in-process and in real time (30 fps rendering, Vision on
+/// every frame, a 5 s watchdog task), so it runs alone among the reconstruction tests: next to them on the 3-core
+/// runner it took 105-227 s, and twice it had not ended when the step timed out 35 minutes later (CI runs
+/// 41784821177, 41800570041). The limit includes the wait for the slots (HeavyTestSlots.swift).
+@Test(.timeLimit(.minutes(30)), .heavyReconstruction(exclusive: true)) func cliSyntheticCameraScanStopsAtTheTimeLimit() async throws {
     let root = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }
     let run = await ifscan(["reconstruct", "synthetic-camera", "-o", root.appendingPathComponent("head.obj").path,

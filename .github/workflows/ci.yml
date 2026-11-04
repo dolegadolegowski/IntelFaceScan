@@ -114,12 +114,38 @@ jobs:
         run: swift build
 
       # NSUnbufferedIO: the test runners' output reaches the log as it happens (a pipe is block-buffered otherwise, so
-      # a slow or stuck test would not show). The step limit leaves time for the smoke tests and the app build.
+      # a slow or stuck test would not show). Every 2 minutes a folded group logs swap, memory pressure and the
+      # busiest processes, so a slow or stuck run shows what the machine was doing. The step limit leaves time for the
+      # smoke tests and the app build.
       - name: Run the tests
         timeout-minutes: 40
         env:
           NSUnbufferedIO: "YES"
-        run: scripts/test.sh
+        run: |
+          set -euo pipefail
+          (
+            while sleep 120; do
+              echo "::group::machine $(date -u +%H:%M:%S)"
+              sysctl -n vm.swapusage || true
+              memory_pressure -Q 2>/dev/null | tail -n 1 || true
+              ps -Ao pid,pcpu,rss,etime,comm -r | head -n 8 || true
+              echo "::endgroup::"
+            done
+          ) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          scripts/test.sh
+
+      # A test step that timed out can leave swift test running: it holds the .build lock (every later swift build
+      # would wait for it) and the CPU.
+      - name: Stop leftover test processes
+        if: ${{ !cancelled() }}
+        run: |
+          pkill -TERM -f swiftpm-testing-helper || true
+          pkill -TERM -x swift-test || true
+          sleep 2
+          pkill -KILL -f swiftpm-testing-helper || true
+          pkill -KILL -x swift-test || true
 
       # The smoke tests and the app build do not depend on the test results: they also run when a test failed (the job
       # still fails), so one run reports both. They need everything up to the Swift build.

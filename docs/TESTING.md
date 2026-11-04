@@ -22,11 +22,15 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
   tests ~27 s (most of it `Helper playback backpressure`); about 2.5 min in all when nothing changed, about 3 min
   from a clean debug build (about 40 s of it building).
 * The reconstruction tests of ReconKitTests (the suites and tests marked `.heavyReconstruction`,
-  `Tests/ReconKitTests/HeavyTestSlots.swift`) share a few slots: each peaks at about 0.5 GB, and all of them at once
-  made the 7 GB CI runner swap until the step timed out. The number of slots is min(cores, 2 × (memory in GB − 3)),
-  28 on the M3 Ultra (no limit in practice) and 3 on the runner; `IFS_TEST_HEAVY_SLOTS=n` overrides it (with 3:
-  ReconKitTests ~90 s and 1.5 GB at the peak on the M3 Ultra, instead of ~65 s and 2.6 GB). A `.timeLimit` counts
-  the wait for a slot, so those suites allow 30 minutes.
+  `Tests/ReconKitTests/HeavyTestSlots.swift`) share a few slots. Each reconstruction peaks at about 0.5 GB and uses
+  every core it gets; with about twenty of them at once, no test finished for 35 minutes on the 3-core, 7 GB CI
+  runner (memory pressure or CPU oversubscription: neither was measured there). The number of slots is
+  min(cores, 2 × (memory in GB − 3)): 28 on the M3 Ultra (no limit in practice) and 3 on the runner, where
+  ReconKitTests then passed in about 400 s; `IFS_TEST_HEAVY_SLOTS=n` overrides it (with 3: ReconKitTests ~90 s and
+  1.5 GB at the peak on the M3 Ultra, instead of ~65 s and 2.6 GB). `cliSyntheticCameraScanStopsAtTheTimeLimit`
+  runs `ifscan reconstruct synthetic-camera` in-process and in real time, and takes every slot (exclusive): next to
+  the other reconstructions it took 105–227 s on the runner, and twice it had not ended when the step timed out. A
+  `.timeLimit` counts the wait for a slot, so the marked suites that have one allow 30 minutes.
 * Skipped, with a reason (`➜ Test ... skipped: "..."`), never failed: benchmarks and measurement sweeps that are
   run by hand (`PipelineBenchmark`, `Mesh performance`, `ReconCaptureRange`, the `IFS_RECON_STUDY=1` tables of
   docs/RECONSTRUCTION.md, `GuidanceSyntheticVisionStudy` with `IFS_VISION_STUDY=1` – `IFS_VISION_STUDY_GRID=1` adds
@@ -226,15 +230,21 @@ one-command build; the SDK comes from the cache) → bundle smoke test (signatur
 no absolute build paths under `$HOME` in any shipped file, no linker debug map in the bundled Swift executables and
 their dSYMs in `build/dSYMs`, the bundled `ifscan` running `synth` and reading a generated `.db3` through the
 bundled helper) → upload the zipped app. The smoke tests and `scripts/build.sh` also run when a test failed (the job
-still fails). A run takes about 10–11 minutes with the SDK cache and about 14–16 without (the SDK build takes ~4
-minutes on the runner); `scripts/test.sh` takes ~5 of them, the runner being several times slower than an M3 Ultra.
-Timing-sensitive tests are less reliable there: the tests of a target share Swift's cooperative thread pool, which
-the synchronous reconstructions of other tests can fill (measured there: the synthetic camera rendered 0.32 s per
-frame, `ifscan reconstruct synthetic-camera --time-limit 5` ran in-process for 4 min); their upper bounds are loose
-for that reason. The runner has 3 cores and 7 GB of memory (the job logs both). In November 2026 the image still
-reports macOS 27.0.1; the job and `scripts/build.sh` warn that the app needs 27.2 to run (building only needs the
-27.2 SDK). Test code must not compare dates with `<=` or `>=`: those `Date` operators are back-deployed only before
-27.2, so a build for 27.2 calls the system's, which 27.0.1 lacks, and the test bundle does not load there.
+still fails). A run took about 15 minutes with the SDK cache in November 2026 (CI run 41797620726), about 4 more
+without it (the SDK build); `scripts/test.sh` took about 10 of them: ReconKitTests ~400 s with its 3 slots (~90 s on
+the M3 Ultra with the same 3 slots), ScanKitTests ~60 s (54 s of it the first Vision requests, which hold every
+thread), CameraKitTests ~60 s, FaceReconCoreTests ~25 s. The test step logs swap, memory pressure and the busiest
+processes every 2 minutes in a folded group, and the next step stops test processes a timed-out step left behind
+(they hold the `.build` lock, so every later `swift build` would wait for them). Timing-sensitive tests are less
+reliable there: the tests of a target share Swift's cooperative thread pool, which the synchronous tests can fill
+(measured there: the synthetic camera rendered 0.32 s per frame, `ifscan reconstruct synthetic-camera --time-limit
+5` ran in-process for 4 min); their upper bounds are loose for that reason. The runner has 3 cores and 7 GB of
+memory (the job logs both). In November 2026 the image still reports macOS 27.0.1; the job and `scripts/build.sh`
+warn that the app needs 27.2 to run (building only needs the 27.2 SDK). While it does, no Swift code in the package
+may compare dates with `<=` or `>=` (compare `timeIntervalSince(_:)`): those `Date` operators are back-deployed only
+before 27.2, so a build for 27.2 imports the system's, which 27.0.1 lacks. The library targets and the app module
+are linked into the test bundles, so a bundle that imports them does not load there (`--filter` and `--skip` load
+it too), and `ifscan` would not start; `nm -u <binary> | grep "4DateV2[gl]eoiy"` shows such imports.
 
 ## Troubleshooting
 

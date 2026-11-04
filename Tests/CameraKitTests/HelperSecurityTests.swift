@@ -337,8 +337,9 @@ struct HelperSecurityLaunchTests {
     @Test func scriptsRunThroughOSAScriptWithoutAppKit() throws {
         // The test runner has no NSApplication: the administrator launch would go through /usr/bin/osascript, whose
         // results must mean what the in-process ones mean. The scripts share the launcher's serial authorization
-        // queue with the release test's; on the 3-core runner each osascript took ~7 s, so the first wait here
-        // exceeded 30 s (CI run 41797620726). The timeouts only catch an osascript that never ends.
+        // queue with the release test's. On the 3-core runner the first two scripts on that queue took more than
+        // 30 s together at the start of the target, the remaining four under 15 s together, so the first 30 s wait
+        // ran out (CI run 41797620726). The timeouts only catch an osascript that never ends.
         #expect(!HelperLauncher.hasAppKitApplication)
 
         let cancelled = HelperLauncher.runAppleScript("error \"User canceled.\" number -128", inProcess: false)
