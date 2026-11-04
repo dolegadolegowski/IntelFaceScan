@@ -9,47 +9,82 @@ struct PreviewScreen: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        @Bindable var model = model
         VStack(spacing: 14) {
             LivePreview()
                 .overlay(alignment: .topLeading) { PreviewStatus().padding(10) }
-            HStack(alignment: .center, spacing: 20) {
-                DistanceGauge(distance: model.tracking.distance, isEstimate: model.tracking.distanceIsEstimate,
-                              range: model.tracking.range, advice: model.tracking.advice)
-                    .frame(maxWidth: 420)
-                Spacer(minLength: 12)
-                Picker("", selection: $model.settings.previewMode) {
-                    ForEach(AppSettings.PreviewMode.allCases) { Text($0.label).tag($0) }
+            // One row when it fits; otherwise the gauge and display controls above the actions, so no label is cut
+            // at the minimum window size (the action labels are long in Polish).
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 20) {
+                    gauge.frame(minWidth: 300, maxWidth: 420)
+                    Spacer(minLength: 12)
+                    PreviewDisplayControls()
+                    PreviewActions()
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 240)
-                Toggle(isOn: $model.settings.mirrored) { Image(systemName: "arrow.left.and.right.righttriangle.left.righttriangle.right") }
-                    .toggleStyle(.button)
-                    .help(S.mirrored)
-                if model.isLive {
-                    RecordButton()
-                }
-                if let dataset = model.datasetCapture {
-                    Button {
-                        model.useDatasetCapture()
-                    } label: {
-                        Label(S.useDatasetFrames(dataset.keyframes.count), systemImage: "square.stack.3d.up")
+                VStack(alignment: .trailing, spacing: 10) {
+                    HStack(alignment: .center, spacing: 16) {
+                        gauge.frame(minWidth: 230, maxWidth: 420)
+                        Spacer(minLength: 8)
+                        PreviewDisplayControls()
                     }
-                    .controlSize(.large)
+                    HStack(spacing: 12) { PreviewActions() }
                 }
-                Button {
-                    model.startScan()
-                } label: {
-                    Label(S.startScan, systemImage: "viewfinder")
-                        .padding(.horizontal, 6)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(!model.canStartScan)
-                .keyboardShortcut(.return, modifiers: [.command])
             }
         }
+    }
+
+    private var gauge: some View {
+        DistanceGauge(distance: model.tracking.distance, isEstimate: model.tracking.distanceIsEstimate,
+                      range: model.tracking.range, advice: model.tracking.advice)
+    }
+}
+
+/// Color / depth / overlay and mirroring.
+private struct PreviewDisplayControls: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        Picker("", selection: $model.settings.previewMode) {
+            ForEach(AppSettings.PreviewMode.allCases) { Text($0.label).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+        Toggle(isOn: $model.settings.mirrored) { Image(systemName: "arrow.left.and.right.righttriangle.left.righttriangle.right") }
+            .toggleStyle(.button)
+            .help(S.mirrored)
+    }
+}
+
+/// Recording, the dataset's own frames, and the scan.
+private struct PreviewActions: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if model.isLive {
+            RecordButton().fixedSize()
+        }
+        if let dataset = model.datasetCapture {
+            Button {
+                model.useDatasetCapture()
+            } label: {
+                Label(S.useDatasetFrames(dataset.keyframes.count), systemImage: "square.stack.3d.up")
+            }
+            .controlSize(.large)
+            .fixedSize()
+        }
+        Button {
+            model.startScan()
+        } label: {
+            Label(S.startScan, systemImage: "viewfinder")
+                .padding(.horizontal, 6)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .fixedSize()
+        .disabled(!model.canStartScan)
+        .keyboardShortcut(.return, modifiers: [.command])
     }
 }
 

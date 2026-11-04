@@ -18,6 +18,7 @@ struct ContentView: View {
                 DetailView()
                     .padding(16)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .disabled(model.isQuitting)
                 if let message = model.statusMessage {
                     StatusBanner(message: message, canReveal: model.lastSavedURL != nil) { model.revealLastSaved() }
                         .padding(.bottom, 20)

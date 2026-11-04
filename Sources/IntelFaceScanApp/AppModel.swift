@@ -2,6 +2,12 @@
 //
 // The application state: the camera source and its lifecycle, live tracking, the guided scan, the reconstruction
 // and the result. Everything here runs on the main actor; frame work happens in FramePipeline.
+//
+// Closing a source detaches it at once (the UI is free immediately) and shuts it down in a detached task that never
+// needs the main actor: quitting can then wait for the camera to be handed back to macOS even when AppKit asks
+// applicationShouldTerminate from inside a main-queue block, where no main-actor job can run until it gets its
+// reply. Source switches wait for every pending shutdown, so a new helper never meets a camera that the previous
+// one is still releasing.
 
 import AppKit
 import CameraKit
@@ -38,6 +44,38 @@ enum SourceRequest {
     case synthetic
 }
 
+/// What has to finish before the process may exit: camera shutdowns and file writes. Waiting never needs the main
+/// actor.
+struct TerminationWork: Sendable {
+    let camera: [Task<Void, Never>]
+    let writes: [Task<Void, Never>]
+
+    /// Waits for the camera (bounded: the helper also releases the camera when it sees the app exit) and for file
+    /// writes (bounded more generously: an interrupted write loses the user's data). True when everything ended.
+    func wait(cameraTimeout: Double = 15, writeTimeout: Double = 120) async -> Bool {
+        async let camera = Self.waitAll(self.camera, timeout: cameraTimeout)
+        async let writes = Self.waitAll(self.writes, timeout: writeTimeout)
+        let (c, w) = await (camera, writes)
+        return c && w
+    }
+
+    /// Unstructured on purpose: a task group would wait for the uncancellable `value` awaits past the timeout.
+    static func waitAll(_ tasks: [Task<Void, Never>], timeout: Double) async -> Bool {
+        guard !tasks.isEmpty else { return true }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let once = OnceFlag()
+            Task.detached {
+                for task in tasks { await task.value }
+                if once.claim() { continuation.resume(returning: true) }
+            }
+            Task.detached {
+                try? await Task.sleep(for: .seconds(timeout))
+                if once.claim() { continuation.resume(returning: false) }
+            }
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -45,10 +83,14 @@ final class AppModel {
         case welcome, preview, scanning, scanComplete, reconstructing, result
     }
 
+    typealias SourceFactory = @MainActor (SourceRequest) -> CameraSource
+
     var settings: AppSettings {
         didSet { settingsDidChange(from: oldValue) }
     }
-    private(set) var screen: Screen = .welcome
+    private(set) var screen: Screen = .welcome {
+        didSet { pipeline?.setActive(screen.showsPreview) }
+    }
     private(set) var sourceKind: CameraSourceKind?
     private(set) var device: DeviceInfo?
     private(set) var isConnecting = false
@@ -74,6 +116,8 @@ final class AppModel {
     let renderer: PreviewRenderer?
     let rendererError: String?
 
+    @ObservationIgnored private let defaults: UserDefaults?
+    @ObservationIgnored private let sourceFactory: SourceFactory
     @ObservationIgnored private var source: CameraSource?
     @ObservationIgnored private var pipeline: FramePipeline?
     @ObservationIgnored private var eventsTask: Task<Void, Never>?
@@ -87,16 +131,37 @@ final class AppModel {
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private var sourceGeneration = 0
     @ObservationIgnored private var recordingURL: URL?
+    /// Shutdowns of detached sources that are still running, by id.
+    @ObservationIgnored private var closingTasks: [Int: Task<Void, Never>] = [:]
+    /// File writes that are still running, by id.
+    @ObservationIgnored private var writeTasks: [Int: Task<Void, Never>] = [:]
+    @ObservationIgnored private var nextTaskID = 0
     @ObservationIgnored private let log = Logger(subsystem: "IntelFaceScan", category: "App")
 
-    init() {
-        settings = AppSettings.load()
+    /// - Parameters:
+    ///   - defaults: where the settings persist; nil keeps them in memory (developer checks).
+    ///   - sourceFactory: makes the camera source for a request.
+    init(defaults: UserDefaults? = .standard, sourceFactory: @escaping SourceFactory = AppModel.makeSource) {
+        self.defaults = defaults
+        self.sourceFactory = sourceFactory
+        settings = defaults.map { AppSettings.load(from: $0) } ?? AppSettings()
         do {
             renderer = try PreviewRenderer(device: nil)
             rendererError = nil
         } catch {
             renderer = nil
             rendererError = error.localizedDescription
+        }
+    }
+
+    static func makeSource(_ request: SourceRequest) -> CameraSource {
+        switch request {
+        case .live: return LiveCameraSource()
+        case .playback(let url): return PlaybackCameraSource(file: url)
+        case .dataset(let url): return DatasetCameraSource(directory: url)
+        // The UI defaults (stronger shading: Vision finds the face in every pose) and a hold long enough for the
+        // real-time guided scan to accept its frames per pose, as `ifscan reconstruct synthetic-camera`.
+        case .synthetic: return SyntheticCameraSource(holdSeconds: 2.5)
         }
     }
 
@@ -107,6 +172,8 @@ final class AppModel {
     var isRecording: Bool { recordingStartedAt != nil }
     var canStartScan: Bool { screen == .preview && hasFrames && pipeline != nil }
     var canReturnToPreview: Bool { pipeline != nil }
+    /// Opening another source would end a scan or abandon a reconstruction, or a source is still connecting.
+    var canOpenSource: Bool { !isConnecting && !isQuitting && screen != .scanning && screen != .reconstructing }
 
     var previewDisplay: PreviewDisplay {
         PreviewDisplay(mode: settings.previewMode, mirrored: settings.mirrored,
@@ -121,21 +188,23 @@ final class AppModel {
     }
 
     func openSource(_ request: SourceRequest) async {
-        guard !isConnecting, !isQuitting else { return }
-        if screen == .scanning { cancelScan() }
-        await closeSource()
+        // A running reconstruction would otherwise finish into the new source's preview or scan.
+        guard !isConnecting, !isQuitting, screen != .reconstructing else { return }
+        detachSource()
+        // From here until the new source runs (or fails) no other request starts: two overlapping requests would
+        // each create a source and orphan one of them, with a helper (and maybe the camera) nobody shuts down.
+        isConnecting = true
+        // The previous helper hands the camera back to macOS first; a new live helper could not capture it before.
+        await waitForClosingSources()
+        guard !isQuitting else {
+            isConnecting = false
+            return
+        }
         sourceGeneration += 1
         let generation = sourceGeneration
-        let newSource: CameraSource
-        switch request {
-        case .live: newSource = LiveCameraSource()
-        case .playback(let url): newSource = PlaybackCameraSource(file: url)
-        case .dataset(let url): newSource = DatasetCameraSource(directory: url)
-        case .synthetic: newSource = SyntheticCameraSource(options: SyntheticScan.Options())
-        }
+        let newSource = sourceFactory(request)
         source = newSource
         sourceKind = newSource.kind
-        isConnecting = true
         playbackEnded = false
         roiPolicy.reset()
         startEvents(of: newSource, generation: generation)
@@ -144,8 +213,9 @@ final class AppModel {
             let info = try await newSource.connect()
             guard generation == sourceGeneration else { return }
             device = info
+            let applied = settings
             do {
-                try await newSource.configure(settings.captureConfiguration)
+                try await newSource.configure(applied.captureConfiguration)
             } catch {
                 // Recordings, datasets and the synthetic head may not support every option; the live camera
                 // keeps running with its previous settings, which the user should know about.
@@ -158,35 +228,54 @@ final class AppModel {
             startPipeline(newSource)
             screen = .preview
             if case .dataset(let url) = request { loadDatasetCapture(url, generation: generation) }
+            // Settings changed while connecting (the password prompt can take minutes) were not applied yet.
+            applyCameraSettings(settings, comparedTo: applied)
         } catch {
             guard generation == sourceGeneration else { return }
             present(S.couldNotOpenSource, error)
-            isConnecting = false
-            await closeSource()
+            detachSource()
         }
     }
 
     /// Stops the frame pipeline, finishes a recording and shuts the source down (live: the camera goes back to
-    /// macOS). The result screens stay.
+    /// macOS); returns when that is done. The result screens stay.
     func closeSource() async {
+        if let closing = detachSource() { await closing.value }
+    }
+
+    func closeSourceAction() {
+        detachSource()
+    }
+
+    /// Waits until every detached source has shut down.
+    func waitForClosingSources() async {
+        // Entries are removed by a cleanup hop after each task; remember what was awaited instead of spinning.
+        var awaited = Set<Int>()
+        while let (id, task) = closingTasks.first(where: { !awaited.contains($0.key) }) {
+            awaited.insert(id)
+            await task.value
+        }
+    }
+
+    /// Detaches the current source from the model at once and shuts it down in a task that does not need the main
+    /// actor (it finishes a running recording first). Returns that task, nil when there was nothing to close.
+    @discardableResult
+    private func detachSource() -> Task<Void, Never>? {
         sourceGeneration += 1
         reconfigureTask?.cancel()
         reconfigureTask = nil
         if screen == .scanning { cancelScan() }
         let closing = source
+        let pipeline = self.pipeline
         source = nil
-        if let closing, recordingStartedAt != nil {
-            _ = try? await closing.stopRecording()
-        }
+        self.pipeline = nil
+        let recording = recordingStartedAt != nil ? recordingURL : nil
+        let wasRecording = recordingStartedAt != nil
         recordingStartedAt = nil
         recordingURL = nil
-        if let pipeline {
-            self.pipeline = nil
-            await pipeline.stop()
-        }
         eventsTask?.cancel()
         eventsTask = nil
-        if let closing { await closing.shutdown() }
+        pipeline?.cancel()
         renderer?.clear()
         previewController = nil
         datasetCapture = nil
@@ -197,10 +286,30 @@ final class AppModel {
         stats = FrameStats()
         isConnecting = false
         if screen == .preview || screen == .scanning { screen = .welcome }
-    }
+        guard closing != nil || pipeline != nil else { return nil }
 
-    func closeSourceAction() {
-        Task { await closeSource() }
+        nextTaskID += 1
+        let id = nextTaskID
+        let renderer = self.renderer
+        let task = Task.detached(priority: .userInitiated) { [weak self] in
+            var stopped: Result<Int64, Error>?
+            if let closing, wasRecording {
+                do { stopped = .success(try await closing.stopRecording()) } catch { stopped = .failure(error) }
+            }
+            await closing?.shutdown()
+            await pipeline?.stop()
+            renderer?.clear()
+            if let stopped {
+                // Not awaited: the main actor may be unable to run until termination gets its reply.
+                Task { @MainActor [weak self] in self?.recordingStopped(stopped, url: recording) }
+            }
+        }
+        closingTasks[id] = task
+        Task { [weak self] in
+            await task.value
+            self?.closingTasks[id] = nil
+        }
+        return task
     }
 
     private func startEvents(of source: CameraSource, generation: Int) {
@@ -219,7 +328,7 @@ final class AppModel {
             device = info
         case .disconnected(let reason):
             present(S.cameraDisconnected, message: reason)
-            Task { await closeSource() }
+            detachSource()
         case .streamingStarted, .streamingStopped, .recordingStarted:
             break
         case .streamRestarted(let message):
@@ -241,7 +350,7 @@ final class AppModel {
         case .helperExited(let status):
             guard !isQuitting else { return }
             present(S.helperExited, message: "exit status \(status)")
-            Task { await closeSource() }
+            detachSource()
         }
     }
 
@@ -299,6 +408,18 @@ final class AppModel {
         let log = self.log
         Task {
             do { try await source.setAutoExposureROI(roi, distanceMeters: distance) }
+            catch { log.notice("auto-exposure ROI: \(error.localizedDescription, privacy: .public)") }
+        }
+    }
+
+    /// Back to metering on the whole image (auto exposure on the face switched off).
+    private func resetExposureROI() {
+        guard isLive, let source, tracking.imageSize.width > 0, tracking.imageSize.height > 0 else { return }
+        roiPolicy.reset()
+        let full = CGRect(origin: .zero, size: tracking.imageSize)
+        let log = self.log
+        Task {
+            do { try await source.setAutoExposureROI(full, distanceMeters: nil) }
             catch { log.notice("auto-exposure ROI: \(error.localizedDescription, privacy: .public)") }
         }
     }
@@ -368,6 +489,7 @@ final class AppModel {
     }
 
     func backToPreview() {
+        reconstructionID += 1
         reconstructionTask?.cancel()
         screen = pipeline != nil ? .preview : .welcome
     }
@@ -375,10 +497,14 @@ final class AppModel {
     // MARK: - Reconstruction
 
     func reconstruct() {
-        guard let capture, !capture.keyframes.isEmpty else { return }
+        guard let capture, !capture.keyframes.isEmpty, !isQuitting, screen != .reconstructing else { return }
         reconstructionID += 1
         let id = reconstructionID
         let options = settings.reconstructionOptions
+        // A cancelled run may still be unwinding (it stops at its next check); its volume can take gigabytes, so
+        // the new run starts only after it ended.
+        let previous = reconstructionTask
+        previous?.cancel()
         result = nil
         reconstructionProgress = ReconstructionProgress(stage: .preparing, fraction: 0)
         screen = .reconstructing
@@ -387,7 +513,9 @@ final class AppModel {
             self.reconstructionProgress = progress
         }
         reconstructionTask = Task { [weak self] in
+            await previous?.value
             do {
+                try Task.checkCancellation()
                 let output = try await Self.runReconstruction(capture, options: options, relay: relay)
                 guard let self, id == self.reconstructionID, !Task.isCancelled else { return }
                 self.result = output
@@ -402,9 +530,10 @@ final class AppModel {
     }
 
     func cancelReconstruction() {
+        guard screen == .reconstructing else { return }
         reconstructionID += 1
+        // Kept: the next reconstruct() waits for it to end.
         reconstructionTask?.cancel()
-        reconstructionTask = nil
         screen = .scanComplete
     }
 
@@ -422,38 +551,78 @@ final class AppModel {
     // MARK: - Saving
 
     func saveOBJ() async {
-        guard let result else { return }
+        guard result != nil else { return }
         guard let url = await FilePanels.save(suggestedName: "head.obj", contentTypes: [FilePanels.obj]) else { return }
-        await write(S.saveOBJ) { try MeshExport.writeOBJ(result, to: url) }
+        await exportOBJ(to: url)
     }
 
     func savePLY() async {
-        guard let result else { return }
+        guard result != nil else { return }
         guard let url = await FilePanels.save(suggestedName: "head.ply", contentTypes: [FilePanels.ply]) else { return }
-        await write(S.savePLY) { [try MeshExport.writePLY(result, to: url)] }
+        await exportPLY(to: url)
     }
 
     func saveSession() async {
+        guard capture != nil else { return }
+        guard let chosen = await FilePanels.save(suggestedName: "scan.\(ScanDataset.fileExtension)",
+                                                 contentTypes: []) else { return }
+        await exportSession(to: chosen)
+    }
+
+    func exportOBJ(to url: URL) async {
+        guard let result else { return }
+        await write(S.saveOBJ) { try MeshExport.writeOBJ(result, to: url) }
+    }
+
+    func exportPLY(to url: URL) async {
+        guard let result else { return }
+        await write(S.savePLY) { [try MeshExport.writePLY(result, to: url)] }
+    }
+
+    func exportSession(to chosen: URL) async {
         guard let capture else { return }
-        guard let chosen = await FilePanels.save(suggestedName: "scan.\(ScanDataset.fileExtension)", contentTypes: []) else { return }
-        let url = chosen.pathExtension == ScanDataset.fileExtension
-            ? chosen : chosen.appendingPathExtension(ScanDataset.fileExtension)
+        let url = Self.datasetDestination(for: chosen)
         await write(S.saveSession) {
             try ScanDataset.write(capture, to: url)
             return [url]
         }
     }
 
-    /// Runs a file write off the main actor and reports the outcome.
+    /// The dataset folder for a name from the save panel. The panel confirmed replacing only the name it showed: when
+    /// the extension has to be added, an existing session of that name is not replaced but a free name is used.
+    nonisolated static func datasetDestination(for chosen: URL, fileManager: FileManager = .default) -> URL {
+        let ext = ScanDataset.fileExtension
+        if chosen.pathExtension == ext { return chosen }
+        let base = chosen.appendingPathExtension(ext)
+        guard fileManager.fileExists(atPath: base.path) else { return base }
+        let folder = chosen.deletingLastPathComponent()
+        let name = chosen.lastPathComponent
+        for n in 2 ... 9999 {
+            let candidate = folder.appendingPathComponent("\(name) \(n)").appendingPathExtension(ext)
+            if !fileManager.fileExists(atPath: candidate.path) { return candidate }
+        }
+        return folder.appendingPathComponent("\(name) \(UUID().uuidString)").appendingPathExtension(ext)
+    }
+
+    /// Runs a file write off the main actor and reports the outcome. Quitting waits for running writes.
     private func write(_ action: String, _ body: @escaping @Sendable () throws -> [URL]) async {
-        do {
-            let files = try await Task.detached(priority: .userInitiated) { try body() }.value
+        guard !isQuitting else { return }
+        let work = Task.detached(priority: .userInitiated) { () -> Result<[URL], Error> in Result { try body() } }
+        nextTaskID += 1
+        let id = nextTaskID
+        writeTasks[id] = Task.detached { _ = await work.value }
+        let outcome = await work.value
+        writeTasks[id] = nil
+        switch outcome {
+        case .success(let files):
             lastSavedURL = files.first
             showStatus(S.saved(files.map(\.lastPathComponent).joined(separator: ", ")))
-        } catch {
+        case .failure(let error):
             present(S.saveFailed, error)
         }
     }
+
+    var isWriting: Bool { !writeTasks.isEmpty }
 
     func revealLastSaved() {
         guard let url = lastSavedURL else { return }
@@ -463,31 +632,59 @@ final class AppModel {
     // MARK: - Recording (live camera)
 
     func toggleRecording() async {
-        guard let source, isLive, !isRecordingBusy else { return }
-        isRecordingBusy = true
-        defer { isRecordingBusy = false }
+        guard isLive, !isRecordingBusy, !isQuitting else { return }
         if recordingStartedAt != nil {
-            do {
-                let bytes = try await source.stopRecording()
-                showStatus(S.recordingSaved(bytes, recordingURL?.lastPathComponent ?? ""))
-                lastSavedURL = recordingURL
-            } catch {
-                present(S.recordingFailed, error)
-            }
-            recordingStartedAt = nil
-            recordingURL = nil
+            await stopRecording()
         } else {
             let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.calendar = Calendar(identifier: .gregorian)
             formatter.dateFormat = "yyyyMMdd-HHmmss"
             let name = "head-\(formatter.string(from: Date())).db3"
             guard let url = await FilePanels.save(suggestedName: name, contentTypes: [FilePanels.db3]) else { return }
-            do {
-                try await source.startRecording(to: url)
-                recordingStartedAt = Date()
-                recordingURL = url
-            } catch {
-                present(S.recordingFailed, error)
-            }
+            await startRecording(to: url)
+        }
+    }
+
+    func startRecording(to url: URL) async {
+        guard let source, isLive, !isRecordingBusy, recordingStartedAt == nil, !isQuitting else { return }
+        isRecordingBusy = true
+        defer { isRecordingBusy = false }
+        let generation = sourceGeneration
+        do {
+            try await source.startRecording(to: url)
+            // Closed meanwhile: the helper delivers the recording when it shuts down.
+            guard generation == sourceGeneration else { return }
+            recordingStartedAt = Date()
+            recordingURL = url
+        } catch {
+            present(S.recordingFailed, error)
+        }
+    }
+
+    func stopRecording() async {
+        guard let source, recordingStartedAt != nil, !isRecordingBusy else { return }
+        isRecordingBusy = true
+        defer { isRecordingBusy = false }
+        let url = recordingURL
+        // Cleared first: closing the source meanwhile must not ask the helper to stop the recording a second time.
+        recordingStartedAt = nil
+        recordingURL = nil
+        do {
+            let bytes = try await source.stopRecording()
+            recordingStopped(.success(bytes), url: url)
+        } catch {
+            recordingStopped(.failure(error), url: url)
+        }
+    }
+
+    private func recordingStopped(_ outcome: Result<Int64, Error>, url: URL?) {
+        switch outcome {
+        case .success(let bytes):
+            lastSavedURL = url
+            showStatus(S.recordingSaved(bytes, url?.lastPathComponent ?? ""))
+        case .failure(let error):
+            present(S.recordingFailed, error)
         }
     }
 
@@ -504,12 +701,19 @@ final class AppModel {
 
     // The settings controls only produce values within the sanitized ranges; loading sanitizes stored data.
     private func settingsDidChange(from old: AppSettings) {
-        settings.save()
-        guard let source, pipeline != nil, settings != old else { return }
-        if settings.needsReconfigure(comparedTo: old) {
+        if let defaults { settings.save(to: defaults) }
+        guard settings != old else { return }
+        if old.autoExposureOnFace && !settings.autoExposureOnFace { resetExposureROI() }
+        applyCameraSettings(settings, comparedTo: old)
+    }
+
+    /// Sends what changed between two settings to the running source.
+    private func applyCameraSettings(_ new: AppSettings, comparedTo old: AppSettings) {
+        guard let source, pipeline != nil, new != old else { return }
+        if new.needsReconfigure(comparedTo: old) {
             scheduleReconfigure()
-        } else if settings.needsFilterUpdate(comparedTo: old) {
-            let filters = settings.filterConfiguration
+        } else if new.needsFilterUpdate(comparedTo: old) {
+            let filters = new.filterConfiguration
             let live = isLive
             let log = self.log
             Task { [weak self] in
@@ -519,7 +723,7 @@ final class AppModel {
                 }
             }
             refreshPreviewController()
-        } else if settings.scanConfiguration(realTime: true) != old.scanConfiguration(realTime: true) {
+        } else if new.scanConfiguration(realTime: true) != old.scanConfiguration(realTime: true) {
             refreshPreviewController()
         }
     }
@@ -537,6 +741,7 @@ final class AppModel {
                 if self.isLive { self.present(S.couldNotConfigure, error) }
                 self.log.notice("configure: \(error.localizedDescription, privacy: .public)")
             }
+            guard generation == self.sourceGeneration else { return }
             self.refreshPreviewController()
         }
     }
@@ -554,10 +759,15 @@ final class AppModel {
         present(title, message: error.localizedDescription)
     }
 
+    /// Shows an alert; a second message while one is shown is added to it instead of replacing it.
     func present(_ title: String, message: String) {
         log.error("\(title, privacy: .public): \(message, privacy: .public)")
         guard !isQuitting else { return }
-        alert = AppAlert(title: title, message: message)
+        if let shown = alert {
+            alert = AppAlert(title: shown.title, message: shown.message + "\n\n" + title + ": " + message)
+        } else {
+            alert = AppAlert(title: title, message: message)
+        }
     }
 
     func showStatus(_ message: String) {
@@ -572,27 +782,33 @@ final class AppModel {
 
     // MARK: - Termination
 
-    var needsShutdown: Bool { source != nil || isConnecting }
+    var needsShutdown: Bool { source != nil || isConnecting || !closingTasks.isEmpty || !writeTasks.isEmpty }
 
-    /// Releases the camera before the app exits (live: the helper hands the device back to macOS). Gives up
-    /// after `timeout` seconds: the helper also releases the camera when it sees the app exit.
-    func shutdownForTermination(timeout: Double = 15) async {
+    /// Starts everything that must end before the process exits: the source is closed (live: the helper hands the
+    /// camera back to macOS), running writes continue. Synchronous, and the returned work never needs the main
+    /// actor, so it can be waited for while AppKit holds the main queue (applicationShouldTerminate called from a
+    /// main-queue block). nil when nothing has to wait.
+    func beginTermination() -> TerminationWork? {
         isQuitting = true
+        reconstructionID += 1
         reconstructionTask?.cancel()
-        let shutdown = Task { await self.closeSource() }
-        let finished = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            let once = OnceFlag()
-            Task {
-                await shutdown.value
-                if once.claim() { continuation.resume(returning: true) }
-            }
-            Task {
-                try? await Task.sleep(for: .seconds(timeout))
-                if once.claim() { continuation.resume(returning: false) }
-            }
-        }
-        if !finished { log.error("camera shutdown timed out") }
+        detachSource()
+        let work = TerminationWork(camera: Array(closingTasks.values), writes: Array(writeTasks.values))
+        return work.camera.isEmpty && work.writes.isEmpty ? nil : work
     }
+
+    /// Releases the camera before the app exits and waits (bounded) for it and for running writes.
+    func shutdownForTermination(cameraTimeout: Double = 15, writeTimeout: Double = 120) async {
+        guard let work = beginTermination() else { return }
+        if !(await work.wait(cameraTimeout: cameraTimeout, writeTimeout: writeTimeout)) {
+            log.error("shutdown timed out")
+        }
+    }
+}
+
+extension AppModel.Screen {
+    /// Screens that show the live preview (the frame pipeline uploads and analyzes frames only for these).
+    var showsPreview: Bool { self == .preview || self == .scanning }
 }
 
 /// Delivers progress from worker threads to the main actor, coalescing bursts (at most one hop pending).
@@ -642,7 +858,8 @@ extension AppModel {
     /// Puts the model into a given state without a camera (DeveloperSnapshots).
     func applyFixture(screen: Screen, sourceKind: CameraSourceKind?, device: DeviceInfo?, tracking: TrackingState,
                       scanUpdate: ScanUpdate?, scanConfiguration: ScanConfiguration, capture: ScanCapture?,
-                      progress: ReconstructionProgress?, result: ReconstructionResult?, stats: FrameStats) {
+                      progress: ReconstructionProgress?, result: ReconstructionResult?, stats: FrameStats,
+                      recordingStartedAt: Date? = nil, datasetCapture: ScanCapture? = nil) {
         self.screen = screen
         self.sourceKind = sourceKind
         self.device = device
@@ -654,6 +871,13 @@ extension AppModel {
         self.reconstructionProgress = progress
         self.result = result
         self.stats = stats
+        self.recordingStartedAt = recordingStartedAt
+        self.datasetCapture = datasetCapture
     }
+
+    /// Developer checks: the number of detached sources whose shutdown is still running.
+    var pendingSourceShutdowns: Int { closingTasks.count }
+    /// Developer checks: whether the frame pipeline currently uploads and analyzes frames.
+    var isPipelineActive: Bool? { pipeline?.isActive }
 }
 #endif

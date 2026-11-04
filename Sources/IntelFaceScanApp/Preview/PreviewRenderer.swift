@@ -103,11 +103,10 @@ final class PreviewRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         if changed { view?.needsDisplay = true }
     }
 
-    /// Drops the current image (source closed).
-    @MainActor
+    /// Drops the current image (source closed). Any thread: the redraw goes to the main thread.
     func clear() {
         lock.withLock { latest = nil }
-        view?.needsDisplay = true
+        requestRedraw()
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
