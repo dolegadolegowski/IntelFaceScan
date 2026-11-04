@@ -115,6 +115,8 @@ struct SynthScanOptions {
     ]
     /// Error of the Vision head pose (degrees, per angle).
     var poseErrorDeg = 2.5
+    /// Per-frame exposure gain drawn from [1 - j, 1 + j] (auto exposure changes between views).
+    var gainJitter = 0.0
     var seed: UInt64 = 1
 }
 
@@ -159,6 +161,7 @@ func makeSyntheticScan(_ o: SynthScanOptions = SynthScanOptions()) -> SynthScan 
             SIMD4(Float(rt.m[0]), Float(rt.m[3]), Float(rt.m[6]), 0), SIMD4(Float(rt.m[1]), Float(rt.m[4]), Float(rt.m[7]), 0),
             SIMD4(Float(rt.m[2]), Float(rt.m[5]), Float(rt.m[8]), 0), SIMD4(Float(t.x), Float(t.y), Float(t.z), 1))))
 
+        let gain = 1 + o.gainJitter * (2 * rng.uniform() - 1)
         var depth = [UInt16](repeating: 0, count: o.width * o.height)
         var rgb = [UInt8](repeating: 40, count: 3 * o.width * o.height)
         var mask = [UInt8](repeating: 0, count: o.width * o.height)
@@ -185,7 +188,9 @@ func makeSyntheticScan(_ o: SynthScanOptions = SynthScanOptions()) -> SynthScan 
                 if z == .infinity { z = 1.6 }   // back wall
                 let noisy = z + o.noiseAt1m * z * z * rng.gaussian()
                 depth[i] = UInt16(max(1, min(65000, (noisy / 0.0001).rounded())))
-                rgb[3 * i] = color.0; rgb[3 * i + 1] = color.1; rgb[3 * i + 2] = color.2
+                rgb[3 * i] = UInt8(min(255, Double(color.0) * gain))
+                rgb[3 * i + 1] = UInt8(min(255, Double(color.1) * gain))
+                rgb[3 * i + 2] = UInt8(min(255, Double(color.2) * gain))
                 mask[i] = person ? 255 : 0
             }
         }

@@ -107,6 +107,36 @@ struct PipelineTests {
         #expect(zip(fractions, fractions.dropFirst()).allSatisfy { $0 <= $1 + 1e-9 }, "monotonic progress")
     }
 
+    @Test func robustToVisionErrorsAndExposureChanges() async throws {
+        var o = SynthScanOptions()
+        o.poseErrorDeg = 5
+        o.gainJitter = 0.2
+        o.seed = 7
+        let scan = makeSyntheticScan(o)
+        var options = ReconstructionOptions()
+        options.voxelSizeMM = 1.5
+        let result = try await ReconstructionPipeline(options: options).run(scan.capture)
+        var worst = 0.0
+        for (pose, truth) in zip(result.cameraPoses, scan.truth) { worst = max(worst, Self.misalignment(pose, truth, center: scan.center)) }
+        #expect(result.report.usedFrames == scan.capture.keyframes.count)
+        #expect(worst < 0.0015, "worst head misalignment \(worst * 1000) mm")
+    }
+
+    @Test func worksWithoutLandmarks() async throws {
+        // Initial translations then come from the head centroids, the roll from Vision.
+        var capture = Self.scan.capture
+        for k in capture.keyframes.indices { capture.keyframes[k].landmarks = [] }
+        var options = ReconstructionOptions()
+        options.voxelSizeMM = 1.5
+        let result = try await ReconstructionPipeline(options: options).run(capture)
+        var worst = 0.0
+        for (pose, truth) in zip(result.cameraPoses, Self.scan.truth) { worst = max(worst, Self.misalignment(pose, truth, center: Self.scan.center)) }
+        #expect(result.report.notes.contains { $0.contains("0 landmark fits") })
+        #expect(worst < 0.0015, "worst head misalignment \(worst * 1000) mm")
+        let lowest = result.mesh.positions.map { Double($0.y) - Self.scan.center.y }.max() ?? 0
+        #expect(lowest < 0.14, "neck cut from the face rectangle (lowest point \(lowest * 1000) mm)")
+    }
+
     @Test func keepShouldersKeepsTheNeckFromFrontalViews() async throws {
         var options = ReconstructionOptions()
         options.voxelSizeMM = 1.5
