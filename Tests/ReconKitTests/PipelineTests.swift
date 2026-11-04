@@ -247,8 +247,9 @@ struct PipelineBenchmark {
     }
 
     static func run(_ options: ReconstructionOptions) async throws -> (ReconstructionResult, Double) {
+        let capture = scan.capture   // render (lazily) before timing
         let start = Date()
-        let result = try await ReconstructionPipeline(options: options).run(scan.capture)
+        let result = try await ReconstructionPipeline(options: options).run(capture)
         return (result, Date().timeIntervalSince(start))
     }
 
@@ -266,6 +267,7 @@ struct PipelineBenchmark {
         }
         print("benchmark per-frame misalignment (mm): \(perFrame.joined(separator: ", "))")
         print("benchmark: \(Self.views.count) keyframes 1280x800; pipeline \(elapsed) s; "
+            + "edges: odometry \(result.report.odometryEdges), loops \(result.report.loopClosures), rejected \(result.report.rejectedEdges); "
             + "durations \(result.report.durations.sorted { $0.key < $1.key }); GPU \(result.report.usedGPU); "
             + "\(result.report.vertexCount) vertices; worst misalignment \(worst * 1000) mm; notes \(result.report.notes)")
         #expect(elapsed < 60)

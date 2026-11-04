@@ -11,15 +11,15 @@ struct ReconCaptureRange {
     @Test func initialPoseErrorSweep() throws {
         var rows = ["| initial rotation error | initial translation error | colored ICP | worst misalignment (mm) | max rejected edges | time (s) |",
                     "|---|---|---|---|---|---|"]
-        for (rot, trans) in (ProcessInfo.processInfo.environment["IFS_ONE"] != nil ? [(8.0, 0.015)] : [(2.0, 0.003), (4.0, 0.006), (6.0, 0.01), (8.0, 0.015), (10.0, 0.02)]) {
-            for colored in (ProcessInfo.processInfo.environment["IFS_ONE"] != nil ? [false] : [true, false]) {
+        for (rot, trans) in [(2.0, 0.003), (4.0, 0.006), (6.0, 0.01), (8.0, 0.015), (10.0, 0.02)] {
+            for colored in [true, false] {
                 var params = fr_registration_params()
                 fr_registration_params_default(&params)
                 params.icp.colored = colored ? 1 : 0
                 var worst = 0.0
                 var rejected: UInt32 = 0
                 var time = 0.0
-                for seed in (ProcessInfo.processInfo.environment["IFS_ONE"].flatMap { Int($0) }.map { $0 ... $0 } ?? 1 ... 3) {
+                for seed in 1 ... 3 {
                     let initial = ReconRegisterFramesTests.perturbedInitialPoses(seed: UInt64(seed * 17), rotationDeg: rot, translation: trans)
                     let start = Date()
                     let (poses, report) = try ReconRegisterFramesTests.register(initial: initial, params: params)

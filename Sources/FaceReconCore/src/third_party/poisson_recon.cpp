@@ -1,6 +1,6 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
-// Unity wrapper of PoissonRecon (Version 18.76, BSD license, third_party/PoissonRecon/Src). Compiles in ~7 s.
+// Unity wrapper of PoissonRecon (Version 18.76, MIT license, third_party/PoissonRecon/Src). Compiles in ~7 s.
 
 #include "poisson_recon.h"
 
