@@ -110,6 +110,7 @@ private:
     rs2_extrinsics m_depth_to_color;
     ProcessingSettings m_settings;
     uint64_t m_version = 0;
+    float m_depth_units = 0;  // of the previous frameset's depth frame
 
     rs2::threshold_filter m_threshold;
     rs2::disparity_transform m_to_disparity{ true };
