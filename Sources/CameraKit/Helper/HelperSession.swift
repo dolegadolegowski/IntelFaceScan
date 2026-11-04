@@ -719,7 +719,10 @@ final class HelperCameraSession: @unchecked Sendable {
                 logger.info("the camera helper never connected; not waiting for it")
             } else {
                 session.process.terminate()
-                if !session.process.waitForExit(timeout: min(3, remaining())) { session.process.kill() }
+                if !session.process.waitForExit(timeout: 3) {
+                    session.process.kill()
+                    session.process.waitForExit(timeout: 2)
+                }
             }
         } else if !session.process.waitForExit(timeout: remaining()) {
             if mode == .live {
