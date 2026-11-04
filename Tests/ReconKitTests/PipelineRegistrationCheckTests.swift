@@ -28,6 +28,25 @@ struct PipelineRegistrationCheckTests {
         #expect(check.passed.allSatisfy { $0 }, "\(check.scores.map { ($0.fitness, $0.rmse * 1000) })")
     }
 
+    @Test func correctPosesPassWithFourViewsPerPose() throws {
+        // Like a real guided scan: several keyframes per pose, diagonals included. A frame's few most similar views
+        // are then all its siblings; the pose groups must still be linked to the reference across groups (an earlier
+        // version compared each frame with its 4 most similar views and dropped the left side of such a scan).
+        var o = SynthScanOptions()
+        o.width = 320
+        o.height = 200
+        var rng = Rng(s: 5)
+        o.views = []
+        for (pose, yaw, pitch) in [(ScanPose.front, 0.0, 0.0), (.up, 0, 25), (.down, 0, -25), (.left, 45, 0), (.right, -45, 0),
+                                   (.upLeft, 30, 20), (.upRight, -30, 20), (.downLeft, 30, -20), (.downRight, -30, -20)] {
+            for _ in 0 ..< 4 { o.views.append((pose, yaw + 1.5 * rng.gaussian(), pitch + 1.5 * rng.gaussian())) }
+        }
+        let scan = makeSyntheticScan(o)
+        let truth = scan.truth.map { scan.truth[0].inverse * $0 }   // world = camera frame of keyframe 0
+        let check = try RegistrationCheck.verify(frames: try Self.frames(scan), poses: truth)
+        #expect(check.passed.allSatisfy { $0 }, "failed: \(check.passed.indices.filter { !check.passed[$0] })")
+    }
+
     @Test func singleMisregisteredFrameIsExcluded() throws {
         let scan = PipelineTests.scan
         var poses = scan.truth

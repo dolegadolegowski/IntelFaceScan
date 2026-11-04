@@ -301,14 +301,19 @@ enum RegistrationCheck {
         var rmse: Float
     }
 
-    /// Views each frame is compared with (the most similar ones by relative rotation).
-    static let neighborsPerFrame = 4
+    /// Views closer than this (relative rotation) form one pose group.
+    static let groupAngle: Float = 12 * .pi / 180
+    /// Views farther apart than this overlap too little to be compared.
+    static let maxPairAngle: Float = 60 * .pi / 180
+    static let minFitness: Float = 0.25
 
-    /// Scores every frame's registered cloud against its most similar views. A pair fits when the surfaces overlap
-    /// (fitness) with an RMSE close to the typical pair's. A frame passes when a chain of fitting pairs links it to
-    /// frame 0 (the world reference, which always passes). Judging each frame by its single most similar view
-    /// failed both ways: a misregistered pose group fits itself (its frames are each other's most similar views) and
-    /// passed, while a correct frame whose most similar view was the misregistered one was dropped.
+    /// Scores every frame's registered cloud against the most similar view of its own pose group and of every other
+    /// pose group within maxPairAngle. A pair fits when the surfaces overlap (fitness) with an RMSE close to the
+    /// typical pair's. A frame passes when a chain of fitting pairs links it to frame 0 (the world reference, which
+    /// always passes). Judging each frame by its single most similar view failed both ways: a misregistered pose
+    /// group fits itself (its frames are each other's most similar views) and passed, while a correct frame whose
+    /// most similar view was the misregistered one was dropped. The comparisons across pose groups are what link a
+    /// group to the reference.
     static func verify(frames: RGBDFrameSet, poses: [simd_float4x4]) throws -> (passed: [Bool], scores: [FrameScore]) {
         let n = frames.count
         guard n > 1 else { return (Array(repeating: true, count: n), Array(repeating: FrameScore(fitness: 1, rmse: 0), count: n)) }
@@ -338,16 +343,30 @@ enum RegistrationCheck {
         icp.max_correspondence_m = 0.003
         let identity = matrix_identity_float4x4.floats
         let enough = (0 ..< n).map { fr_cloud_size(clouds[$0]) >= 50 }
-        // Pairs: each frame with its most similar views (smallest relative rotation: largest overlap).
-        var pairs: [(Int, Int)] = []
+        func angle(_ i: Int, _ j: Int) -> Float {
+            let a = simd_quatf(poses[j].upperLeft3x3.transpose * poses[i].upperLeft3x3).angle
+            return min(a, 2 * .pi - a)
+        }
+        // Pose groups (greedy, by the rotation relative to each group's first frame).
+        var group = [Int](repeating: -1, count: n)
+        var groupHeads: [Int] = []
         for i in 0 ..< n where enough[i] {
-            let others = (0 ..< n).filter { $0 != i && enough[$0] }
-                .map { j -> (Int, Float) in
-                    let angle = simd_quatf(poses[j].upperLeft3x3.transpose * poses[i].upperLeft3x3).angle
-                    return (j, min(angle, 2 * .pi - angle))
-                }
-                .sorted { $0.1 < $1.1 }
-            for (j, _) in others.prefix(neighborsPerFrame) { pairs.append((i, j)) }
+            if let g = groupHeads.firstIndex(where: { angle($0, i) < groupAngle }) {
+                group[i] = g
+            } else {
+                group[i] = groupHeads.count
+                groupHeads.append(i)
+            }
+        }
+        // Pairs: each frame with the most similar view of every pose group in reach (unordered, evaluated once).
+        var pairs: [(Int, Int)] = []
+        var seen = Set<Int>()
+        for i in 0 ..< n where enough[i] {
+            for g in groupHeads.indices {
+                let candidates = (0 ..< n).filter { $0 != i && group[$0] == g }
+                guard let j = candidates.min(by: { angle(i, $0) < angle(i, $1) }), angle(i, j) <= maxPairAngle else { continue }
+                if seen.insert(min(i, j) * n + max(i, j)).inserted { pairs.append((i, j)) }
+            }
         }
         var pairScores: [FrameScore] = []
         for (i, j) in pairs {
@@ -367,7 +386,9 @@ enum RegistrationCheck {
                 links[i].append(j)
                 links[j].append(i)
             }
-            if s.rmse < scores[i].rmse || !scores[i].rmse.isFinite && s.fitness > scores[i].fitness { scores[i] = s }
+            for k in [i, j] where s.rmse < scores[k].rmse || !scores[k].rmse.isFinite && s.fitness > scores[k].fitness {
+                scores[k] = s
+            }
         }
         var passed = [Bool](repeating: false, count: n)
         passed[0] = true
@@ -380,8 +401,6 @@ enum RegistrationCheck {
         }
         return (passed, scores)
     }
-
-    static let minFitness: Float = 0.25
 
     /// Axis-aligned bounds of the registered frames (robust percentiles) plus a margin, in the world frame.
     static func bounds(frames: RGBDFrameSet, poses: [simd_float4x4], margin: Float) throws -> (min: SIMD3<Float>, max: SIMD3<Float>) {
