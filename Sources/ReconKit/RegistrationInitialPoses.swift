@@ -24,6 +24,12 @@ enum InitialPoseEstimator {
         var landmarkTranslationFrames: Int
     }
 
+    /// Apple Vision measures the head pose relative to the line of sight through the face, not the optical axis: a
+    /// face seen at angle a right of (below) the image center reads about gain * a more yaw (less pitch). Medians of
+    /// the slopes measured with Vision on the rendered synthetic head (yaw 0.66-1.5, pitch 0.2-1.5 over 7 head poses
+    /// and lateral offsets up to 12 cm at 0.6 m; docs/RECONSTRUCTION.md, "Initial poses").
+    static let lineOfSightGain = SIMD2<Float>(0.75, 0.67)
+
     /// Head rotation in the camera frame (ScanKit.HeadPose convention); non-finite angles count as 0.
     static func rotation(_ pose: HeadPose) -> simd_float3x3 {
         let clean = HeadPose(yaw: pose.yaw.isFinite ? pose.yaw : 0, pitch: pose.pitch.isFinite ? pose.pitch : 0,
@@ -31,9 +37,30 @@ enum InitialPoseEstimator {
         return simd_float3x3(clean.cameraFrameRotation)
     }
 
+    /// Head rotation in the camera frame from a keyframe's Vision head pose, with the line of sight through the
+    /// center of its face rectangle taken out (keyframe intrinsics: after undistortion, a pinhole).
+    static func rotation(_ kf: Keyframe, lineOfSightGain gain: SIMD2<Float> = lineOfSightGain) -> simd_float3x3 {
+        rotation(cameraFramePose(kf, lineOfSightGain: gain))
+    }
+
+    /// The keyframe's Vision head pose relative to the optical axis instead of the line of sight: yaw minus
+    /// gain * atan((u - cx) / fx), pitch plus gain * atan((v - cy) / fy), with (u, v) the face rectangle's center.
+    static func cameraFramePose(_ kf: Keyframe, lineOfSightGain gain: SIMD2<Float> = lineOfSightGain) -> HeadPose {
+        var pose = kf.headPose
+        let k = kf.frame.color.intrinsics
+        let rect = kf.faceRect.standardized
+        guard k.fx > 0, k.fy > 0, k.fx.isFinite, k.fy.isFinite, !rect.isNull, rect.width > 0, rect.height > 0,
+              rect.midX.isFinite, rect.midY.isFinite else { return pose }
+        let toDegrees: Float = 180 / .pi
+        pose.yaw -= gain.x * atan((Float(rect.midX) - k.ppx) / k.fx) * toDegrees
+        pose.pitch += gain.y * atan((Float(rect.midY) - k.ppy) / k.fy) * toDegrees
+        return pose
+    }
+
     /// Initial world_from_camera per keyframe; world = camera frame of keyframes[reference].
-    static func estimate(keyframes: [Keyframe], segments: [SegmentedKeyframe], reference: Int) -> Result {
-        let rRef = rotation(keyframes[reference].headPose)
+    static func estimate(keyframes: [Keyframe], segments: [SegmentedKeyframe], reference: Int,
+                         lineOfSightGain gain: SIMD2<Float> = lineOfSightGain) -> Result {
+        let rRef = rotation(keyframes[reference], lineOfSightGain: gain)
         let centers = segments.map { headCenter($0) }
         let landmarks = zip(keyframes, segments).map { landmarkPoints($0.0, $0.1) }
         var poses: [simd_float4x4] = []
@@ -45,7 +72,7 @@ enum InitialPoseEstimator {
             }
             // A head point p (world) appears in frame i at R_i R_ref^T (p - c_ref) + c_i: world_from_camera_i has
             // rotation R_ref R_i^T.
-            let r = rRef * rotation(keyframes[i].headPose).transpose
+            let r = rRef * rotation(keyframes[i], lineOfSightGain: gain).transpose
             if let fit = landmarkKabsch(reference: landmarks[reference], frame: landmarks[i], visionRotation: r) {
                 poses.append(fit)
                 kabsch += 1
@@ -237,14 +264,15 @@ struct HeadFrame {
     ///   - keyframes, poses: all registered keyframes with their world_from_camera poses. Each one's Vision head
     ///     rotation, carried into the world, is an independent estimate of the head orientation; their robust mean
     ///     is far less noisy than the reference keyframe's alone.
-    init(reference kf: Keyframe, segment s: SegmentedKeyframe, keyframes: [Keyframe], poses: [simd_float4x4]) {
+    init(reference kf: Keyframe, segment s: SegmentedKeyframe, keyframes: [Keyframe], poses: [simd_float4x4],
+         lineOfSightGain gain: SIMD2<Float> = InitialPoseEstimator.lineOfSightGain) {
         var estimates: [simd_quatf] = []
         for (k, pose) in zip(keyframes, poses) {
             let p = k.headPose
             guard p.yaw.isFinite, p.pitch.isFinite, p.roll.isFinite else { continue }
-            estimates.append(simd_quatf(pose.upperLeft3x3 * InitialPoseEstimator.rotation(p)))
+            estimates.append(simd_quatf(pose.upperLeft3x3 * InitialPoseEstimator.rotation(k, lineOfSightGain: gain)))
         }
-        let mean = HeadFrame.robustMean(estimates) ?? kf.headPose.cameraFrameRotation
+        let mean = HeadFrame.robustMean(estimates) ?? simd_quatf(InitialPoseEstimator.rotation(kf, lineOfSightGain: gain))
         // Yaw and pitch from where the mean face points; roll from the reference eye line when available.
         let f = mean.act(SIMD3<Float>(0, 0, -1))
         let yaw = atan2(f.x, -f.z), pitch = asin(min(1, max(-1, -f.y)))

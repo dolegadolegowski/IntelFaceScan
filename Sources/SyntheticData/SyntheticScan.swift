@@ -65,6 +65,11 @@ public enum SyntheticScan {
         /// Head position relative to the default (nose near the image center), camera frame, meters (+X right,
         /// +Y down): a person sitting off the optical axis.
         public var headOffsetM: SIMD2<Float> = .zero
+        /// Line-of-sight effect of the simulated Vision head pose: Apple Vision measures the face relative to the line
+        /// of sight, so a face seen at angle a right of (below) the optical axis reads gain * a more yaw (less pitch).
+        /// Measured with Vision on the rendered head (docs/RECONSTRUCTION.md, "Initial poses"): yaw 0.75, pitch
+        /// 0.67, the medians of slopes from 0.2 to 1.5. (0, 0) = Vision without this effect.
+        public var visionLineOfSightGain = SIMD2<Float>(0.75, 0.67)
 
         public init() {}
     }
@@ -115,9 +120,11 @@ public enum SyntheticScan {
                 $0 + SIMD2(landmarkSigma * random.gaussian(), landmarkSigma * random.gaussian())
             }
             let faceRect = SyntheticScene.faceRect(landmarks: landmarks, width: options.width, height: options.height)
-            let e = options.headPoseErrorDeg
-            let estimate = HeadPose(yaw: planned.headPose.yaw + e * random.gaussian(),
-                                    pitch: planned.headPose.pitch + e * random.gaussian(),
+            // Vision reads the face relative to its line of sight, through the center of its face rectangle.
+            let lineOfSight = scene.lineOfSightDegrees(cameraFromWorld: cameraFromModel[i])
+            let e = options.headPoseErrorDeg, gain = options.visionLineOfSightGain
+            let estimate = HeadPose(yaw: planned.headPose.yaw + gain.x * lineOfSight.x + e * random.gaussian(),
+                                    pitch: planned.headPose.pitch - gain.y * lineOfSight.y + e * random.gaussian(),
                                     roll: planned.headPose.roll + e * random.gaussian(),
                                     confidence: 0.9 + 0.09 * random.uniform())
             var quality = SyntheticScene.quality(view: view, faceRect: faceRect)
@@ -195,6 +202,17 @@ public final class SyntheticScene: @unchecked Sendable {
     /// Projects a camera-frame point into the color image, through the lens (rs2_project_point_to_pixel).
     public func project(_ p: SIMD3<Float>) -> SIMD2<Float> {
         lens.map { $0.project(p, intrinsics) } ?? intrinsics.project(p)
+    }
+
+    /// Angles (degrees; x toward the image right, y toward the bottom) of the line of sight through the center of
+    /// the noise-free face rectangle, in the ideal pinhole camera: what Apple Vision measures the head pose against.
+    public func lineOfSightDegrees(cameraFromWorld: simd_float4x4) -> SIMD2<Float> {
+        let pose = Rigid(cameraFromWorld) * worldFromLocal
+        let pinhole = model.landmarks.map { intrinsics.project(pose.apply($0).simd) }
+        let rect = SyntheticScene.faceRect(landmarks: pinhole, width: 1 << 20, height: 1 << 20)
+        let toDegrees: Float = 180 / .pi
+        return SIMD2(atan((Float(rect.midX) - intrinsics.ppx) / intrinsics.fx) * toDegrees,
+                     atan((Float(rect.midY) - intrinsics.ppy) / intrinsics.fy) * toDegrees)
     }
 
     /// D455 color intrinsics at 1280x800 scaled to the requested resolution (the principal point is slightly off

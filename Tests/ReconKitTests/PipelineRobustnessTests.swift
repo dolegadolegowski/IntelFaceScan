@@ -40,6 +40,8 @@ struct ScanImperfections: Sendable {
     /// Color lens distortion (SyntheticScan.Options.lensDistortion) and head position off the optical axis.
     var lensDistortion: LensDistortion?
     var headOffsetM: SIMD2<Float> = .zero
+    /// Line-of-sight gain of the simulated Vision pose (nil = SyntheticScan's default, measured on Apple Vision).
+    var visionLineOfSightGain: SIMD2<Float>?
 
     static let realistic: ScanImperfections = {
         var p = ScanImperfections()
@@ -191,6 +193,7 @@ enum RobustnessStudy {
         options.depthNoiseAt1m = p.depthNoiseAt1m
         options.lensDistortion = p.lensDistortion
         options.headOffsetM = p.headOffsetM
+        if let gain = p.visionLineOfSightGain { options.visionLineOfSightGain = gain }
         var result = SyntheticScan.make(options)
         var keyframes = result.capture.keyframes.enumerated().map { perturb($0.element, p, seed: seed &* 1000 &+ UInt64($0.offset)) }
         var truth = result.groundTruthPoses
