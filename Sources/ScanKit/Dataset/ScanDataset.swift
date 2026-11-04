@@ -297,7 +297,19 @@ public enum ScanDataset {
         }
         let url = root.appendingPathComponent(relative).standardizedFileURL
         guard url.path.hasPrefix(root.path + "/") else { throw ScanDatasetError.unsafePath(relative) }
+        // Symbolic links inside the dataset (a linked "color" folder or file) must not lead out of it either. A file
+        // that does not exist is left to the reader, which reports it as missing.
+        if let real = realPath(url.path), let realRoot = realPath(root.path), !real.hasPrefix(realRoot + "/") {
+            throw ScanDatasetError.unsafePath(relative)
+        }
         return url
+    }
+
+    /// realpath(3): the absolute path with every symbolic link resolved, nil when it does not exist.
+    private static func realPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 
     // MARK: Dates

@@ -30,6 +30,8 @@ public struct HeadPose: Codable, Sendable, Equatable, Hashable {
     /// Rotation R of the head relative to a frontal head, expressed in the camera frame (+X right, +Y down,
     /// +Z forward; a frontal nose points along -Z). A head point p (world = camera frame of the frontal pose)
     /// appears in this frame at R * (p - c) + c', with c the head center, so world_from_camera has rotation R^T.
+    /// Poses measured by HeadTracker (Apple Vision) are relative to the line of sight: for a face off the optical axis
+    /// they differ from this camera-frame rotation by roughly the face's angular offset (see VisionPoseConvention).
     public var cameraFrameRotation: simd_quatf {
         let deg = Float.pi / 180
         let qYaw = simd_quatf(angle: yaw * deg, axis: SIMD3(0, -1, 0))     // nose toward +X (image right)

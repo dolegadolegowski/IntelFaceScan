@@ -115,9 +115,15 @@ public struct LandmarkPoseCues: Sendable, Equatable {
 ///   * pitch: radians, positive = nodding the head down.
 /// HeadPose: yaw > 0 nose toward the image right, pitch > 0 face up, roll > 0 clockwise in the image.
 ///
-/// After a check with the real camera, flip a sign here (or, without rebuilding, set the environment variable
-/// IFS_VISION_POSE_SIGNS="yaw,pitch,roll", e.g. "-1,-1,-1"). HeadTracker logs a warning when the Vision roll/yaw
-/// signs disagree with the landmark geometry (LandmarkPoseCues) over many frames.
+/// Verified with Vision itself on the rendered synthetic head (GuidanceVisionSignTests: +-20 deg yaw and pitch,
+/// +-15 deg roll, rendered with HeadPose.cameraFrameRotation, macOS 27.2). Should a real camera ever disagree, flip a
+/// sign here (or, without rebuilding, set the environment variable IFS_VISION_POSE_SIGNS="yaw,pitch,roll", e.g.
+/// "-1,-1,-1"). HeadTracker logs a warning when the Vision roll/yaw signs disagree with the landmark geometry
+/// (LandmarkPoseCues) over many frames.
+///
+/// Vision measures the face relative to the line of sight, not the optical axis: a face off the image center by an
+/// angle a reads about 0.6-0.9 a more yaw (pitch) toward that side, measured on the synthetic head (10 cm off center
+/// at 0.68 m: +6 / -8 deg). The guidance targets are about what the camera sees, so HeadPose keeps Vision's frame.
 public struct VisionPoseConvention: Sendable, Hashable {
     public var yawSign: Float
     public var pitchSign: Float
@@ -203,8 +209,10 @@ public final class HeadTracker: HeadTracking, @unchecked Sendable {
     private let converter = PixelBufferConverter()
     private let signCheck = ConventionCheck()
     private let lock = NSLock()
-    // The last converted frame, so that a segmentation request right after analyze() reuses the buffer.
-    private var lastBuffer: (sequence: UInt64, timestampMs: Double, buffer: CVPixelBuffer)?
+    // The last converted frame, so that a segmentation request right after analyze() reuses the buffer. Keyed by
+    // the pixels themselves, not only sequence and timestamp: datasets and sources can repeat those for different
+    // images (all-zero metadata, two synthetic datasets with the same numbering).
+    private var lastBuffer: (sequence: UInt64, timestampMs: Double, image: ColorImage, buffer: CVPixelBuffer)?
 
     public init(convention: VisionPoseConvention,
                 segmentationQuality: VNGeneratePersonSegmentationRequest.QualityLevel = .balanced) {
@@ -280,15 +288,19 @@ public final class HeadTracker: HeadTracking, @unchecked Sendable {
     }
 
     private func pixelBuffer(for frame: CameraFrame) throws -> CVPixelBuffer {
-        let cached: CVPixelBuffer? = lock.withLock {
-            guard let last = lastBuffer, last.sequence == frame.sequence,
-                  last.timestampMs == frame.timestampMs else { return nil }
+        let last = lock.withLock { lastBuffer }
+        if let last, last.sequence == frame.sequence, last.timestampMs == frame.timestampMs,
+           Self.sameImage(last.image, frame.color) {
             return last.buffer
         }
-        if let cached { return cached }
         let buffer = try converter.makeBGRA(from: frame.color)
-        lock.withLock { lastBuffer = (frame.sequence, frame.timestampMs, buffer) }
+        lock.withLock { lastBuffer = (frame.sequence, frame.timestampMs, frame.color, buffer) }
         return buffer
+    }
+
+    /// Same size, layout and pixels (Data equality compares the bytes; ~0.2 ms for 1280x800, less than a conversion).
+    static func sameImage(_ a: ColorImage, _ b: ColorImage) -> Bool {
+        a.width == b.width && a.height == b.height && a.bytesPerRow == b.bytesPerRow && a.pixels == b.pixels
     }
 
     /// Largest face weighted by confidence: the person being scanned is the closest one.

@@ -252,6 +252,52 @@ private func expectEqual(_ a: ScanCapture, _ b: ScanCapture) {
     #expect(throws: PNGImageIOError.self) { try ScanDataset.read(from: url) }
 }
 
+@Test func datasetReadRefusesSymlinksOutOfTheDataset() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let fm = FileManager.default
+    let url = root.appendingPathComponent("linked.ifsdataset")
+    try ScanDataset.write(makeCapture(), to: url)
+    // The manifest only names "color/000000.png", but "color" now points at a folder outside the dataset.
+    func expectRefused() {
+        do {
+            _ = try ScanDataset.read(from: url)
+            Issue.record("a dataset with links out of its folder was read")
+        } catch {
+            // Frames are read in parallel: any of the linked color files may be reported first.
+            guard case .unsafePath(let path)? = error as? ScanDatasetError else {
+                Issue.record("unexpected error \(error)")
+                return
+            }
+            #expect(path.hasPrefix("color/0000"), "\(path)")
+        }
+    }
+    let outside = root.appendingPathComponent("outside")
+    try fm.moveItem(at: url.appendingPathComponent("color"), to: outside)
+    try fm.createSymbolicLink(at: url.appendingPathComponent("color"), withDestinationURL: outside)
+    expectRefused()
+
+    // A link to a single file outside is refused as well.
+    try fm.removeItem(at: url.appendingPathComponent("color"))
+    try fm.createDirectory(at: url.appendingPathComponent("color"), withIntermediateDirectories: false)
+    for name in try fm.contentsOfDirectory(atPath: outside.path) {
+        try fm.createSymbolicLink(at: url.appendingPathComponent("color/\(name)"),
+                                  withDestinationURL: outside.appendingPathComponent(name))
+    }
+    expectRefused()
+
+    // Links that stay inside the dataset, and a dataset reached through a linked parent folder, still work.
+    for name in try fm.contentsOfDirectory(atPath: outside.path) {
+        try fm.removeItem(at: url.appendingPathComponent("color/\(name)"))
+        try fm.moveItem(at: outside.appendingPathComponent(name), to: url.appendingPathComponent("color/\(name)"))
+    }
+    try fm.moveItem(at: url.appendingPathComponent("color/000002.png"), to: url.appendingPathComponent("frame2.png"))
+    try fm.createSymbolicLink(atPath: url.appendingPathComponent("color/000002.png").path, withDestinationPath: "../frame2.png")
+    let alias = root.appendingPathComponent("alias")
+    try fm.createSymbolicLink(at: alias, withDestinationURL: root)
+    expectEqual(makeCapture(), try ScanDataset.read(from: alias.appendingPathComponent("linked.ifsdataset")))
+}
+
 @Test func datasetWriteRefusesToReplaceOtherFolders() throws {
     let root = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }

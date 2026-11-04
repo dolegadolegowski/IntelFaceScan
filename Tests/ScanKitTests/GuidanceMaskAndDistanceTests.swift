@@ -116,6 +116,69 @@ import Testing
         for i in 0 ..< eroded.count where eroded[i] != 0 { #expect(raw[i] != 0) }
     }
 
+    @Test func erosionDoesNotWidenHolesInsideTheHead() {
+        // Single pixels without depth on the face (stereo speckle): each must cost one mask pixel, not 25.
+        let frame = factory.frame(sequence: 0, timestampMs: 0)
+        var holed = frame.alignedDepth
+        var holes = Set<Int>()
+        let face = factory.faceRect
+        for y in stride(from: Int(face.minY) + 8, to: Int(face.maxY) - 8, by: 6) {
+            for x in stride(from: Int(face.minX) + 8, to: Int(face.maxX) - 8, by: 6) { holes.insert(y * factory.width + x) }
+        }
+        holed.pixels.withUnsafeMutableBytes { raw in
+            let v = raw.bindMemory(to: UInt16.self)
+            for i in holes { v[i] = 0 }
+        }
+        #expect(holes.count >= 16)
+        let intact = HeadMaskBuilder.build(width: factory.width, height: factory.height, observation: observation(),
+                                           depth: frame.alignedDepth, faceDistanceM: 0.62)
+        let mask = HeadMaskBuilder.build(width: factory.width, height: factory.height, observation: observation(),
+                                         depth: holed, faceDistanceM: 0.62)
+        let differing = (0 ..< mask.count).filter { mask[$0] != (holes.contains($0) ? 0 : intact[$0]) }
+        #expect(differing.isEmpty, "\(differing.count) pixels differ from the intact mask minus the holes")
+        #expect(HeadMaskBuilder.count(mask) == HeadMaskBuilder.count(intact) - holes.count)
+    }
+
+    @Test func personMaskThatMissesTheFaceIsIgnored() {
+        // Vision's person segmentation of a head without a body can return only the neck: the head mask must not
+        // collapse to the few overlapping pixels (every frame would then fail the depth-point gate).
+        let frame = factory.frame(sequence: 0, timestampMs: 0)
+        var neckOnly = Data(count: factory.width * factory.height)
+        let face = factory.faceRect
+        for y in Int(face.maxY) - 2 ..< factory.height {
+            for x in Int(face.midX) - 10 ..< Int(face.midX) + 10 { neckOnly[y * factory.width + x] = 255 }
+        }
+        let ellipse = HeadMaskBuilder.build(width: factory.width, height: factory.height, observation: observation(),
+                                            depth: frame.alignedDepth, faceDistanceM: 0.62)
+        let mask = HeadMaskBuilder.build(width: factory.width, height: factory.height,
+                                         observation: observation(personMask: neckOnly),
+                                         depth: frame.alignedDepth, faceDistanceM: 0.62)
+        #expect(mask == ellipse)
+        #expect(HeadMaskBuilder.count(mask) > 1000)
+
+        // A person mask that covers the face is used as is (here: a box around the head, smaller than the ellipse).
+        var box = Data(count: factory.width * factory.height)
+        for y in Int(face.minY) - 4 ..< Int(face.maxY) {
+            for x in Int(face.minX) + 2 ..< Int(face.maxX) - 2 { box[y * factory.width + x] = 255 }
+        }
+        let boxed = HeadMaskBuilder.build(width: factory.width, height: factory.height,
+                                          observation: observation(personMask: box),
+                                          depth: frame.alignedDepth, faceDistanceM: 0.62)
+        #expect(HeadMaskBuilder.count(boxed) > 500)
+        #expect(HeadMaskBuilder.count(boxed) < HeadMaskBuilder.count(ellipse))
+        for i in 0 ..< boxed.count where boxed[i] != 0 { #expect(box[i] != 0) }
+    }
+
+    @Test func depthBandBeyondTheDepthUnitDoesNotTrap() {
+        // 7 m is beyond what Z16 at 0.1 mm can hold (6.55 m): the band is clamped, the mask is just empty.
+        let frame = factory.frame(sequence: 0, timestampMs: 0)
+        for distance: Float in [7, 1000, .greatestFiniteMagnitude] {
+            let mask = HeadMaskBuilder.build(width: factory.width, height: factory.height, observation: observation(),
+                                             depth: frame.alignedDepth, faceDistanceM: distance)
+            #expect(HeadMaskBuilder.count(mask) == 0)
+        }
+    }
+
     @Test func degenerateInputsGiveEmptyMasks() {
         let empty = HeadObservation(pose: .frontal, faceRect: .zero, landmarks: [], personMask: nil)
         #expect(HeadMaskBuilder.count(HeadMaskBuilder.build(width: 10, height: 10, observation: empty, depth: nil,

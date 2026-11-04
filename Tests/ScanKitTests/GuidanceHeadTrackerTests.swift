@@ -7,8 +7,77 @@ import CameraKit
 import CoreGraphics
 import CoreVideo
 import Foundation
+import SyntheticData
 import Testing
 @testable import ScanKit
+
+/// Apple Vision on the rendered synthetic head (lighting 0.6: Vision needs the shading cues), as HeadPose through
+/// HeadTracker with the documented convention. The head is rendered with HeadPose.cameraFrameRotation, so these
+/// tests tie Vision's angles, VisionPoseConvention and the HeadPose convention together.
+@Suite(.serialized) struct GuidanceVisionSignTests {
+    static let scene: SyntheticScene = {
+        var options = SyntheticCameraSource.defaultOptions
+        options.width = 640
+        options.height = 400
+        return SyntheticScene(options: options)
+    }()
+
+    private func measure(_ pose: HeadPose, index: UInt64) throws -> HeadPose {
+        let scene = Self.scene
+        let view = scene.render(cameraFromWorld: scene.cameraFromWorld(headPose: pose), frameIndex: index,
+                                sequence: index, timestampMs: 1_000 + Double(index))
+        let tracker = HeadTracker(convention: .documented)
+        let observation = try #require(try tracker.analyze(view.frame, segmentation: false), "no face at \(pose)")
+        return observation.pose
+    }
+
+    /// Readings at -angle, 0 and +angle on one axis: they must increase with the true angle, with the right sign at
+    /// both ends and a clear spread (Vision on the synthetic face: e.g. yaw +-20 -> ~+20 / -27).
+    private func expectAxis(_ angle: Float, _ make: (Float) -> HeadPose, _ read: (HeadPose) -> Float,
+                            _ name: String) throws {
+        let minus = read(try measure(make(-angle), index: 1))
+        let zero = read(try measure(make(0), index: 2))
+        let plus = read(try measure(make(angle), index: 3))
+        #expect(minus < zero && zero < plus, "\(name): \(minus), \(zero), \(plus)")
+        #expect(plus > 0 && minus < 0, "\(name): \(minus), \(plus)")
+        #expect(plus - minus > angle, "\(name): \(minus), \(plus) for +-\(angle)")
+    }
+
+    @Test func yawSignMatchesHeadPose() throws {
+        // yaw > 0: the nose moves toward the image right.
+        try expectAxis(20, { HeadPose(yaw: $0, pitch: 0, roll: 0) }, \.yaw, "yaw")
+    }
+
+    @Test func pitchSignMatchesHeadPose() throws {
+        // pitch > 0: the face turns up.
+        try expectAxis(20, { HeadPose(yaw: 0, pitch: $0, roll: 0) }, \.pitch, "pitch")
+    }
+
+    @Test func rollSignMatchesHeadPose() throws {
+        // roll > 0: the head tilts clockwise in the image; the eye line from the landmarks agrees.
+        try expectAxis(15, { HeadPose(yaw: 0, pitch: 0, roll: $0) }, \.roll, "roll")
+        let scene = Self.scene
+        let view = scene.render(cameraFromWorld: scene.cameraFromWorld(headPose: HeadPose(yaw: 0, pitch: 0, roll: 15)),
+                                frameIndex: 4, sequence: 4, timestampMs: 1_004)
+        let observation = try #require(try HeadTracker(convention: .documented).analyze(view.frame, segmentation: false))
+        let cues = try #require(observation.regions.flatMap { LandmarkPoseCues(regions: $0) })
+        #expect(cues.rollDegrees > 5, "eye line \(cues.rollDegrees)")
+    }
+
+    @Test func framesWithEqualNumbersButOtherPixelsAreAnalyzedAgain() throws {
+        // The converted-image cache must not hand Vision the previous frame when a source repeats sequence numbers
+        // and timestamps (datasets without them, two synthetic datasets with the same numbering).
+        let scene = Self.scene
+        let face = scene.render(cameraFromWorld: scene.cameraFromWorld(headPose: .frontal), frameIndex: 5,
+                                sequence: 9, timestampMs: 9).frame
+        var blank = face
+        blank.color.pixels = Data(repeating: 128, count: face.color.pixels.count)
+        let tracker = HeadTracker(convention: .documented)
+        #expect(try tracker.analyze(face, segmentation: false) != nil)
+        #expect(try tracker.analyze(blank, segmentation: false) == nil)
+        #expect(try tracker.analyze(face, segmentation: false) != nil)
+    }
+}
 
 @Suite struct GuidanceHeadTrackerTests {
     @Test func documentedConventionMapsVisionSigns() {
