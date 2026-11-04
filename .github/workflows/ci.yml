@@ -113,7 +113,12 @@ jobs:
         id: swift-build
         run: swift build
 
+      # NSUnbufferedIO: the test runners' output reaches the log as it happens (a pipe is block-buffered otherwise, so
+      # a slow or stuck test would not show). The step limit leaves time for the smoke tests and the app build.
       - name: Run the tests
+        timeout-minutes: 40
+        env:
+          NSUnbufferedIO: "YES"
         run: scripts/test.sh
 
       # The smoke tests and the app build do not depend on the test results: they also run when a test failed (the job
