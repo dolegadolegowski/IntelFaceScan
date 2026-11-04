@@ -99,19 +99,34 @@ private func smallOptions() -> SyntheticScan.Options {
 @Test func syntheticCameraAnimationVisitsEveryScanPose() {
     var options = smallOptions()
     options.poses = ScanPose.required
-    let source = SyntheticCameraSource(options: options, transitionSeconds: 1, holdSeconds: 2)
-    for (i, pose) in options.poses.enumerated() {
-        // middle of the hold phase of pose i (sway is at most 1.5 degrees)
-        let (head, translation) = source.headPose(at: Double(i) * 3 + 2)
-        #expect(abs(head.yaw - pose.target.yaw) <= 1.6, "\(pose): yaw \(head.yaw)")
-        #expect(abs(head.pitch - pose.target.pitch) <= 1.1, "\(pose): pitch \(head.pitch)")
-        #expect(abs(head.roll) <= 0.81)
-        #expect(simd_length(translation) < 0.003)
+    let source = SyntheticCameraSource(options: options, transitionSeconds: 1, holdSeconds: 2, amplitudes: [1, 1.2],
+                                       stepSeconds: 0.5)
+    // front: one stop; the other poses: the target, then 20 % further.
+    #expect(abs(source.cycleSeconds - (3 + 4 * (3 + 2.5))) < 1e-9)
+    var t = 0.0
+    for pose in options.poses {
+        let factors: [Float] = pose == .front ? [1] : [1, 1.2]
+        for (k, factor) in factors.enumerated() {
+            t += k == 0 ? 1 : 0.5
+            // middle of the hold (sway at most 1.5 degrees in yaw, 1 in pitch)
+            let (head, translation) = source.headPose(at: t + 1)
+            #expect(abs(head.yaw - pose.target.yaw * factor) <= 1.6, "\(pose) x \(factor): yaw \(head.yaw)")
+            #expect(abs(head.pitch - pose.target.pitch * factor) <= 1.1, "\(pose) x \(factor): pitch \(head.pitch)")
+            #expect(abs(head.roll) <= 0.81)
+            #expect(simd_length(translation) < 0.003)
+            t += 2
+        }
     }
     // halfway through the turn from front to up
     let between = source.headPose(at: 3.5).pose
     #expect(between.pitch > 5 && between.pitch < 20)
+    // the step from up to 1.2 x up (25 -> 30 degrees in 0.5 s) stays below the guided scan's 20 deg/s motion gate
+    let step = (source.headPose(at: 6.25).pose.pitch - source.headPose(at: 6.2).pose.pitch) / 0.05
+    #expect(step > 5 && step < 16, "\(step) deg/s")
     // the sequence loops
-    let a = source.headPose(at: 1.7).pose, b = source.headPose(at: 1.7 + 15).pose
+    let a = source.headPose(at: 1.7).pose, b = source.headPose(at: 1.7 + source.cycleSeconds).pose
     #expect(abs(a.pitch - b.pitch) < 2.6 && abs(a.yaw - b.yaw) < 3.1)
+    // The defaults turn 10 and 20 % beyond each target: left reaches 54 degrees, down -30.
+    let defaults = SyntheticCameraSource(options: options)
+    #expect(defaults.amplitudes == [1, 1.1, 1.2])
 }

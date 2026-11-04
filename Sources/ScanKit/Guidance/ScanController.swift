@@ -13,8 +13,14 @@ public struct ScanConfiguration: Sendable, Hashable {
     public var poses: [ScanPose] = ScanPose.required
     /// Keyframes accepted per pose.
     public var framesPerPose: Int = 3
-    /// Maximum angular distance (degrees) from a pose's target.
+    /// Maximum angular distance (degrees) from a pose's target, along the direction of the target (the front pose:
+    /// in every direction).
     public var angleTolerance: Float = 8
+    /// Maximum deviation (degrees) across the direction of a pose's target: pitch on the side poses, yaw on up and
+    /// down. A side pose a little up or down still shows that side of the head (the keyframe keeps its measured
+    /// pose), and Vision reads large yaw partly as pitch: the synthetic head at yaw +44..+52 reads pitch +4..+10 at
+    /// 640x400 (mean ~+8), which an 8-degree circle rarely accepted. The tolerance is the ellipse of both semi-axes.
+    public var perpendicularToleranceDeg: Float = 12
     /// Targets of the other poses are relative to the person's own frontal pose (mean of the front keyframes):
     /// Vision's yaw/pitch of a face looking straight at the camera is biased per person by a few degrees.
     public var targetsRelativeToFront: Bool = true
@@ -129,7 +135,9 @@ public struct ScanUpdate: Sendable {
     /// Head pose averaged over the last ~0.25 s (what the target check uses).
     public var smoothedPose: HeadPose?
     public var angularSpeedDegPerSec: Float?
-    /// Angular distance to the current pose target (degrees).
+    /// Remaining angular distance to the current pose target (degrees), with the component across the pose direction
+    /// scaled by angleTolerance / perpendicularToleranceDeg: the pose is within tolerance when this is at most
+    /// angleTolerance (what the UI compares).
     public var angularErrorDeg: Float?
     /// Target - current (yaw, pitch) in degrees.
     public var targetDelta: SIMD2<Float>?
@@ -446,7 +454,7 @@ public final class ScanController: @unchecked Sendable {
         }
         let delta = Self.poseDelta(pose: pose, current: SIMD2(smoothed.yaw, smoothed.pitch),
                                    frontOffset: frontOffset(snapshot), overshootDeg: c.overshootToleranceDeg)
-        let error = (delta.x * delta.x + delta.y * delta.y).squareRoot()
+        let error = Self.toleranceError(delta, pose: pose, along: c.angleTolerance, across: c.perpendicularToleranceDeg)
         update.targetDelta = delta
         update.angularErrorDeg = error
 
@@ -579,6 +587,23 @@ public final class ScanController: @unchecked Sendable {
             remaining = magnitude + overshootDeg - along              // turned too far: turn back
         }
         return perpendicular + remaining * direction
+    }
+
+    /// A remaining turn (poseDelta) measured against the tolerance ellipse, in degrees on the `along` scale: the
+    /// component across the direction of the pose's target counts along / across times, so the turn is within the
+    /// ellipse (semi-axes `along` and `across`) when the result is at most `along`. The front pose: the plain length.
+    static func toleranceError(_ delta: SIMD2<Float>, pose: ScanPose, along: Float, across: Float) -> Float {
+        let target = SIMD2(pose.target.yaw, pose.target.pitch)
+        let magnitude = simd_length(target)
+        guard magnitude > 0, along > 0, across > 0 else { return simd_length(delta) }
+        let direction = target / magnitude
+        let a = simd_dot(delta, direction)
+        let p = simd_length(delta - a * direction) * along / across
+        return (a * a + p * p).squareRoot()
+    }
+
+    static func withinTolerance(_ delta: SIMD2<Float>, pose: ScanPose, along: Float, across: Float) -> Bool {
+        toleranceError(delta, pose: pose, along: along, across: across) <= along
     }
 
     private func commit(_ decision: Decision, update: inout ScanUpdate, generation: UInt64, t: Double) {

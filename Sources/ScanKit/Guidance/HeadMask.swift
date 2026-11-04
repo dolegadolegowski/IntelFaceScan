@@ -2,6 +2,7 @@
 //
 // Head segmentation at color resolution: person mask (or a face-rect ellipse when segmentation is unavailable or
 // missed the face) ∩ depth band around the face ∩ above the neck cut (unless keepShoulders), silhouette eroded.
+// Without a person mask, keepShoulders grows the head below the chin through depth-connected pixels of the band.
 
 import Accelerate
 import CameraKit
@@ -24,6 +25,14 @@ public struct HeadMaskParameters: Sendable, Hashable {
     /// A person mask that covers less than this fraction of the central face region missed the face (Vision's
     /// person segmentation sometimes returns only the neck or shoulders); the face-rectangle ellipse is used instead.
     public var minPersonMaskFaceCoverage: Float = 0.5
+    /// keepShoulders without a person mask (segmentation off, failed or rejected): the ellipse covers only the head,
+    /// so neck and shoulders are grown from it: pixels below the chin within this many face widths to each side of
+    /// it and face heights below it, with depth in the band, reached from the head through neighbors whose depth
+    /// differs by at most shoulderMaxDepthStepM. The step limit stops at occluding edges (a chair back or desk at a
+    /// similar distance touching the body in the image), the region limits what a smooth surface can add.
+    public var shoulderHalfWidthFaces: Float = 1.6
+    public var shoulderExtentFaces: Float = 2.5
+    public var shoulderMaxDepthStepM: Float = 0.025
 
     public init() {}
 }
@@ -89,10 +98,59 @@ public enum HeadMaskBuilder {
                 }
             }
         }
+        if parameters.keepShoulders, personMask == nil, let band, let depth = usableDepth {
+            growShoulders(&mask, depth: depth, band: band, roi: roi, face: face, chin: observation.chinPoint, down: down,
+                          parameters: parameters)
+        }
         if parameters.erosionRadius > 0 {
             erodeSilhouette(&mask, width: width, height: height, radius: parameters.erosionRadius)
         }
         return mask
+    }
+
+    /// Adds neck and shoulders to a head mask built without a person mask (see HeadMaskParameters.keepShoulders):
+    /// a flood fill from the head's pixels into the region below the chin, through pixels with depth in the band and
+    /// small depth steps between neighbors.
+    static func growShoulders(_ mask: inout Data, depth: DepthImage, band: (lo: UInt16, hi: UInt16), roi: PixelRect,
+                              face: CGRect, chin: SIMD2<Float>, down: SIMD2<Float>, parameters: HeadMaskParameters) {
+        let width = depth.width
+        guard roi.area > 0, mask.count == width * depth.height, depth.depthScale > 0 else { return }
+        let side = SIMD2(-down.y, down.x)
+        let halfWidth = parameters.shoulderHalfWidthFaces * Float(face.width)
+        let extent = parameters.shoulderExtentFaces * Float(face.height)
+        let maxStep = Int((parameters.shoulderMaxDepthStepM / depth.depthScale).rounded())
+        mask.withUnsafeMutableBytes { maskRaw in
+            depth.pixels.withUnsafeBytes { depthRaw in
+                let m = maskRaw.bindMemory(to: UInt8.self)
+                let z = depthRaw.bindMemory(to: UInt16.self)
+                func inRegion(_ x: Int, _ y: Int) -> Bool {
+                    let d = SIMD2(Float(x) + 0.5, Float(y) + 0.5) - chin
+                    let below = simd_dot(d, down)
+                    return below > 0 && below <= extent && abs(simd_dot(d, side)) <= halfWidth
+                }
+                var queue: [Int32] = []
+                for y in roi.y ..< roi.y + roi.height {
+                    for x in roi.x ..< roi.x + roi.width where m[y * width + x] != 0 { queue.append(Int32(y * width + x)) }
+                }
+                func visit(_ x: Int, _ y: Int, from zi: Int) {
+                    guard x >= roi.x, x < roi.x + roi.width, y >= roi.y, y < roi.y + roi.height else { return }
+                    let j = y * width + x
+                    guard m[j] == 0 else { return }
+                    let v = UInt16(littleEndian: z[j])
+                    guard v >= band.lo, v <= band.hi, abs(Int(v) - zi) <= maxStep, inRegion(x, y) else { return }
+                    m[j] = 255
+                    queue.append(Int32(j))
+                }
+                var head = 0
+                while head < queue.count {
+                    let i = Int(queue[head]); head += 1
+                    let x = i % width, y = i / width
+                    let zi = Int(UInt16(littleEndian: z[i]))
+                    visit(x - 1, y, from: zi); visit(x + 1, y, from: zi)
+                    visit(x, y - 1, from: zi); visit(x, y + 1, from: zi)
+                }
+            }
+        }
     }
 
     /// Number of non-zero mask pixels.

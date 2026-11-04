@@ -1,7 +1,8 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
 // A CameraSource streaming the rendered synthetic head at the configured frame rate (default 30 fps), turning
-// through the scan poses in a loop: ease from one pose target to the next, hold it with a slight sway, continue.
+// through the scan poses in a loop: ease from one pose target to the next, hold it with a slight sway, turn a bit
+// further and hold again (like a user who keeps turning while the guidance says so), continue with the next pose.
 // For UI development and tests without a camera. Frames are rendered on demand at the configured color
 // resolution; the animation follows the wall clock, so a slow (debug) build drops frames instead of slowing down.
 
@@ -14,9 +15,19 @@ import simd
 public final class SyntheticCameraSource: CameraSource, @unchecked Sendable {
     public let kind: CameraSourceKind = .synthetic
     public let options: SyntheticScan.Options
-    /// Seconds to turn from one pose to the next, and to hold each pose.
+    /// Seconds to turn from one pose to the next, and to hold each stop of a pose.
     public let transitionSeconds: Double
     public let holdSeconds: Double
+    /// The stops of every pose but the front: the target scaled by these factors, in this order (default: left at
+    /// 45, 49.5 and 54 degrees, down at -25, -27.5 and -30). Vision reads the synthetic head's large turns short and
+    /// not monotonically (at 1280x800: yaw +45 -> ~30, +50 -> ~39, +55 -> ~53; pitch -25 -> ~-23 but -30 -> ~-12;
+    /// GuidanceSyntheticVisionStudy): a head that stopped exactly at the targets rarely completed "left" and was slow
+    /// on "down", and turning much further does not help "down". A real user keeps turning while asked to.
+    public let amplitudes: [Float]
+    /// Seconds to turn from one stop of a pose to the next (a few degrees: below the guided scan's motion gate).
+    public let stepSeconds: Double
+    /// Animation stops in order: head yaw/pitch (degrees) and the time to ease there from the previous stop.
+    private let stops: [(yaw: Float, pitch: Float, transition: Double)]
 
     private let lock = NSLock()
     private var scene: SyntheticScene?
@@ -31,7 +42,10 @@ public final class SyntheticCameraSource: CameraSource, @unchecked Sendable {
 
     /// Defaults for UI work: stronger shading than the reconstruction datasets. Apple Vision needs the shading cues:
     /// with lighting 0.25 it misses the face in the down and +-45 degree poses and person segmentation fails; at 0.6
-    /// every scan pose is detected with the right yaw sign and segmentation works (measured with ScanKit's HeadTracker).
+    /// every scan pose is detected with the right yaw sign (measured with ScanKit's HeadTracker). What Vision reads
+    /// depends on the resolution: at 640x400 yaw +45 reads ~46 and -45 ~-52, and person segmentation covers the face in
+    /// nearly every frame; at 1280x800 +45 reads ~30 and -45 ~-50, and segmentation covers the frontal face in only
+    /// about half of the frames (HeadMaskBuilder then falls back to the face-rectangle ellipse).
     public static var defaultOptions: SyntheticScan.Options {
         var options = SyntheticScan.Options()
         options.lighting = 0.6
@@ -39,10 +53,21 @@ public final class SyntheticCameraSource: CameraSource, @unchecked Sendable {
     }
 
     public init(options: SyntheticScan.Options = SyntheticCameraSource.defaultOptions, transitionSeconds: Double = 1.2,
-                holdSeconds: Double = 1.5) {
+                holdSeconds: Double = 1.5, amplitudes: [Float] = [1, 1.1, 1.2], stepSeconds: Double = 0.5) {
         self.options = options
         self.transitionSeconds = max(0.05, transitionSeconds)
         self.holdSeconds = max(0, holdSeconds)
+        self.amplitudes = amplitudes.isEmpty ? [1] : amplitudes
+        self.stepSeconds = max(0.05, stepSeconds)
+        var stops: [(yaw: Float, pitch: Float, transition: Double)] = []
+        for pose in options.poses.isEmpty ? [ScanPose.front] : options.poses {
+            let target = pose.target
+            let factors: [Float] = target.yaw == 0 && target.pitch == 0 ? [1] : self.amplitudes
+            for (k, factor) in factors.enumerated() {
+                stops.append((target.yaw * factor, target.pitch * factor, k == 0 ? self.transitionSeconds : self.stepSeconds))
+            }
+        }
+        self.stops = stops
     }
 
     public func connect() async throws -> DeviceInfo {
@@ -166,16 +191,19 @@ public final class SyntheticCameraSource: CameraSource, @unchecked Sendable {
 
     // MARK: Animation
 
+    /// Seconds of one pass through every pose and its stops.
+    public var cycleSeconds: Double { stops.reduce(0) { $0 + $1.transition + holdSeconds } }
+
     /// Head orientation and translation at animation time t (seconds); the sequence loops.
     public func headPose(at t: Double) -> (pose: HeadPose, translation: SIMD3<Float>) {
-        let poses = options.poses.isEmpty ? [ScanPose.front] : options.poses
-        let segment = transitionSeconds + holdSeconds
-        let cycle = segment * Double(poses.count)
-        let local = t.truncatingRemainder(dividingBy: cycle)
-        let index = min(Int(local / segment), poses.count - 1)
-        let within = local - Double(index) * segment
-        let from = poses[(index + poses.count - 1) % poses.count].target, to = poses[index].target
-        let blend = Float(min(within / transitionSeconds, 1))
+        var local = max(0, t).truncatingRemainder(dividingBy: max(1e-6, cycleSeconds))
+        var index = 0
+        while index < stops.count - 1, local >= stops[index].transition + holdSeconds {
+            local -= stops[index].transition + holdSeconds
+            index += 1
+        }
+        let from = stops[(index + stops.count - 1) % stops.count], to = stops[index]
+        let blend = Float(min(local / to.transition, 1))
         let eased = blend * blend * (3 - 2 * blend)
         let sway = Float(sin(t * 1.7)), nod = Float(sin(t * 1.3 + 0.5))
         let pose = HeadPose(yaw: from.yaw + (to.yaw - from.yaw) * eased + 1.5 * sway,

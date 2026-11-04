@@ -148,10 +148,29 @@ public enum CameraMotion {
 ///
 /// Vision's angles jitter by about a degree from frame to frame; differencing consecutive frames at 30 fps would
 /// turn that into ~30 deg/s of fake motion, so the speed is the least-squares slope over the window instead.
+/// Vision's readings also jump while the head is still: a reading switches by several degrees within one frame and
+/// stays there, or is off for a single frame (on the held synthetic head: 2-4 degrees in pitch on "down", up to 12
+/// degrees in yaw at +45 at 1280x800). One step in the 0.25 s window is a least-squares slope of up to 5.7 deg/s
+/// per degree, so a 4-degree step alone exceeded the 20 deg/s gate for several frames. A head cannot move like that
+/// (a step is a turn at hundreds of deg/s that stops within a frame), so single-frame outliers and isolated steps
+/// are removed before the fit; real motion changes the pose over several frames and is measured as before.
+/// "Isolated" includes time: Vision reads a small fast shake as a square wave (on the synthetic head a 2.5 Hz +-6
+/// degree yaw shake reads as steps of ~5.5 degrees, reversing every 0.2 s), which step by step looks exactly like its
+/// jumps on a still head. Those come as flicker (a jump and back within a few frames) or alone, with quiet spells of
+/// 1-2 s between them (measured on the held synthetic head, GuidanceSyntheticVisionStudy), so a step of 3 degrees or
+/// more whose nearest reversal of comparable size lies 0.11 to jumpIsolationSeconds before or after it is kept as
+/// motion; samples that old are kept for that test.
 public struct PoseHistory: Sendable {
     public var window: Double
     /// A gap longer than this (seconds) or a timestamp going backwards starts a new history.
     public var maxGap: Double
+    /// A frame-to-frame change faster than this (deg/s; 2 degrees at 30 fps) can be a jump (see withoutJumps).
+    public var minJumpRate: Double = 60
+    public var jumpNeighborRatio: Double = 0.5
+    /// A step is kept as motion when a reversal of comparable size lies within this many seconds of it (a shake that
+    /// Vision reads as a square wave; see withoutJumps). 0: every isolated step is a jump.
+    public var jumpIsolationSeconds: Double = 0.35
+    /// Samples of the last `window + jumpIsolationSeconds` seconds; the mean and the fit use the last `window`.
     private var samples: [(t: Double, pose: HeadPose)] = []
 
     public init(window: Double = 0.25, maxGap: Double = 0.5) {
@@ -163,7 +182,7 @@ public struct PoseHistory: Sendable {
     public mutating func add(_ pose: HeadPose, at t: Double) {
         if let last = samples.last, t <= last.t || t - last.t > maxGap { samples.removeAll() }
         samples.append((t, pose))
-        let cutoff = t - window
+        let cutoff = t - window - max(0, jumpIsolationSeconds)
         if let firstKept = samples.firstIndex(where: { $0.t >= cutoff }), firstKept > 0 {
             samples.removeFirst(firstKept)
         }
@@ -171,34 +190,100 @@ public struct PoseHistory: Sendable {
 
     public mutating func reset() { samples.removeAll() }
 
+    /// Index of the first sample of the last `window` seconds.
+    private var windowStart: Int {
+        guard let last = samples.last else { return 0 }
+        return samples.firstIndex(where: { $0.t >= last.t - window }) ?? samples.count - 1
+    }
+
     /// Mean pose over the window.
     public var smoothed: HeadPose? {
         guard !samples.isEmpty else { return nil }
+        let recent = samples[windowStart...]
         var yaw: Float = 0, pitch: Float = 0, roll: Float = 0, confidence: Float = 0
-        for s in samples {
+        for s in recent {
             yaw += s.pose.yaw; pitch += s.pose.pitch; roll += s.pose.roll; confidence += s.pose.confidence
         }
-        let n = Float(samples.count)
+        let n = Float(recent.count)
         return HeadPose(yaw: yaw / n, pitch: pitch / n, roll: roll / n, confidence: confidence / n)
     }
 
-    /// Angular speed (deg/s) from the least-squares slopes of yaw, pitch and roll; nil until the window spans
-    /// at least `minSpan` seconds.
+    /// Angular speed (deg/s) from the least-squares slopes of yaw, pitch and roll over the window after removing
+    /// Vision's jumps (found over the whole kept history); nil until the window spans at least `minSpan` seconds.
     public func angularSpeed(minSpan: Double = 0.06) -> Float? {
-        guard samples.count >= 2, let first = samples.first, let last = samples.last,
-              last.t - first.t >= minSpan else { return nil }
-        let n = Double(samples.count)
-        let tMean = samples.reduce(0) { $0 + $1.t } / n
-        var stt = 0.0
-        var sty = 0.0, stp = 0.0, str = 0.0
-        for s in samples {
-            let dt = s.t - tMean
-            stt += dt * dt
-            sty += dt * Double(s.pose.yaw); stp += dt * Double(s.pose.pitch); str += dt * Double(s.pose.roll)
-        }
+        let start = windowStart
+        guard samples.count - start >= 2, let last = samples.last, last.t - samples[start].t >= minSpan else { return nil }
+        let t = samples.map(\.t)
+        let recent = t[start...]
+        let tMean = recent.reduce(0, +) / Double(recent.count)
+        let stt = recent.reduce(0) { $0 + ($1 - tMean) * ($1 - tMean) }
         guard stt > 0 else { return nil }
-        let (vy, vp, vr) = (sty / stt, stp / stt, str / stt)
-        return Float((vy * vy + vp * vp + vr * vr).squareRoot())
+        var squared = 0.0
+        for axis in [samples.map { Double($0.pose.yaw) }, samples.map { Double($0.pose.pitch) },
+                     samples.map { Double($0.pose.roll) }] {
+            let values = Self.withoutJumps(axis, t: t, minJumpRate: minJumpRate, neighborRatio: jumpNeighborRatio,
+                                           isolation: jumpIsolationSeconds)
+            var sty = 0.0
+            for i in start ..< t.count { sty += (t[i] - tMean) * values[i] }
+            squared += (sty / stt) * (sty / stt)
+        }
+        return Float(squared.squareRoot())
+    }
+
+    /// One angle over time with Vision's jumps removed. A jump is a change faster than `minJumpRate`:
+    ///   * a single-frame outlier is reached and left by jumps in opposite directions: it takes the value of the
+    ///     nearer neighbor (the median of the three), which leaves at most a step when it sat on one;
+    ///   * an isolated step has changes at most `neighborRatio` times as fast before and after it: it is replaced by
+    ///     the slower of those changes, so a turn through a step still counts. With `isolation` > 0 a step at least
+    ///     1.5 times as fast as `minJumpRate` (3 degrees in a frame at 30 fps) is kept when the nearest jump back of at
+    ///     least half its size (after the outliers are gone) lies more than `flicker` and at most `isolation` seconds
+    ///     before or after it: steps that reverse at the pace of a head shake are a shake that Vision reads as a square
+    ///     wave (~5 degrees for a +-6 degree shake), while a quicker jump back is Vision flickering between two
+    ///     readings. Smaller steps are always jumps: on a still head Vision's readings also wander back and forth by
+    ///     2-3 degrees within a few frames (down at 1280x800).
+    /// An outlier of two frames is two steps. The newest change has no successor yet and is kept, so a fresh jump
+    /// counts as motion for a frame rather than hiding the start of a real turn.
+    static func withoutJumps(_ x: [Double], t: [Double], minJumpRate: Double, neighborRatio: Double,
+                             isolation: Double = 0, flicker: Double = 0.11) -> [Double] {
+        let n = x.count
+        guard n >= 3, t.count == n else { return x }
+        func fast(_ change: Double, _ i: Int) -> Bool { abs(change) >= minJumpRate * (t[i] - t[i - 1]) }
+        var y = x
+        for i in 1 ..< n - 1 {
+            let a = y[i - 1], b = x[i], c = x[i + 1]
+            if fast(b - a, i) && fast(c - b, i + 1) && (b - a) * (c - b) < 0 {
+                y[i] = max(min(a, b), min(max(a, b), c))
+            }
+        }
+        var rates = [Double](repeating: 0, count: n)   // rates[i]: from sample i - 1 to i
+        for i in 1 ..< n {
+            let dt = t[i] - t[i - 1]
+            rates[i] = dt > 0 ? (y[i] - y[i - 1]) / dt : 0
+        }
+        let jumps = (1 ..< n).filter { abs(rates[$0]) >= minJumpRate }
+        func alone(_ i: Int) -> Bool {
+            guard isolation > 0, abs(rates[i]) >= 1.5 * minJumpRate else { return true }
+            let step = y[i] - y[i - 1]
+            let reversal = jumps.lazy.filter { j in
+                let back = y[j] - y[j - 1]
+                return back * step < 0 && abs(back) >= 0.5 * abs(step)
+            }.map { abs(t[$0] - t[i]) }.min()
+            guard let reversal else { return true }
+            return reversal <= flicker || reversal > isolation
+        }
+        var out = y
+        for i in 1 ..< n {
+            var change = y[i] - y[i - 1]
+            if i < n - 1, abs(rates[i]) >= minJumpRate {
+                let limit = neighborRatio * abs(rates[i])
+                if abs(rates[i + 1]) <= limit && (i == 1 || abs(rates[i - 1]) <= limit) && alone(i) {
+                    let neighbor = i == 1 || abs(rates[i + 1]) < abs(rates[i - 1]) ? rates[i + 1] : rates[i - 1]
+                    change = neighbor * (t[i] - t[i - 1])
+                }
+            }
+            out[i] = out[i - 1] + change
+        }
+        return out
     }
 }
 

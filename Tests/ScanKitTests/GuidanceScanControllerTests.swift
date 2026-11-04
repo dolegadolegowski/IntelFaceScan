@@ -122,6 +122,77 @@ import Testing
         #expect(updates.allSatisfy { !$0.acceptedKeyframe })
     }
 
+    @Test func jitteryVisionOnAStillHeadDoesNotBlockThePoses() async {
+        // Vision jumps by 4 degrees every 15-45 frames per angle and has single-frame outliers while the head is held:
+        // the scan must take about as long as with exact readings. The plain least-squares gate read every jump as
+        // 20-25 deg/s and restarted the hold (seeds 1-3: 363-495 frames instead of 265, 58-93 x headMoving instead
+        // of 28).
+        func run(_ jitter: VisionJitter?) async -> (ScanPhase?, keyframes: Int, frames: Int, moving: Int) {
+            var configuration = ScanConfiguration.testOffline
+            configuration.angleTolerance = 12   // the jumps must not push the pose out of tolerance instead
+            let (controller, tracker) = makeController(configuration)
+            var sim = ScanSimulation()
+            sim.user.jitter = jitter
+            await sim.run(controller, tracker: tracker, maxFrames: 900)
+            return (sim.updates.last?.phase, controller.finish().keyframes.count, sim.updates.count,
+                    sim.rejections.filter { $0 == .headMoving }.count)
+        }
+        let exact = await run(nil)
+        #expect(exact.0 == .finished && exact.keyframes == 15)
+        for seed: UInt64 in 1 ... 3 {
+            let jittery = await run(VisionJitter(seed: seed))
+            #expect(jittery.0 == .finished && jittery.keyframes == 15, "seed \(seed)")
+            #expect(Double(jittery.frames) < 1.2 * Double(exact.frames),
+                    "seed \(seed): \(jittery.frames) frames, exact readings \(exact.frames)")
+            // headMoving while arriving at each pose (turning at 60 deg/s) is expected; jitter adds little to it.
+            #expect(Double(jittery.moving) < 1.5 * Double(exact.moving) + 5,
+                    "seed \(seed): \(jittery.moving) x headMoving, exact readings \(exact.moving)")
+        }
+    }
+
+    @Test func rejectsHeadMotionThroughJitter() async {
+        // The 2.5 Hz shake of rejectsHeadMotion with Vision's jumps on top: still no keyframe.
+        let (controller, tracker) = makeController()
+        let factory = GuidanceFrameFactory()
+        var jitter = VisionJitter(seed: 7)
+        var updates: [ScanUpdate] = []
+        for i in 0 ..< 150 {
+            let t = Double(i) / 30
+            let e = jitter.next()
+            let yaw: Float = i < 20 ? 0 : 6 * Float(sin(2 * Double.pi * 2.5 * t))
+            let obs = HeadObservation(pose: HeadPose(yaw: yaw + (i < 20 ? 0 : e.x), pitch: i < 20 ? 0 : e.y, roll: 0,
+                                                     confidence: 0.9),
+                                      faceRect: factory.faceRect, landmarks: [], personMask: nil)
+            tracker.setScript { _ in obs }
+            updates.append(await controller.process(factory.frame(sequence: UInt64(i), timestampMs: 5000 + t * 1000)))
+        }
+        #expect(controller.keyframeCount == 0)
+        #expect(updates.contains { $0.rejection == .headMoving })
+    }
+
+    @Test func rejectsAShakeThatVisionReadsAsSteps() async {
+        // The 2.5 Hz +-6 degree shake as Vision reads it on the synthetic head: a square wave between about -6.5 and -1
+        // degrees of yaw, switching every 6 frames, from before the front pose starts (frame 15). Every single step
+        // looks like one of Vision's jumps on a still head; removing them all accepted the front keyframes during the
+        // shake. (The first step is a jump until the second one arrives.)
+        let (controller, tracker) = makeController()
+        let factory = GuidanceFrameFactory()
+        var noise = VisionJitter(seed: 11)
+        noise.stepDeg = 0; noise.spikeProbability = 0; noise.noiseDeg = 0.3
+        var updates: [ScanUpdate] = []
+        for i in 0 ..< 150 {
+            let t = Double(i) / 30
+            let e = noise.next()
+            let yaw: Float = i < 12 ? 0 : (((i - 12) / 6) % 2 == 0 ? -6.5 : -1) + e.x
+            let obs = HeadObservation(pose: HeadPose(yaw: yaw, pitch: i < 12 ? 0 : -2 + e.y, roll: 0, confidence: 0.9),
+                                      faceRect: factory.faceRect, landmarks: [], personMask: nil)
+            tracker.setScript { _ in obs }
+            updates.append(await controller.process(factory.frame(sequence: UInt64(i), timestampMs: 5000 + t * 1000)))
+        }
+        #expect(controller.keyframeCount == 0)
+        #expect(updates.filter { $0.rejection == .headMoving }.count > 40)
+    }
+
     @Test func rejectsCameraMotion() async {
         let (controller, tracker) = makeController()
         var sim = ScanSimulation()
@@ -223,6 +294,26 @@ import Testing
         let mask = try #require(capture.keyframes.first?.mask)
         #expect(HeadMaskBuilder.count(mask) > 500)
         #expect(tracker.segmentationCalls >= 3)
+    }
+
+    @Test func keepShouldersWithoutSegmentationKeepsTheShoulders() async throws {
+        // No person mask (the scripted tracker has no segmentation): the keyframe masks still contain the shoulders.
+        var configuration = ScanConfiguration.testOffline
+        configuration.keepShoulders = true
+        let (controller, tracker) = makeController(configuration)
+        var sim = ScanSimulation()
+        sim.factory.height = 160
+        await sim.run(controller, tracker: tracker, maxFrames: 300, options: { _ in .init(body: true) },
+                      until: { $0.keyframeCount >= 1 })
+        let mask = try #require(controller.finish().keyframes.first?.mask)
+        var shoulders = 0
+        for y in 0 ..< sim.factory.height {
+            for x in 0 ..< sim.factory.width where sim.factory.inShoulders(x, y) && mask[y * sim.factory.width + x] != 0 {
+                shoulders += 1
+            }
+        }
+        #expect(shoulders > 3000)
+        #expect(tracker.segmentationCalls >= 1)
     }
 
     @Test func offlineTimingUsesFrameTimestamps() async {
@@ -420,6 +511,47 @@ import Testing
         #expect(relative.0 == .finished && relative.1 == 15)
         let absolute = await run(relative: false)
         #expect(absolute.0 == .capturing(.left), "the absolute target is out of reach")
+    }
+
+    @Test func toleranceIsWiderAcrossThePoseDirection() {
+        func within(_ pose: ScanPose, _ yaw: Float, _ pitch: Float) -> Bool {
+            let delta = ScanController.poseDelta(pose: pose, current: SIMD2(yaw, pitch), frontOffset: .zero, overshootDeg: 15)
+            return ScanController.withinTolerance(delta, pose: pose, along: 8, across: 12)
+        }
+        // Left: 8 degrees short of the target along yaw, 12 degrees of pitch across it, the ellipse in between.
+        #expect(within(.left, 37.5, 0) && !within(.left, 36.5, 0))
+        #expect(within(.left, 45, 11.5) && !within(.left, 45, 12.5) && within(.left, 55, -11.5))
+        #expect(within(.left, 39, 7) && !within(.left, 38, 8))
+        // Down: yaw is across.
+        #expect(within(.down, 11, -25) && !within(.down, 13, -25) && !within(.down, 0, -16))
+        // The front pose has no direction: a circle of 8 degrees.
+        #expect(within(.front, 0, 7.5) && !within(.front, 0, 8.5) && !within(.front, 8.5, 0))
+        // Equal semi-axes: the old circle.
+        let delta = ScanController.poseDelta(pose: .left, current: SIMD2(45, 9), frontOffset: .zero, overshootDeg: 15)
+        #expect(!ScanController.withinTolerance(delta, pose: .left, along: 8, across: 8))
+        // The reported error is on the along scale (the UI compares it with angleTolerance): 9 degrees of pitch on
+        // left count 6, 30 degrees short of the target count 30.
+        #expect(abs(ScanController.toleranceError(delta, pose: .left, along: 8, across: 12) - 6) < 1e-4)
+        let short = ScanController.poseDelta(pose: .left, current: SIMD2(15, 0), frontOffset: .zero, overshootDeg: 15)
+        #expect(abs(ScanController.toleranceError(short, pose: .left, along: 8, across: 12) - 30) < 1e-4)
+    }
+
+    @Test func pitchReadOnTheSidePosesDoesNotBlockThem() async {
+        // Vision reads 45 degrees of yaw as 9 degrees of pitch too (the synthetic head reads +6..+11 at 640x400): the
+        // side poses must still complete. An 8-degree circle around the target never accepted them.
+        func run(across: Float) async -> (ScanPhase?, Int) {
+            var configuration = ScanConfiguration.testOffline
+            configuration.perpendicularToleranceDeg = across
+            let (controller, tracker) = makeController(configuration)
+            var sim = ScanSimulation()
+            sim.user.visionPitchPerYaw = 0.2
+            await sim.run(controller, tracker: tracker, maxFrames: 900)
+            return (sim.updates.last?.phase, controller.finish().keyframes.count)
+        }
+        let relaxed = await run(across: 12)
+        #expect(relaxed.0 == .finished && relaxed.1 == 15)
+        let circle = await run(across: 8)
+        #expect(circle.0 == .capturing(.left))
     }
 
     @Test func overestimatedTurnsAreAccepted() async {

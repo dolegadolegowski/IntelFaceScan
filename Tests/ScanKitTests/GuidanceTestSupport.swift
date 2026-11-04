@@ -28,6 +28,9 @@ struct GuidanceFrameFactory {
         var gyroRadPerSec: Float = 0
         /// Head pixels without depth (holes), as a fraction of the head ellipse; the face center keeps depth.
         var headDepthHoles: Bool = false
+        /// Neck and shoulders below the head (see inNeck/inShoulders; needs a frame ~160 pixels tall): the neck recedes
+        /// from the head's distance by 2 mm per row below the chin, the shoulders are 5 cm behind the face.
+        var body: Bool = false
     }
 
     func frame(sequence: UInt64, timestampMs: Double, _ options: Options = Options()) -> CameraFrame {
@@ -46,6 +49,18 @@ struct GuidanceFrameFactory {
         let ax = 0.75 * Double(faceRect.width), ay = 0.95 * Double(faceRect.height)
         let dx = (Double(x) + 0.5 - cx) / ax, dy = (Double(y) + 0.5 - cy) / ay
         return dx * dx + dy * dy <= 1
+    }
+
+    /// The neck: 0.6 face widths wide, from the chin down to the shoulders.
+    func inNeck(_ x: Int, _ y: Int) -> Bool {
+        abs(Double(x) + 0.5 - Double(faceRect.midX)) < 0.3 * Double(faceRect.width) && Double(y) >= Double(faceRect.maxY) - 6
+            && y < shoulderTop
+    }
+
+    /// Shoulders: 3 face widths wide, from 22 rows below the chin, 42 rows tall.
+    var shoulderTop: Int { Int(faceRect.maxY) + 22 }
+    func inShoulders(_ x: Int, _ y: Int) -> Bool {
+        abs(Double(x) + 0.5 - Double(faceRect.midX)) < 1.5 * Double(faceRect.width) && y >= shoulderTop && y < shoulderTop + 42
     }
 
     func colorPixels(_ texture: Texture) -> Data {
@@ -94,6 +109,11 @@ struct GuidanceFrameFactory {
                     let nearCenter = abs(Float(x) - center.x) < Float(faceRect.width) * 0.2
                         && abs(Float(y) - center.y) < Float(faceRect.height) * 0.25
                     values[i] = options.headDepthHoles && !nearCenter && (x + y) % 3 != 0 ? 0 : head
+                } else if options.body && inNeck(x, y) {
+                    let below = max(0, Float(y) - Float(faceRect.maxY))
+                    values[i] = UInt16((options.distance + 0.002 * below) / depthScale)
+                } else if options.body && inShoulders(x, y) {
+                    values[i] = UInt16((options.distance + 0.05) / depthScale)
                 } else {
                     values[i] = background
                 }
@@ -147,6 +167,10 @@ struct SimulatedUser {
     /// Vision error model: observed = true * scale + bias.
     var visionYawScale: Float = 1
     var visionYawBias: Float = 0
+    /// Vision reads yaw partly as pitch: observed pitch += this * yaw.
+    var visionPitchPerYaw: Float = 0
+    /// Per-frame reading errors (nil: exact readings).
+    var jitter: VisionJitter?
 
     mutating func step(toward phase: ScanPhase, dt: Float) {
         guard case .capturing(let pose) = phase else { return }
@@ -161,10 +185,66 @@ struct SimulatedUser {
         }
     }
 
-    func observation(faceRect: CGRect, confidence: Float = 0.95) -> HeadObservation {
-        HeadObservation(pose: HeadPose(yaw: yaw * visionYawScale + visionYawBias, pitch: pitch, roll: roll, confidence: confidence),
-                        faceRect: faceRect, landmarks: [SIMD2(Float(faceRect.midX), Float(faceRect.midY))],
-                        personMask: nil)
+    mutating func observation(faceRect: CGRect, confidence: Float = 0.95) -> HeadObservation {
+        let e = jitter?.next() ?? .zero
+        return HeadObservation(pose: HeadPose(yaw: yaw * visionYawScale + visionYawBias + e.x,
+                                              pitch: pitch + visionPitchPerYaw * yaw + e.y,
+                                              roll: roll + e.z, confidence: confidence),
+                               faceRect: faceRect, landmarks: [SIMD2(Float(faceRect.midX), Float(faceRect.midY))],
+                               personMask: nil)
+    }
+}
+
+/// Vision-like reading errors of a held head, deterministic per seed: Gaussian jitter, steps that switch the reading
+/// by several degrees and keep it there for a while (as Vision does on the held synthetic head: 3-6 degrees in
+/// pitch on "down"), and single-frame outliers.
+struct VisionJitter {
+    var noiseDeg: Float = 0.5
+    var stepDeg: Float = 4
+    /// Frames between two steps of one axis. Vision's jumps on the held synthetic head come in bursts between quiet
+    /// spells of 1-2 s (GuidanceSyntheticVisionStudy); steps every 6-14 frames would be a 1-2.5 Hz square wave, which
+    /// is what Vision reads for a real shake of the head (a 2.5 Hz +-6 degree yaw shake: steps of ~5.5 degrees every
+    /// 6 frames), and PoseHistory must count that as motion.
+    var stepInterval: ClosedRange<Int> = 15 ... 45
+    var spikeProbability: Float = 0.02
+    var spikeDeg: Float = 5
+    private var state: UInt64
+    private var offsets = SIMD3<Float>(repeating: 0)
+    private var countdown = SIMD3<Int32>(3, 6, 9)
+
+    init(seed: UInt64) { state = seed &+ 0x9E37_79B9_7F4A_7C15 }
+
+    private mutating func random() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+
+    private mutating func uniform() -> Float { Float(random() >> 40) / Float(1 << 24) }
+
+    private mutating func gaussian() -> Float {
+        let u = max(1e-7, uniform()), v = uniform()
+        return (-2 * log(u)).squareRoot() * cos(2 * .pi * v)
+    }
+
+    /// The next frame's error (yaw, pitch, roll) in degrees; roll steps are smaller.
+    mutating func next() -> SIMD3<Float> {
+        var error = SIMD3<Float>(repeating: 0)
+        for axis in 0 ..< 3 {
+            countdown[axis] -= 1
+            if countdown[axis] <= 0 {
+                // Switch between the true reading and one off by stepDeg (either side), like Vision's two modes.
+                offsets[axis] = offsets[axis] != 0 ? 0 : (uniform() < 0.5 ? -stepDeg : stepDeg) * (axis == 2 ? 0.4 : 1)
+                let span = UInt64(stepInterval.upperBound - stepInterval.lowerBound + 1)
+                countdown[axis] = Int32(stepInterval.lowerBound + Int(random() % span))
+            }
+            var e = offsets[axis] + noiseDeg * gaussian()
+            if uniform() < spikeProbability { e += (uniform() < 0.5 ? -spikeDeg : spikeDeg) }
+            error[axis] = e
+        }
+        return error
     }
 }
 
