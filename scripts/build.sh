@@ -106,6 +106,7 @@ if [ "${PACKAGE:-0}" = "1" ]; then
 fi
 
 echo
-echo "Built in $SECONDS s ($(IFS=,; echo "${TIMES[*]}" | sed 's/,/, /g'))"
+SUMMARY="$(printf '%s, ' "${TIMES[@]}")"
+echo "Built in $SECONDS s (${SUMMARY%, })"
 echo "Run:   open \"$ROOT/build/IntelFaceScan.app\""
 echo "Tests: scripts/test.sh"

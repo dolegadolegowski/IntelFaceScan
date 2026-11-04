@@ -123,8 +123,10 @@ jobs:
         run: |
           set -euo pipefail
           app="$PWD/build/IntelFaceScan.app"
+          mkdir -p build/ci/bundle
           codesign --verify --strict --deep "$app"
-          otool -L "$app/Contents/Helpers/IntelFaceScanHelper" | grep -q '@rpath/librealsense2'
+          otool -L "$app/Contents/Helpers/IntelFaceScanHelper" > build/ci/helper-libs.txt
+          grep -q '@rpath/librealsense2' build/ci/helper-libs.txt
           "$app/Contents/Helpers/IntelFaceScanHelper" --version
           # Shipped binaries must not contain absolute build paths (they carry the builder's user name): __FILE__ in
           # C/C++ code, the linker's debug map. -a: macOS grep skips binary files otherwise.
@@ -132,7 +134,6 @@ jobs:
             echo "::error::absolute build paths in the app bundle (files above)"
             exit 1
           fi
-          mkdir -p build/ci/bundle
           build/helper/tests/make-test-recording -o build/ci/bundle/rec.db3 --frames 10 --fast
           # From a folder without build/helper: ifscan must find the helper inside the bundle.
           cd build/ci/bundle
