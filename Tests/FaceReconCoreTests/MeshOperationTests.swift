@@ -91,6 +91,38 @@ struct MeshOperationTests {
         #expect(abs(meanRadius - radius) < 0.002 * radius)
     }
 
+    /// Marching cubes leaves sliver triangles that the bilateral vertex update turned over by the thousands on a real
+    /// head scan (49 folded triangles after meshing, 5700 after two bilateral iterations, 1250 after the default
+    /// smoothing; on this fused sphere: 9 -> 234). Smoothing must never fold the surface, and still reduce the noise.
+    @Test func smoothingNeverFoldsMarchingCubesTriangles() throws {
+        let poses = lookAtPoses(target: ReconFusionTests.center, distance: 0.45, directions: cubeDirections)
+        let views = poses.enumerated().map { i, pose in
+            render(SphereScene(center: ReconFusionTests.center, radius: ReconFusionTests.radius), camera: ReconFusionTests.camera,
+                   worldFromCamera: pose, noiseAt1m: 0.008, seed: UInt64(70 + i))
+        }
+        let (fused, _) = try ReconFusionTests.fuse(views, params: ReconFusionTests.tsdfParams(voxel: 0.0009, gpu: true))
+        var mesh = ReconMesh(core: fused.pointer)
+        mesh.colors = []
+        try mesh.withCoreMesh { try check(fr_mesh_clean($0, 1e-7)) }
+        let center = SIMD3<Float>(0, 0, 0.5), radius = Float(ReconFusionTests.radius)
+        let noise = MeshMeasure.rms(mesh.positions.map { simd_distance($0, center) - radius })
+        let before = MeshMeasure.foldedTriangles(mesh)
+        for bilateral: Int32 in [2, 4] {
+            var params = fr_smooth_params()
+            fr_smooth_params_default(&params)
+            params.bilateral_sigma_spatial_m = 0
+            params.bilateral_iterations = bilateral
+            var smoothed = mesh
+            try smoothed.withCoreMesh { try check(fr_mesh_smooth($0, &params)) }
+            let folded = MeshMeasure.foldedTriangles(smoothed)
+            let error = MeshMeasure.rms(smoothed.positions.map { simd_distance($0, center) - radius })
+            print("smoothing a fused sphere (\(mesh.triangleCount) triangles, \(bilateral) bilateral iterations): folded "
+                + "triangles \(before) -> \(folded), rms radial error \(noise * 1000) -> \(error * 1000) mm")
+            #expect(folded <= before)
+            #expect(error < 0.85 * noise)  // the fused surface is already averaged over 26 views
+        }
+    }
+
     /// Distance of cube vertices to the true surface, split into face interiors and crease (edge) vertices.
     private func cubeErrors(_ mesh: ReconMesh, original: [SIMD3<Float>], half: Float, h: Float) -> (face: Float, crease: Float) {
         var face: [Float] = [], crease: [Float] = []

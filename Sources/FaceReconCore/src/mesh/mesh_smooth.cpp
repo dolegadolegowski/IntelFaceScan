@@ -43,6 +43,108 @@ void compute_faces( const float * p, const uint32_t * idx, uint32_t t, face_data
 
 inline bool contains( const uint32_t * tri, uint32_t v ) { return tri[0] == v || tri[1] == v || tri[2] == v; }
 
+// Smoothing must not fold the surface. The bilateral vertex update in particular turns sliver triangles of a
+// marching-cubes mesh over (on a synthetic head scan: 49 folded triangles before smoothing, 5700 after two bilateral
+// iterations, 1250 after the default smoothing). A triangle is folded when its normal points against the surrounding
+// surface (the area-weighted vertex normals of its corners). After every step, the vertices that make a triangle fold
+// which was not folded before the step go back to where the step started: first its corners, and if the corners
+// already are back, the vertices around them (whose triangles define the surrounding normal). Repeated until the step
+// folds nothing; smoothing may still unfold triangles that were folded before.
+class fold_guard
+{
+public:
+    fold_guard( uint32_t vertex_count, const uint32_t * idx, uint32_t triangle_count, const csr & vf )
+        : n_( vertex_count )
+        , t_( triangle_count )
+        , idx_( idx )
+        , vf_( vf )
+        , face_normal_( triangle_count )
+        , vertex_normal_( vertex_count )
+        , folded_before_( triangle_count )
+        , folded_after_( triangle_count )
+    {
+    }
+
+    // before: the positions the step started from; after: the step's result, corrected in place.
+    void apply( const float * before, float * after )
+    {
+        folds( before, folded_before_ );
+        auto moved = [&]( size_t v ) { return ! std::equal( before + v * 3, before + v * 3 + 3, after + v * 3 ); };
+        auto restore = [&]( size_t v ) { std::copy_n( before + v * 3, 3, after + v * 3 ); };
+        for( int round = 0; round < 64; ++round )
+        {
+            folds( after, folded_after_ );
+            bool reverted = false;
+            for( uint32_t f = 0; f < t_; ++f )
+            {
+                if( ! folded_after_[f] || folded_before_[f] )
+                    continue;
+                const uint32_t * tri = idx_ + size_t( f ) * 3;
+                bool corner_moved = false;
+                for( int k = 0; k < 3; ++k )
+                    if( moved( tri[k] ) )
+                    {
+                        restore( tri[k] );
+                        corner_moved = true;
+                    }
+                if( ! corner_moved )
+                    for( int k = 0; k < 3; ++k )
+                        for( uint32_t i = vf_.begin( tri[k] ); i < vf_.end( tri[k] ); ++i )
+                        {
+                            const uint32_t * other = idx_ + size_t( vf_.data[i] ) * 3;
+                            for( int j = 0; j < 3; ++j )
+                                if( moved( other[j] ) )
+                                {
+                                    restore( other[j] );
+                                    corner_moved = true;
+                                }
+                        }
+                reverted |= corner_moved;
+            }
+            if( ! reverted )
+                return;
+        }
+        std::copy_n( before, size_t( n_ ) * 3, after );  // did not settle: the whole step is dropped
+    }
+
+private:
+    void folds( const float * p, std::vector< uint8_t > & out )
+    {
+        parallel_for( t_, 8192, [&]( size_t begin, size_t end ) {
+            for( size_t f = begin; f < end; ++f )
+            {
+                const uint32_t * tri = idx_ + f * 3;
+                const vec3 a = vec3::load( p + size_t( tri[0] ) * 3 ), b = vec3::load( p + size_t( tri[1] ) * 3 ),
+                           c = vec3::load( p + size_t( tri[2] ) * 3 );
+                face_normal_[f] = cross( b - a, c - a );
+            }
+        } );
+        parallel_for( n_, 8192, [&]( size_t begin, size_t end ) {
+            for( size_t v = begin; v < end; ++v )
+            {
+                vec3 sum;
+                for( uint32_t i = vf_.begin( uint32_t( v ) ); i < vf_.end( uint32_t( v ) ); ++i )
+                    sum += face_normal_[vf_.data[i]];
+                vertex_normal_[v] = sum;
+            }
+        } );
+        parallel_for( t_, 8192, [&]( size_t begin, size_t end ) {
+            for( size_t f = begin; f < end; ++f )
+            {
+                const uint32_t * tri = idx_ + f * 3;
+                const vec3 & fn = face_normal_[f];
+                out[f] = length2( fn ) > 0 && dot( fn, vertex_normal_[tri[0]] + vertex_normal_[tri[1]] + vertex_normal_[tri[2]] ) <= 0;
+            }
+        } );
+    }
+
+    const uint32_t n_, t_;
+    const uint32_t * idx_;
+    const csr & vf_;
+    std::vector< vec3 > face_normal_, vertex_normal_;
+    std::vector< uint8_t > folded_before_, folded_after_;
+};
+
 // Calls fn(g) once for every face sharing at least one vertex with face f (including f itself).
 template< typename F >
 inline void for_each_ring_face( const csr & vf, const uint32_t * idx, uint32_t f, F && fn )
@@ -62,7 +164,8 @@ inline void for_each_ring_face( const csr & vf, const uint32_t * idx, uint32_t f
         }
 }
 
-void bilateral_filter( fr_mesh * mesh, const uint32_t * idx, const csr & vf, int iterations, float sigma_s, float sigma_r )
+void bilateral_filter( fr_mesh * mesh, const uint32_t * idx, const csr & vf, int iterations, float sigma_s, float sigma_r,
+                       fold_guard & guard )
 {
     const uint32_t n = mesh->vertex_count, t = mesh->triangle_count;
     face_data fd;
@@ -112,13 +215,14 @@ void bilateral_filter( fr_mesh * mesh, const uint32_t * idx, const csr & vf, int
                     ( finite( y ) ? y : x ).store( &next[v * 3] );
                 }
             } );
+            guard.apply( mesh->positions, next.data() );
             std::copy( next.begin(), next.end(), mesh->positions );
         }
     }
 }
 
 void taubin_smooth( fr_mesh * mesh, const uint32_t * idx, int iterations, float lambda, float mu, bool feature_weights,
-                    float sigma_r )
+                    float sigma_r, fold_guard & guard )
 {
     const uint32_t n = mesh->vertex_count, t = mesh->triangle_count;
     const csr nb = vertex_neighbors( n, idx, t );
@@ -189,6 +293,7 @@ void taubin_smooth( fr_mesh * mesh, const uint32_t * idx, int iterations, float 
                 ( finite( y ) ? y : x ).store( &next[v * 3] );
             }
         } );
+        guard.apply( mesh->positions, next.data() );
         std::copy( next.begin(), next.end(), mesh->positions );
     };
     for( int it = 0; it < iterations; ++it )
@@ -248,20 +353,19 @@ fr_status fr_mesh_smooth( fr_mesh * mesh, const fr_smooth_params * params )
 
         // Sigmas <= 0 select automatic values: the spatial one from the mesh resolution.
         const float sigma_r = p.bilateral_sigma_normal > 0 ? p.bilateral_sigma_normal : 0.3f;
+        const csr vf = vertex_faces( mesh->vertex_count, idx, mesh->triangle_count );
+        fold_guard guard( mesh->vertex_count, idx, mesh->triangle_count, vf );
         if( p.bilateral_iterations > 0 )
         {
             float sigma_s = p.bilateral_sigma_spatial_m;
             if( sigma_s <= 0 )
                 sigma_s = float( 1.5 * mean_edge_length( mesh->positions, idx, mesh->triangle_count ) );
             if( sigma_s > 0 )
-            {
-                const csr vf = vertex_faces( mesh->vertex_count, idx, mesh->triangle_count );
-                bilateral_filter( mesh, idx, vf, p.bilateral_iterations, sigma_s, sigma_r );
-            }
+                bilateral_filter( mesh, idx, vf, p.bilateral_iterations, sigma_s, sigma_r, guard );
         }
         if( p.taubin_iterations > 0 )
             taubin_smooth( mesh, idx, p.taubin_iterations, p.taubin_lambda, p.taubin_mu, p.bilateral_iterations > 0,
-                           sigma_r );
+                           sigma_r, guard );
         for( uint32_t v = 0; v < uint32_t( rep.size() ); ++v )
             if( rep[v] != v )
                 std::memcpy( mesh->positions + size_t( v ) * 3, mesh->positions + size_t( rep[v] ) * 3, sizeof( float ) * 3 );
