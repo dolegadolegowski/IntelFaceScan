@@ -170,6 +170,15 @@ helper enables it on the first `configure`: the camera restarts (3–8 s) and ke
   path not ending in `.db3`: `.bag` recording failed. **`patches/0002-record-bag-files-with-rosbag2-enabled.patch`**
   picks the writer by extension too, so both formats record and play. Without the patch the engine reports
   "`.bag` recording needs patches/0002". `.db3` is the default.
+* **Playback lost the depth sensor's options** (librealsense 2.58.4, ROS2 `.db3` reader): it read a sensor's
+  options in `rs2_option` order and stopped at the first one recorded out of that order (a real D455 records
+  *Auto Exposure Mode* last); the next pass replaced the options read so far, so the depth sensor of a D455
+  recording had none, *Depth Units* and *Stereo Baseline* included. Its fallback then reported 1 mm depth units
+  and a baseline of 0.095 "mm" (a value in meters): the app's distance range came out as 0.22–0.27 m, and a
+  recording played back never left positioning. **`patches/0003-playback-keep-recorded-depth-options-and-baseline-in-mm.patch`**
+  reads the options in any order, adds to those read before, and reports the fallback baseline in millimeters
+  (ROS1 `.bag` too). The helper also converts a baseline below 1 (meters) to millimeters, and ScanKit ignores a
+  baseline outside 10–300 mm. `ifscan info` prints the baseline.
 * `start_recording(path, format)` requires the matching extension, restarts the streams with an `rs2::recorder`
   around the device (it records the raw sensor frames: depth, IR, RGB, IMU, metadata, options);
   `stop_recording()` restarts without it after the recorder's destruction has flushed and closed the file (one

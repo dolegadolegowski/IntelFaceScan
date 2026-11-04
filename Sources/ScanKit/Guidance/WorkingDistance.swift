@@ -63,7 +63,8 @@ public enum WorkingDistance {
         } else {
             focal = focalPx(width: depthWidth, horizontalFOVDegrees: depthHorizontalFOVDegrees(deviceName: device?.name))
         }
-        let baseline = device?.baselineMm.flatMap { $0 > 0 && $0.isFinite ? $0 : nil }
+        // A reported baseline outside 10-300 mm is a unit error (a playback reported 0.095 for a D455's 95 mm).
+        let baseline = device?.baselineMm.flatMap { (10 ... 300).contains($0) ? $0 : nil }
             ?? defaultBaselineMm(deviceName: device?.name)
         let shift = configuration?.disparityShift ?? 0
         let near = minZ(depthFocalPx: focal, baselineMm: baseline, disparityShift: shift)

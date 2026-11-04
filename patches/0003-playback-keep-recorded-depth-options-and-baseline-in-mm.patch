@@ -1,0 +1,116 @@
+diff --git a/src/media/ros/ros_reader.cpp b/src/media/ros/ros_reader.cpp
+index 0ed7a59..6216e56 100644
+--- a/src/media/ros/ros_reader.cpp
++++ b/src/media/ros/ros_reader.cpp
+@@ -7,6 +7,7 @@
+ #include "ds/d500/d500-private.h"
+ #include "std_msgs/Float32MultiArray.h"
+ #include <src/depth-sensor.h>
++#include <cmath>
+ #include <src/core/pose-frame.h>
+ #include <src/core/motion-frame.h>
+ #include <src/core/video-frame.h>
+@@ -1015,11 +1016,12 @@ namespace librealsense
+                 {
+                     if( sensor_extensions.find( RS2_EXTENSION_DEPTH_STEREO_SENSOR ) == nullptr )
+                     {
+-                        float baseline = 0.095f; // Default for D555 (and D455 but D400 have baseline option implemented and won't need this)
++                        // Millimeters, like get_stereo_baseline_mm(); the extrinsics translation is in meters
++                        float baseline = 95.f; // Default for D555 (and D455 but D400 have baseline option implemented and won't need this)
+                         for( auto & ext : m_extrinsics_map ) // Get real value from extrinsics data, if exists
+                         {
+                             if( ext.first.stream_type == RS2_STREAM_INFRARED && ext.first.stream_index == 2 )
+-                                baseline = ext.second.second.translation[0];
++                                baseline = std::fabs( ext.second.second.translation[0] ) * 1000.f;
+                         }
+                         sensor_extensions[RS2_EXTENSION_DEPTH_STEREO_SENSOR] = std::make_shared< depth_stereo_sensor_snapshot >( depth_units, baseline );
+                     }
+diff --git a/src/media/ros2/ros2_reader.cpp b/src/media/ros2/ros2_reader.cpp
+index 4a92775..4d4d5ca 100644
+--- a/src/media/ros2/ros2_reader.cpp
++++ b/src/media/ros2/ros2_reader.cpp
+@@ -7,6 +7,7 @@
+ #include "ds/d400/d400-private.h"
+ #include "ds/d500/d500-private.h"
+ #include <src/depth-sensor.h>
++#include <cmath>
+ #include <src/core/pose-frame.h>
+ #include <src/core/motion-frame.h>
+ #include <src/core/video-frame.h>
+@@ -404,22 +405,35 @@ namespace librealsense
+     {
+         std::shared_ptr<options_container> sensor_options = std::make_shared<options_container>();
+ 
+-        // After info messages, we expect option messages
+-        for (int i = 0; i < static_cast<int>(RS2_OPTION_COUNT); i++)
++        // After info messages, we expect option messages: read every consecutive option of this sensor in the order
++        // it was recorded. Expecting them in rs2_option order stopped at the first option recorded out of that order
++        // (a D455 records Auto Exposure Mode last), and the options after it were lost.
++        auto sensor_prefix = (rsutils::string::from() << "^/device_" << sensor_id.device_index << "/sensor_"
++                                                      << sensor_id.sensor_index << "/option/[^/]+/").str();
++        const std::regex value_regex(sensor_prefix + "value$");
++        const std::regex description_regex(sensor_prefix + "description$");
++        while (has_next_cached())
+         {
+-            rs2_option id = static_cast<rs2_option>(i);
+-            auto value_topic = ros2_topic::option_value_topic(sensor_id, id);
+-            std::string option_name = ros2_topic::get_option_name(value_topic);
+-            auto rs2_option_name = rs2_option_to_string(id); //option name with space seperator
+-
+             auto msg = peek_next_cached();
+-            if (msg && msg->topic_name == value_topic)
++            if (!msg)
++                break;
++            if (std::regex_match(msg->topic_name, description_regex))
++            {
++                read_next_cached(); // the description of an option that could not be read
++                continue;
++            }
++            if (!std::regex_match(msg->topic_name, value_regex))
++                break;
++            msg = read_next_cached();
++            try
+             {
+-                msg = read_next_cached();
+                 auto option = create_option(msg);
+-                assert(id == option.first);
+                 sensor_options->register_option(option.first, option.second);
+             }
++            catch (const std::exception& e)
++            {
++                LOG_WARNING("Skipping recorded option " << msg->topic_name << ": " << e.what());
++            }
+         }
+ 
+         return sensor_options;
+@@ -774,11 +788,12 @@ namespace librealsense
+                 {
+                     if( sensor_extensions.find( RS2_EXTENSION_DEPTH_STEREO_SENSOR ) == nullptr )
+                     {
+-                        float baseline = 0.095f; // Default for D555 (and D455 but D400 have baseline option implemented and won't need this)
++                        // Millimeters, like get_stereo_baseline_mm(); the extrinsics translation is in meters
++                        float baseline = 95.f; // Default for D555 (and D455 but D400 have baseline option implemented and won't need this)
+                         for( auto & ext : m_extrinsics_map ) // Get real value from extrinsics data, if exists
+                         {
+                             if( ext.first.stream_type == RS2_STREAM_INFRARED && ext.first.stream_index == 2 )
+-                                baseline = ext.second.second.translation[0];
++                                baseline = std::fabs( ext.second.second.translation[0] ) * 1000.f;
+                         }
+                         sensor_extensions[RS2_EXTENSION_DEPTH_STEREO_SENSOR] = std::make_shared< depth_stereo_sensor_snapshot >( depth_units, baseline );
+                     }
+@@ -951,7 +966,14 @@ namespace librealsense
+             else if (std::regex_match(msg->topic_name, std::regex(sensor_option_regex_str)))
+             {
+                 uint32_t sensor_index = ros2_topic::get_sensor_index(msg->topic_name);
+-                sensors_options[sensor_index] = read_sensor_options({ get_device_index(), sensor_index });
++                // Add to the options read so far: replacing them left only the options after an interruption.
++                auto options = read_sensor_options({ get_device_index(), sensor_index });
++                auto& known = sensors_options[sensor_index];
++                if (!known)
++                    known = options;
++                else
++                    for (auto id : options->get_supported_options())
++                        known->register_option(id, options->get_option_handler(id));
+             }
+             else if (std::regex_match(msg->topic_name, std::regex(post_processing_blocks_regex_str)))
+             {

@@ -1349,6 +1349,10 @@ json RealSenseEngine::device_info()
             }
         }
     }
+    // librealsense 2.58 playback of a recording without its depth options reported meters (patches/0003 fixes the
+    // reader); no stereo camera has a baseline below 1 mm.
+    if( baseline.is_number() && baseline.get< double >() > 0 && baseline.get< double >() < 1 )
+        baseline = baseline.get< double >() * 1000.0;
     info["baseline_mm"] = baseline;
 
     json presets = json::array();

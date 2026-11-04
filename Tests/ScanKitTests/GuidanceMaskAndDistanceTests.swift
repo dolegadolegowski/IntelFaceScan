@@ -278,6 +278,15 @@ import Testing
         #expect(WorkingDistance.recommendedRange(device: nil, configuration: nil) == range)
     }
 
+    @Test func baselineInTheWrongUnitFallsBackToTheModel() {
+        // librealsense 2.58 played a D455 recording back with a baseline of 0.095 "mm" (meters): the range came out
+        // as 0.22-0.27 m and the offline scan never left positioning at 0.64 m.
+        let range = WorkingDistance.recommendedRange(device: device(), configuration: .faceScanD455)
+        #expect(WorkingDistance.recommendedRange(device: device(baseline: 0.095), configuration: .faceScanD455) == range)
+        #expect(WorkingDistance.recommendedRange(device: device(baseline: 95_000), configuration: .faceScanD455) == range)
+        #expect(WorkingDistance.recommendedRange(device: device(baseline: 94.95), configuration: .faceScanD455) == range)
+    }
+
     @Test func lowerResolutionAndDisparityShiftMoveCloser() {
         var vga = CaptureConfiguration.faceScanD455
         vga.depth = StreamSettings(width: 848, height: 480, fps: 30)
