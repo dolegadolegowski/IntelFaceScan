@@ -115,6 +115,8 @@ final class AppModel {
     private(set) var datasetCapture: ScanCapture?
     private(set) var reconstructionProgress: ReconstructionProgress?
     private(set) var result: ReconstructionResult?
+    /// The reconstruction settings `result` was made with.
+    private(set) var resultOptions: ReconstructionOptions?
     private(set) var isQuitting = false
     var displayMode: ModelDisplayMode = .texture
     var alert: AppAlert?
@@ -187,6 +189,12 @@ final class AppModel {
     /// The depth stream settings cannot change during a scan, nor during a recording: the camera helper refuses to
     /// change the streams (or to enter advanced mode) while it records, so a change would only show in the sidebar.
     var depthSettingsLocked: Bool { screen == .scanning || isRecording }
+    /// The reconstruction settings were changed on the result screen: they apply only when the scan is reconstructed
+    /// again (the result screen offers it; otherwise the changed voxel size or surface did nothing until a new scan).
+    var resultSettingsChanged: Bool {
+        guard screen == .result, result != nil, let resultOptions, capture != nil else { return false }
+        return settings.reconstructionOptions != resultOptions
+    }
 
     var previewDisplay: PreviewDisplay {
         PreviewDisplay(mode: settings.previewMode, mirrored: settings.mirrored,
@@ -535,6 +543,7 @@ final class AppModel {
                 let output = try await Self.runReconstruction(capture, options: options, relay: relay)
                 guard let self, id == self.reconstructionID, !Task.isCancelled else { return }
                 self.result = output
+                self.resultOptions = options
                 self.displayMode = output.texture != nil ? .texture : .vertexColors
                 self.screen = .result
             } catch {
@@ -894,6 +903,7 @@ extension AppModel {
         self.capture = capture
         self.reconstructionProgress = progress
         self.result = result
+        self.resultOptions = result != nil ? settings.reconstructionOptions : nil
         self.stats = stats
         self.recordingStartedAt = recordingStartedAt
         self.datasetCapture = datasetCapture

@@ -114,6 +114,13 @@ struct ResultView: View {
                     }
                     .controlSize(.large)
                     .disabled(model.isWriting)
+                    if model.resultSettingsChanged {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(S.resultSettingsChanged).font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button(S.reconstructAgain, systemImage: "arrow.triangle.2.circlepath") { model.reconstruct() }
+                        }
+                    }
                     // The report grows with the pipeline's notes: it scrolls instead of pushing the panel out of a
                     // window at its minimum height.
                     ScrollView(.vertical) {

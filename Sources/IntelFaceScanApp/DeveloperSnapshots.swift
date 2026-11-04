@@ -66,11 +66,14 @@ enum DeveloperSnapshots {
             ("window-scan-min", .scanning, CGSize(width: 1040, height: 680)),
             ("window-result", .result, CGSize(width: 1280, height: 820)),
             ("window-result-min", .result, CGSize(width: 1040, height: 680)),
+            ("window-result-min-settings-changed", .result, CGSize(width: 1040, height: 680)),
             ("window-summary-min", .scanComplete, CGSize(width: 1040, height: 680)),
             ("window-sidebar-tall", .welcome, CGSize(width: 1040, height: 1640)),
         ]
         for (name, screen, size) in windows {
             let model = fixture.model(screen: screen, sourceKind: .live, recording: screen == .preview, dataset: false)
+            // The voxel size changed after the reconstruction: the result panel offers to reconstruct again.
+            if name.hasSuffix("-settings-changed") { model.settings.voxelSizeMM += 0.25 }
             let view = ContentView().environment(model)
             if !writeHosted(view, size: size, to: directory.appendingPathComponent("\(name).png")) { failures += 1 }
         }

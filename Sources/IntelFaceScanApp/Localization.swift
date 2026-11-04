@@ -187,6 +187,11 @@ enum S {
         return (2 ... 4).contains(last) && !(12 ... 14).contains(lastTwo) ? few : many
     }
     static var reconstruct: String { tr("Reconstruct 3D model", "Rekonstruuj model 3D") }
+    static var reconstructAgain: String { tr("Reconstruct again", "Rekonstruuj ponownie") }
+    static var resultSettingsChanged: String {
+        tr("The reconstruction settings changed after this model was made.",
+           "Ustawienia rekonstrukcji zmieniły się po utworzeniu tego modelu.")
+    }
     static func useDatasetFrames(_ n: Int) -> String {
         tr("Use the saved frames (\(n))", "Użyj zapisanych klatek (\(n))")
     }

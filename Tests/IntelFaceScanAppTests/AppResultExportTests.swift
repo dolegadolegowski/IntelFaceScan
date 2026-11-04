@@ -129,6 +129,34 @@ struct AppResultExportTests {
         #expect(FileManager.default.fileExists(atPath: written.appendingPathComponent("manifest.json").path))
     }
 
+    /// Reconstruction settings changed on the result screen do nothing to the model shown: the screen offers to
+    /// reconstruct the scan again with them (before, they waited for a new scan). Display settings do not count.
+    @MainActor
+    @Test func reconstructionSettingsChangedAfterResult() async throws {
+        let (model, _) = AppTest.makeModel()
+        _ = Self.modelOnResultScreen(model)
+        #expect(!model.resultSettingsChanged)
+        model.settings.mirrored.toggle()
+        model.settings.showLandmarks.toggle()
+        #expect(!model.resultSettingsChanged, "display settings do not change the reconstruction")
+        let voxel = model.settings.voxelSizeMM
+        model.settings.voxelSizeMM = voxel + 0.25
+        #expect(model.resultSettingsChanged)
+        model.settings.voxelSizeMM = voxel
+        #expect(!model.resultSettingsChanged)
+        model.settings.method = model.settings.method == .tsdf ? .poisson : .tsdf
+        #expect(model.resultSettingsChanged)
+
+        // Reconstructing again uses the new settings (the two-frame fixture is too small and fails fast).
+        model.reconstruct()
+        #expect(model.screen == .reconstructing)
+        #expect(!model.resultSettingsChanged)
+        #expect(await AppTest.waitUntil(60) { model.screen != .reconstructing }, "the reconstruction did not end")
+        #expect(model.screen == .scanComplete)
+        #expect(model.alert?.title == S.reconstructionFailed)
+        #expect(!model.resultSettingsChanged)
+    }
+
     /// MeshExport's own refusal (an empty mesh) reads in the UI language like the reconstruction's errors.
     @MainActor
     @Test func exportErrorInPolish() async throws {
