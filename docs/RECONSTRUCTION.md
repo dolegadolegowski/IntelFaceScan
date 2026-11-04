@@ -553,8 +553,10 @@ The mesh module's steps after the chin crop, all in FaceReconCore (`fr_mesh.h`):
 3. **Smoothing**: bilateral normal filtering, then Taubin (`fr_mesh_smooth`).
 4. **Hole filling and closing** (`fr_mesh_fill_holes_ex`, below).
 5. **Decimation** to `targetTriangles` if set (`fr_mesh_decimate`, meshoptimizer). The simplifier does not keep the
-   surface manifold (a closed 556k-triangle head decimated to 60k had 74 edges with three or four triangles); those
-   extra triangles go and the small holes they leave are filled again.
+   surface manifold (a closed 556k-triangle head decimated to 60k had 74 edges with three or four triangles, and two
+   fins: opposed copies of a triangle hanging off a vertex, which a viewer's weld turns into a lone open triangle; at
+   30k one triangle was cut loose). Fins and loose triangles go, then the extra triangles on non-manifold edges, and
+   the small holes that leaves are filled again. Vertices where two sheets touch (a few at 60k–200k) can remain.
 
 `MeshProcessing.clean` returns a summary (holes filled, loops left open, closed or not, trimmed and folded
 triangles, filled area) and sets `ReconMesh.synthesized` for the vertices the filling created.
