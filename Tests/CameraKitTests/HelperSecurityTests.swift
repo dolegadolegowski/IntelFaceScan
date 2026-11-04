@@ -126,13 +126,14 @@ struct HelperSecurityPeerTests {
     }
 
     @Test func manyUnreadRepliesEndTheSessionBeforeTheirBytesDo() throws {
-        // The count bound: 2 KB error replies ("unknown field 'xx...'") reach 4096 queued messages at 8 MiB. About 2000
-        // of them fit into the socket buffer first.
+        // The count bound: 2 KB error replies ("unknown field 'xx...'") reach 4096 queued messages at 8 MiB. About as
+        // many again fit into the socket buffers first, so the session ends after about 8200 commands (measured 8193,
+        // batches of 512); the byte bound alone would end it only after about 12300 (4096 + 16 MiB / 2 KB).
         let client = try RawHelperClient(helper: helper)
         let (sent, _) = flood(client, [String(repeating: "x", count: 2000): 1], upTo: 40_000)
         #expect(client.process.waitForExit(timeout: 10), "the helper kept its session after \(sent) unread replies")
         #expect(client.process.exitStatus == 0)
-        #expect(sent < 20_000, "the session should end after about 4096 queued replies, not \(sent)")
+        #expect(sent < 10_500, "the session should end after about 4096 queued replies, not \(sent)")
     }
 
     @Test func setIDRecordingDestinationIsRefused() throws {
