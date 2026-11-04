@@ -28,6 +28,10 @@ fr_status fr_export_ply( const fr_mesh * mesh, const char * ply_path, const fr_e
         const bool normals = options->write_normals && mesh->normals;
         const bool colors = options->write_colors && mesh->colors;
         const bool uvs = options->write_uvs && mesh->uvs;
+        // As for the OBJ: NaN/inf coordinates are written verbatim in binary and break importers.
+        for( size_t i = 0; i < size_t( mesh->vertex_count ) * 3; ++i )
+            if( ! std::isfinite( mesh->positions[i] ) )
+                return fr::fail( FR_ERR_INVALID_ARGUMENT, "fr_export_ply: non-finite vertex position" );
 
         std::ostringstream h;
         h << "ply\nformat binary_little_endian 1.0\ncomment IntelFaceScan\n";

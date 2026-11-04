@@ -200,6 +200,19 @@ struct ExportFileTests {
         #expect(face.0 == 3 && face.1 == Int32(mesh.indices[0]) && face.2 == Int32(mesh.indices[1]) && face.3 == Int32(mesh.indices[2]))
     }
 
+    /// Both exporters refuse NaN positions (the binary PLY used to write them verbatim) and leave no file behind.
+    @Test func nonFinitePositionsAreRefused() throws {
+        var mesh = MeshFactory.icosphere(level: 1)
+        mesh.positions[3].y = .nan
+        let dir = try TemporaryDirectory()
+        let core = try mesh.makeCoreMesh()
+        defer { fr_mesh_free(core) }
+        var options = Self.exportOptions()
+        #expect(fr_export_ply(core, dir.url.appendingPathComponent("bad.ply").path, &options) == FR_ERR_INVALID_ARGUMENT)
+        #expect(fr_export_obj(core, nil, dir.url.appendingPathComponent("bad.obj").path, &options) == FR_ERR_INVALID_ARGUMENT)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.url.path).isEmpty)
+    }
+
     @Test func importsForeignOBJ() throws {
         let text = """
         # quad with separate uv/normal indices, a pentagon with negative indices and vertex colors
