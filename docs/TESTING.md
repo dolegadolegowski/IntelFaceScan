@@ -77,15 +77,25 @@ of another work stream: `@Test(.enabled(if: CoreAvailability.reconstruction, "..
   640×400 render takes ~11 ms and a 1280×800 render ~33 ms in a debug build.
 * `lighting` (`ifscan synth --lighting`) controls the view-dependent shading. Apple Vision needs shading cues: at
   0.25 `HeadTracker` misses the face in the down and ±45° poses and person segmentation fails; at 0.6 every scan
-  pose is detected with the right yaw sign (yaw estimates 33° and −50° for ±45°) and segmentation works. Colored
-  ICP degrades with shading (worst frame 1.29° at 0.25, 8.4° at 0.6), which is one reason why point-to-plane ICP
-  is the default; it is unaffected (0.12° at both, docs/RECONSTRUCTION.md, "Colored versus point-to-plane ICP").
-  Reconstruction datasets default to 0.25, `SyntheticCameraSource` (UI, guided scan) to 0.6; use `--lighting 0.6`
-  for datasets that exercise `HeadTracker`.
+  pose is detected with the right yaw sign. What Vision reads at 0.6 depends on the resolution (measured with
+  `IFS_VISION_STUDY=1 scripts/test.sh --filter GuidanceSyntheticVisionStudy`): at 640×400 yaw +45° reads ~46° and
+  −45° ~−52°, and person segmentation covers the face in nearly every frame; at 1280×800 +45° reads ~30° (+50° ~39°,
+  +55° ~53°) and −45° ~−50°, pitch −25° reads ~−23° but −30° only ~−12°, and segmentation covers the frontal face in
+  only about half of the frames (the head mask then falls back to the face-rectangle ellipse). Vision also reads
+  large yaw partly as pitch (+44° to +52° of yaw reads +4° to +10° of pitch at 640×400), and its angles jump and
+  drift by several degrees on a held head. Colored ICP degrades with shading (worst frame 1.29° at 0.25, 8.4° at
+  0.6), which is one reason why point-to-plane ICP is the default; it is unaffected (0.12° at both,
+  docs/RECONSTRUCTION.md, "Colored versus point-to-plane ICP"). Reconstruction datasets default to 0.25,
+  `SyntheticCameraSource` (UI, guided scan) to 0.6; use `--lighting 0.6` for datasets that exercise `HeadTracker`.
 
 `SyntheticScene` renders arbitrary poses (`render(cameraFromWorld:frameIndex:)` also returns the noise-free depth);
 `SyntheticCameraSource` is a `CameraSource` ("Synthetic D455") that turns the head through the scan poses at the
-configured frame rate and resolution, for UI work without a camera.
+configured frame rate and resolution, for UI work without a camera. Like a user who keeps turning while the guidance
+asks for more, it holds every pose but the front at its target and 10 % and 20 % beyond it (left up to 54°, down
+to −30°). `ifscan reconstruct synthetic-camera` (1280×800) took 3838 frames when the head stopped at the targets
+("left" waited 2237 frames, "down" 1090); with these stops and ScanKit's 12° tolerance across the pose direction
+(`perpendicularToleranceDeg`: pitch on the side poses) it took 823 and 1021 frames in two runs (each change alone
+924 and 947), and the guided scan now mostly waits for the animation to reach the next pose.
 
 ## Datasets (`.ifsdataset`)
 
