@@ -373,7 +373,9 @@ int run_session( const Options & o )
     connection.drop_pending_framesets();
     if( o.mode == ifs::HelperMode::live )
     {
-        // After shutdown_engine(): the librealsense context is gone, nothing uses the device any more.
+        // After shutdown_engine(): the librealsense context is gone, nothing uses the device any more. Every
+        // RealSense device without a macOS driver is released, not only the one captured here: librealsense does not
+        // report its capture, and no other sign of it is reliable (docs/HELPER.md, session end).
         ifs::UsbReleaseResult r;
         try
         {
