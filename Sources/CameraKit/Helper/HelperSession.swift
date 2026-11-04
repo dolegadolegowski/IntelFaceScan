@@ -386,12 +386,19 @@ final class HelperCameraSession: @unchecked Sendable {
             lock.withLock { session.hello = hello }
             logger.info("camera helper \(hello.helperVersion, privacy: .public) (librealsense \(hello.sdkVersion, privacy: .public), pid \(hello.pid)) connected in \(hello.mode, privacy: .public) mode")
 
-            let cancelled: Bool = lock.withLock {
-                if shuttingDown { return true }
+            // The helper may already be gone (e.g. it crashed opening the device right after HELLO): connectionClosed()
+            // and helperExited() then found no active session to end, so it must not become one now.
+            let (cancelled, gone): (Bool, Bool) = lock.withLock {
+                if shuttingDown { return (true, false) }
+                if session.connectionClosed || session.process.hasExited { return (false, true) }
                 active = session
-                return false
+                return (false, false)
             }
             if cancelled { throw CancellationError() }
+            if gone {
+                throw Self.launchFailure(process, waitingError:
+                    CameraError.connectionFailed("the camera helper closed the connection right after connecting"))
+            }
         } catch {
             _ = try? await Self.blocking { self.stop(session, timeout: 15) }
             throw Task.isCancelled ? CancellationError() : error
@@ -399,7 +406,12 @@ final class HelperCameraSession: @unchecked Sendable {
         // From here the helper stays up even when the device query fails (e.g. no camera plugged in yet): the next
         // connect() asks again without another password prompt.
         guard let connection = session.connection else { throw CameraError.notConnected }
-        return try await queryDevice(connection)
+        do {
+            return try await queryDevice(connection)
+        } catch where connection.closed {
+            // The helper went away instead of answering: its exit status and stderr say more than the lost socket.
+            throw Self.launchFailure(process, waitingError: error)
+        }
     }
 
     /// Why the helper never connected.
