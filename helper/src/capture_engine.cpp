@@ -160,6 +160,12 @@ struct DeviceWatch
     bool lost = false;     // 'current' is gone
     bool expected = false; // we asked the camera to re-enumerate (advanced mode, hardware reset)
     bool closed = false;
+    // librealsense calls a devices-changed callback without any lock it could share with us (rsutils::signal copies
+    // the subscribers and calls them unlocked), so replacing the callback does not wait for one in flight. Events are
+    // emitted under 'emit_mutex' and shutdown() sets 'emit_closed' under it: once shutdown() has returned, no event
+    // is being emitted and none will be.
+    std::mutex emit_mutex;
+    bool emit_closed = false;
 };
 
 struct StreamSelection
@@ -329,7 +335,7 @@ public:
     }
 
     void open_live();
-    void open_device( const rs2::device & device );
+    void open_device( const rs2::context & context, const rs2::device & device );
     void open_playback( const std::string & file, bool real_time );
 
     json device_info() override;
@@ -347,16 +353,7 @@ public:
     void shutdown() override;
 
 private:
-    struct OptionPlan
-    {
-        std::optional< float > preset;
-        std::optional< float > depth_units;
-        std::optional< int > disparity_shift;
-        std::optional< float > emitter;
-        std::optional< float > laser_power;
-        std::optional< float > depth_auto_exposure;
-        std::optional< float > color_auto_exposure;
-    };
+    using OptionPlan = OptionValues;
 
     const CaptureCallbacks & callbacks() const { return m_shared->callbacks; }
     void log( const char * level, const std::string & message ) const { emit_log( callbacks(), level, message ); }
@@ -368,6 +365,7 @@ private:
     void release_device_locked();
     void expect_reenumeration_locked();
     rs2::device wait_for_reenumeration_locked( const char * what );
+    void reenumerate_locked( const char * what );
     void install_device_callback_locked();
 
     rs2::sensor find_sensor_locked( const std::string & kind ) const;
@@ -381,6 +379,9 @@ private:
     OptionPlan plan_options_locked( const CaptureConfig & config ) const;
     void apply_options_locked( const OptionPlan & plan );
     void apply_configuration_locked( const CaptureConfig & config );
+    bool preset_active_locked() const;
+    OptionPlan read_preset_controlled_locked() const;
+    void restore_after_preset_locked( const OptionPlan & before );
     void apply_roi_locked();
     uint64_t finish_recording_locked();
 
@@ -466,10 +467,10 @@ void RealSenseEngine::open_live()
     open_device_locked( chosen );
 }
 
-void RealSenseEngine::open_device( const rs2::device & device )
+void RealSenseEngine::open_device( const rs2::context & context, const rs2::device & device )
 {
     std::lock_guard< std::mutex > lock( m_mutex );
-    m_ctx = std::make_unique< rs2::context >();
+    m_ctx = std::make_unique< rs2::context >( context );
     open_device_locked( device );
 }
 
@@ -608,6 +609,11 @@ void RealSenseEngine::install_device_callback_locked()
             }
             watch->cv.notify_all();
         }
+        if( ! disconnected && ! connected )
+            return;
+        std::lock_guard< std::mutex > emit_lock( watch->emit_mutex );
+        if( watch->emit_closed )
+            return;
         if( disconnected )
             emit_event( cb, "device_disconnected",
                         { { "serial", serial }, { "message", "The RealSense camera was disconnected" } } );
@@ -658,6 +664,25 @@ rs2::device RealSenseEngine::wait_for_reenumeration_locked( const char * what )
         throw std::runtime_error( std::string( "The camera did not come back within 20 s after " ) + what
                                   + ". Unplug it, plug it in again and reconnect." );
     return arrived;
+}
+
+void RealSenseEngine::reenumerate_locked( const char * what )
+{
+    release_device_locked();
+    try
+    {
+        adopt_device_locked( wait_for_reenumeration_locked( what ) );
+    }
+    catch( ... )
+    {
+        // The old instance is released and the new one did not show up: the camera counts as disconnected, so a late
+        // return or a replug reports device_connected and the next command adopts it (expected=true would hide both
+        // events, and 'lost' was never set because 'current' had been released before the removal was seen).
+        std::lock_guard< std::mutex > lock( m_watch->mutex );
+        m_watch->expected = false;
+        m_watch->lost = true;
+        throw;
+    }
 }
 
 void RealSenseEngine::ensure_device_locked()
@@ -842,14 +867,22 @@ void RealSenseEngine::start_session_locked( bool emit )
     try
     {
         // A playback starts reading as soon as one sensor starts; pausing until all are started keeps the first
-        // frames of the later sensors (resume() rewinds to the last frame actually delivered).
-        if( m_playback && ! m_playback_paused )
+        // frames of the later sensors (resume() rewinds to the last frame actually delivered). The SDK forgets its
+        // pause when all sensors stop (playback_device::stop_internal), so a playback the app paused is paused here
+        // again and stays paused until PLAYBACK resume: otherwise it would play while m_playback_paused says
+        // paused, and the next pause request would be ignored.
+        if( m_playback )
             m_playback->pause();
 
+        std::optional< OptionPlan > before_open;
+        if( ! m_playback_mode && preset_active_locked() )
+            before_open = read_preset_controlled_locked();
         st.color_sensor.open( st.color_profile );
         session->color_open = true;
         st.depth_sensor.open( st.depth_profiles );
         session->depth_open = true;
+        if( before_open )
+            restore_after_preset_locked( *before_open );
         if( st.motion_sensor )
         {
             st.motion_sensor.open( st.motion_profiles );
@@ -982,9 +1015,17 @@ void RealSenseEngine::enable_advanced_mode_locked()
         return;
     log( "info", "Enabling the camera's advanced mode; the camera restarts (a few seconds, only needed once)" );
     expect_reenumeration_locked();
-    adv.toggle_advanced_mode( true );
-    release_device_locked();
-    adopt_device_locked( wait_for_reenumeration_locked( "enabling advanced mode" ) );
+    try
+    {
+        adv.toggle_advanced_mode( true );
+    }
+    catch( ... )
+    {
+        std::lock_guard< std::mutex > lock( m_watch->mutex );
+        m_watch->expected = false;
+        throw;
+    }
+    reenumerate_locked( "enabling advanced mode" );
     rs400::advanced_mode again( m_device );
     if( ! again || ! again.is_enabled() )
         throw std::runtime_error( "The camera did not enable advanced mode" );
@@ -1113,6 +1154,49 @@ void RealSenseEngine::apply_configuration_locked( const CaptureConfig & config )
     apply_options_locked( plan_options_locked( config ) );
 }
 
+// librealsense re-applies the active visual preset whenever the depth sensor opens (advanced_mode_preset_option
+// registers an on-open hook; the preset stays active until it is set to Custom, which set_depth_table() does). The
+// "Default" preset rewrites the depth table (1 mm units, disparity shift 0), laser power, emitter and auto exposure,
+// and the sensor read its depth units just before the hook ran, so its frames would carry 0.1 mm while the camera
+// sends 1 mm. High Accuracy / High Density keep these values. So while a preset is active, the options the
+// configuration sets after the preset are read before the sensors open and whatever the hook changed is set back
+// (in the order of apply_options_locked) before they start; values the app set later with SET_OPTION survive.
+bool RealSenseEngine::preset_active_locked() const
+{
+    rs2::sensor depth = find_sensor_locked( "depth" );
+    return depth && depth.supports( RS2_OPTION_VISUAL_PRESET )
+        && std::lround( depth.get_option( RS2_OPTION_VISUAL_PRESET ) ) != RS2_RS400_VISUAL_PRESET_CUSTOM;
+}
+
+RealSenseEngine::OptionPlan RealSenseEngine::read_preset_controlled_locked() const
+{
+    OptionPlan state;
+    rs2::sensor depth = find_sensor_locked( "depth" );
+    rs2::sensor color = find_sensor_locked( "color" );
+    auto read = []( const rs2::sensor & s, rs2_option option, std::optional< float > & out ) {
+        if( s && s.supports( option ) )
+            out = s.get_option( option );
+    };
+    read( depth, RS2_OPTION_DEPTH_UNITS, state.depth_units );
+    read( depth, RS2_OPTION_EMITTER_ENABLED, state.emitter );
+    read( depth, RS2_OPTION_LASER_POWER, state.laser_power );
+    read( depth, RS2_OPTION_ENABLE_AUTO_EXPOSURE, state.depth_auto_exposure );
+    read( color, RS2_OPTION_ENABLE_AUTO_EXPOSURE, state.color_auto_exposure );
+    rs400::advanced_mode adv( m_device );
+    if( adv && adv.is_enabled() )
+        state.disparity_shift = int( adv.get_depth_table().disparityShift );
+    return state;
+}
+
+void RealSenseEngine::restore_after_preset_locked( const OptionPlan & before )
+{
+    OptionPlan restore = options_to_restore( before, read_preset_controlled_locked() );
+    if( restore.empty() )
+        return;
+    log( "debug", "The visual preset re-applied itself when the depth sensor opened; restoring the configuration" );
+    apply_options_locked( restore );
+}
+
 void RealSenseEngine::apply_roi_locked()
 {
     if( ! m_roi || ! session_active_locked() )
@@ -1139,11 +1223,12 @@ void RealSenseEngine::apply_roi_locked()
     };
 
     if( auto r = clamp_rect( *m_roi, color.width, color.height ) )
-        set_roi( st.color_sensor, *r, "RGB" );
+        set_roi( st.color_sensor, ensure_min_size( *r, k_min_roi_px, k_min_roi_px, color.width, color.height ), "RGB" );
     rs2_extrinsics color_to_depth = inverse( m_session->depth_to_color );
     float distance = m_roi_distance_m > 0 ? m_roi_distance_m : k_default_roi_distance_m;
     if( auto r = map_color_rect_to_depth( color, depth, color_to_depth, *m_roi, distance ) )
-        set_roi( st.depth_sensor, *r, "depth" );
+        set_roi( st.depth_sensor, ensure_min_size( *r, k_min_roi_px, k_min_roi_px, depth.width, depth.height ),
+                 "depth" );
 }
 
 uint64_t RealSenseEngine::finish_recording_locked()
@@ -1537,8 +1622,7 @@ void RealSenseEngine::hardware_reset()
     try
     {
         m_device.hardware_reset();
-        release_device_locked();
-        adopt_device_locked( wait_for_reenumeration_locked( "the hardware reset" ) );
+        reenumerate_locked( "the hardware reset" );
         if( m_configured )
             apply_configuration_locked( m_config );
         if( was_streaming )
@@ -1596,6 +1680,11 @@ void RealSenseEngine::shutdown()
     }
     old_current = rs2::device();
     old_arrived = rs2::device();
+    {
+        // Waits for a devices-changed callback that is emitting right now; later ones see emit_closed.
+        std::lock_guard< std::mutex > emit_lock( m_watch->emit_mutex );
+        m_watch->emit_closed = true;
+    }
     if( m_ctx )
     {
         try
@@ -1641,8 +1730,14 @@ std::unique_ptr< CaptureEngine > CaptureEngine::create_playback( const std::stri
 
 std::unique_ptr< CaptureEngine > create_live_engine_for_device( rs2::device device, CaptureCallbacks callbacks )
 {
+    return create_live_engine_for_device( rs2::context(), std::move( device ), std::move( callbacks ) );
+}
+
+std::unique_ptr< CaptureEngine > create_live_engine_for_device( rs2::context context, rs2::device device,
+                                                                CaptureCallbacks callbacks )
+{
     auto engine = std::make_unique< RealSenseEngine >( std::move( callbacks ), false );
-    engine->open_device( device );
+    engine->open_device( context, device );
     return engine;
 }
 

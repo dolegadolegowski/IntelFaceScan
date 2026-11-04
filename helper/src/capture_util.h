@@ -57,6 +57,12 @@ struct PixelRect
 // Intersection of 'rect' with the image; nullopt when nothing is left.
 std::optional< PixelRect > clamp_rect( const PixelRect & rect, int image_width, int image_height );
 
+// 'rect' (inside the image) grown about its center to at least min_width x min_height (at most the image) and moved
+// back inside the image where the growth crosses a border. Auto exposure metering a sliver of a few pixels (a face
+// rectangle that mostly left the image) would follow those pixels instead of the face.
+constexpr int k_min_roi_px = 32;
+PixelRect ensure_min_size( const PixelRect & rect, int min_width, int min_height, int image_width, int image_height );
+
 // Maps a rectangle of color pixels onto the depth image: the rectangle's outline is deprojected at distance_m,
 // moved into the depth sensor frame and projected; the result is the bounding box, clamped to the depth image.
 // nullopt when the rectangle does not land on the depth image.
@@ -65,6 +71,31 @@ std::optional< PixelRect > map_color_rect_to_depth( const rs2_intrinsics & color
                                                     const rs2_extrinsics & color_to_depth,
                                                     const PixelRect & color_rect,
                                                     float distance_m );
+
+// Values of the options a configuration sets after the visual preset, plus the preset (empty = left alone). The
+// engine applies them in this order (docs/PROTOCOL.md): preset, depth units, disparity shift, emitter on / laser
+// power / emitter off, depth and color auto exposure.
+struct OptionValues
+{
+    std::optional< float > preset;
+    std::optional< float > depth_units;
+    std::optional< int > disparity_shift;
+    std::optional< float > emitter;
+    std::optional< float > laser_power;
+    std::optional< float > depth_auto_exposure;
+    std::optional< float > color_auto_exposure;
+
+    bool empty() const
+    {
+        return ! preset && ! depth_units && ! disparity_shift && ! emitter && ! laser_power && ! depth_auto_exposure
+            && ! color_auto_exposure;
+    }
+};
+
+// librealsense re-applies an active visual preset when the depth sensor opens. Given the options read before and
+// after the open, the ones to set back: those that changed (never the preset itself), and an emitter that was off
+// whenever the laser power is set back (setting the power switches the D4xx emitter on).
+OptionValues options_to_restore( const OptionValues & before, const OptionValues & now );
 
 // Detects a stream restart from its frame counter: the D4xx firmware restarts depth (counter back near 0) when the
 // RGB stream is toggled while depth streams.

@@ -204,6 +204,21 @@ std::optional< Frameset > FrameProcessor::process( const rs2::frameset & frames,
         m_version = control.version();
         configure( control.get() );
     }
+
+    // The depth-to-disparity transforms and the NEON align cache the depth scale of the first frame they see per
+    // stream profile, and a change of the depth units (configure or SET_OPTION while streaming) keeps the profile:
+    // the align would then reproject with a scale off by the ratio of the units (misaligned depth), and the
+    // disparity-domain filters would compare disparities with thresholds off by the same ratio. New blocks start
+    // from the new scale; the temporal history holds disparities of the old one.
+    float units = raw_depth.get_units();
+    if( m_depth_units > 0 && units != m_depth_units )
+    {
+        m_to_disparity = rs2::disparity_transform( true );
+        m_to_depth = rs2::disparity_transform( false );
+        m_align = rs2::align( RS2_STREAM_COLOR );
+        reset_history();
+    }
+    m_depth_units = units;
     const FilterConfig & f = m_settings.filters;
 
     rs2::frame processed = frames;

@@ -232,6 +232,21 @@ std::optional< PixelRect > clamp_rect( const PixelRect & r, int image_width, int
     return PixelRect{ int( x0 ), int( y0 ), int( x1 - x0 ), int( y1 - y0 ) };
 }
 
+PixelRect ensure_min_size( const PixelRect & r, int min_width, int min_height, int image_width, int image_height )
+{
+    auto grow = []( int pos, int size, int min_size, int limit, int & out_pos, int & out_size ) {
+        out_size = std::min( std::max( size, min_size ), std::max( limit, 1 ) );
+        // Keep the center (rounded toward the original position), then shift inside [0, limit).
+        long start = long( pos ) - ( long( out_size ) - size ) / 2;
+        start = std::clamp< long >( start, 0, std::max< long >( long( limit ) - out_size, 0 ) );
+        out_pos = int( start );
+    };
+    PixelRect out;
+    grow( r.x, r.width, min_width, image_width, out.x, out.width );
+    grow( r.y, r.height, min_height, image_height, out.y, out.height );
+    return out;
+}
+
 std::optional< PixelRect > map_color_rect_to_depth( const rs2_intrinsics & color,
                                                     const rs2_intrinsics & depth,
                                                     const rs2_extrinsics & color_to_depth,
@@ -283,6 +298,28 @@ std::optional< PixelRect > map_color_rect_to_depth( const rs2_intrinsics & color
     mapped.width = to_int( std::ceil( max_x ) ) - mapped.x;
     mapped.height = to_int( std::ceil( max_y ) ) - mapped.y;
     return clamp_rect( mapped, depth.width, depth.height );
+}
+
+OptionValues options_to_restore( const OptionValues & before, const OptionValues & now )
+{
+    auto changed = []( const auto & a, const auto & b ) {
+        return a && b && std::fabs( double( *a ) - double( *b ) ) > 1e-9 + 1e-6 * std::fabs( double( *a ) );
+    };
+    OptionValues restore;
+    if( changed( before.depth_units, now.depth_units ) )
+        restore.depth_units = before.depth_units;
+    if( changed( before.disparity_shift, now.disparity_shift ) )
+        restore.disparity_shift = before.disparity_shift;
+    bool laser = changed( before.laser_power, now.laser_power );
+    if( laser )
+        restore.laser_power = before.laser_power;
+    if( changed( before.emitter, now.emitter ) || ( laser && before.emitter && *before.emitter == 0 ) )
+        restore.emitter = before.emitter;
+    if( changed( before.depth_auto_exposure, now.depth_auto_exposure ) )
+        restore.depth_auto_exposure = before.depth_auto_exposure;
+    if( changed( before.color_auto_exposure, now.color_auto_exposure ) )
+        restore.color_auto_exposure = before.color_auto_exposure;
+    return restore;
 }
 
 bool FrameCounterMonitor::update( unsigned long long frame_number )
