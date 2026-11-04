@@ -294,6 +294,70 @@ struct HelperSecurityLaunchTests {
         #expect(received == tricky)
     }
 
+    /// A stand-in for `IntelFaceScanHelper --release -w`: its lines on stderr, like the real tool.
+    private func releaseTool(in dir: URL, status: Int32, lines: [String]) throws -> URL {
+        let tool = dir.appendingPathComponent("release-\(status)")
+        let body = lines.map { "echo '\($0)' >&2" }.joined(separator: "\n")
+        try "#!/bin/sh\n[ \"$*\" = '--release -w' ] || exit 64\n\(body)\nexit \(status)\n"
+            .write(to: tool, atomically: true, encoding: .utf8)
+        #expect(chmod(tool.path, 0o755) == 0)
+        return tool
+    }
+
+    /// The administrator launch without the administrator clause, through osascript (as in a process without AppKit).
+    private func unprivilegedLaunch(_ helper: URL, _ arguments: [String]) -> HelperProcessHandle {
+        let command = HelperLauncher.privilegedShellCommand(helper: helper.path, arguments: arguments,
+                                                            captureOutput: true)
+        return HelperLauncher.runAppleScript(
+            HelperLauncher.appleScriptSource(command: command, prompt: "unused", privileged: false), inProcess: false)
+    }
+
+    @Test func releaseCameraReturnsTheToolsLines() async throws {
+        // releaseCameraToSystem() promised the tool's output but returned "" on success: "do shell script" returns
+        // stdout, and the tool writes to stderr (which a failed run reports as the error message).
+        let dir = try TestHelper.scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ok = try releaseTool(in: dir, status: 0, lines: ["RealSense device re-enumerated: ok (0x00000000)",
+                                                              "macOS drivers attached"])
+        let output = try await LiveCameraSource.releaseCamera(helper: ok, launch: unprivilegedLaunch)
+        #expect(output == "RealSense device re-enumerated: ok (0x00000000)\nmacOS drivers attached")
+
+        let none = try releaseTool(in: dir, status: 0, lines: ["No RealSense device found"])
+        #expect(try await LiveCameraSource.releaseCamera(helper: none, launch: unprivilegedLaunch)
+                == "No RealSense device found")
+
+        let failing = try releaseTool(in: dir, status: 1, lines: ["RealSense device re-enumerated: failed (0xe00002c5)"])
+        await #expect(throws: CameraError.commandFailed(
+            "Releasing the camera failed (status 1): RealSense device re-enumerated: failed (0xe00002c5)")) {
+            _ = try await LiveCameraSource.releaseCamera(helper: failing, launch: unprivilegedLaunch)
+        }
+    }
+
+    @Test func scriptsRunThroughOSAScriptWithoutAppKit() throws {
+        // The test runner has no NSApplication: the administrator launch would go through /usr/bin/osascript, whose
+        // results must mean what the in-process ones mean.
+        #expect(!HelperLauncher.hasAppKitApplication)
+
+        let cancelled = HelperLauncher.runAppleScript("error \"User canceled.\" number -128", inProcess: false)
+        #expect(cancelled.waitForExit(timeout: 30))
+        #expect(cancelled.launchError == .authorizationCancelled)
+
+        let failed = HelperLauncher.runAppleScript(
+            HelperLauncher.appleScriptSource(command: "echo out; echo 'no camera' >&2; exit 69", prompt: "",
+                                             privileged: false), inProcess: false)
+        #expect(failed.waitForExit(timeout: 30))
+        #expect(failed.launchError == nil)
+        #expect(failed.exitStatus == 69)
+        #expect(failed.diagnostics == "no camera")
+
+        let other = HelperLauncher.runAppleScript("error \"odd\" number -1743", inProcess: false)
+        #expect(other.waitForExit(timeout: 30))
+        #expect(other.launchError == .launchFailed("odd (-1743)"))
+
+        #expect(HelperLauncher.parseOSAScriptError("0:48: execution error: a (b) c (2)")! == (2, "a (b) c"))
+        #expect(HelperLauncher.parseOSAScriptError("syntax error: nope") == nil)
+    }
+
     @Test func searchSkipsHelpersOthersCanReplace() throws {
         let dir = try TestHelper.scratchDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }

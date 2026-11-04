@@ -4,6 +4,11 @@
 // `do shell script ... with administrator privileges` (the standard macOS password prompt, as the
 // realsense-viewer-macos launcher does), which blocks until the helper exits, so it runs on its own queue.
 // Playback and the fake camera run the helper directly as the user.
+//
+// The script runs in-process (NSAppleScript) only in an AppKit application (NSApp exists, as in IntelFaceScan.app):
+// there the prompt belongs to the app. Without one - a command line tool, the test runner - an in-process
+// "do shell script" can wait forever for an Apple event that nobody dispatches, so the same script goes through
+// /usr/bin/osascript instead (the prompt then names osascript).
 
 import Darwin
 import Foundation
@@ -64,7 +69,8 @@ final class HelperProcessHandle: @unchecked Sendable {
     var hasExited: Bool { condition.withLock { exited } }
     var exitStatus: Int32? { condition.withLock { exited ? status : nil } }
     var launchError: CameraError? { condition.withLock { error } }
-    /// What the helper wrote to stderr (startup errors; it logs over the socket once connected).
+    /// What the helper wrote to stderr (startup errors; it logs over the socket once connected), or everything it
+    /// printed for a privileged run that captures its output (HelperLauncher.launchPrivileged(captureOutput:)).
     var diagnostics: String {
         condition.withLock { String(decoding: stderrTail, as: UTF8.self) }
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -114,10 +120,12 @@ enum HelperLauncher {
 
     /// The command run as root: an empty environment (nothing from the app's environment reaches the root process,
     /// including DYLD_* variables), no input, output discarded; stderr stays the error message of the script when the
-    /// helper fails before it can report over the socket.
-    static func privilegedShellCommand(helper: String, arguments: [String]) -> String {
+    /// helper fails before it can report over the socket. `captureOutput` (short tools such as `--release`) sends
+    /// stderr to stdout instead: "do shell script" returns stdout on success and, when stderr is empty, reports it as
+    /// the error message on failure, so the tool's lines come back either way.
+    static func privilegedShellCommand(helper: String, arguments: [String], captureOutput: Bool = false) -> String {
         (["exec", "/usr/bin/env", "-i", shellQuote(helper)] + arguments.map(shellQuote)).joined(separator: " ")
-            + " </dev/null >/dev/null"
+            + (captureOutput ? " </dev/null 2>&1" : " </dev/null >/dev/null")
     }
 
     /// `privileged: false` only exists so tests can run the exact quoting through AppleScript and sh without a prompt.
@@ -133,35 +141,127 @@ enum HelperLauncher {
     }
 
     /// Runs the helper as root after the administrator prompt. The returned handle reports the exit; a cancelled
-    /// prompt ends it with CameraError.authorizationCancelled.
-    static func launchPrivileged(helper: URL, arguments: [String], prompt: String = authorizationPrompt)
-        -> HelperProcessHandle {
+    /// prompt ends it with CameraError.authorizationCancelled. With `captureOutput` the handle's diagnostics hold
+    /// what the helper printed (stdout and stderr), also when it succeeded.
+    static func launchPrivileged(helper: URL, arguments: [String], prompt: String = authorizationPrompt,
+                                 captureOutput: Bool = false) -> HelperProcessHandle {
+        let command = privilegedShellCommand(helper: helper.path, arguments: arguments, captureOutput: captureOutput)
+        return runAppleScript(appleScriptSource(command: command, prompt: prompt))
+    }
+
+    /// True in an AppKit application (NSApp exists), looked up at run time so CameraKit does not link AppKit.
+    static var hasAppKitApplication: Bool {
+        // RTLD_DEFAULT: every image loaded in the process. Without AppKit there is no NSApp symbol at all.
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "NSApp") else { return false }
+        return symbol.load(as: UnsafeRawPointer?.self) != nil
+    }
+
+    /// Runs an AppleScript on the authorization queue and reports its end on the returned handle: in-process in an
+    /// AppKit application, through /usr/bin/osascript otherwise (see the top of this file). `inProcess` overrides the
+    /// choice (tests).
+    static func runAppleScript(_ source: String, inProcess: Bool? = nil) -> HelperProcessHandle {
         let handle = HelperProcessHandle()
-        let source = appleScriptSource(command: privilegedShellCommand(helper: helper.path, arguments: arguments),
-                                       prompt: prompt)
+        let local = inProcess ?? hasAppKitApplication
         authorizationQueue.async {
-            var info: NSDictionary?
-            guard let script = NSAppleScript(source: source) else {
-                handle.markExited(status: -1, error: .launchFailed("cannot create the authorization script"))
-                return
-            }
-            _ = script.executeAndReturnError(&info)
-            guard let info else {
-                handle.markExited(status: 0, error: nil)
-                return
-            }
-            let number = (info[NSAppleScript.errorNumber] as? NSNumber)?.intValue ?? 0
-            let message = info[NSAppleScript.errorMessage] as? String ?? "unknown error"
-            if number == -128 {
-                handle.markExited(status: -1, error: .authorizationCancelled)
-            } else if (1...255).contains(number) {
-                // "do shell script" reports a non-zero exit status as the error number, with stderr as the message.
-                handle.markExited(status: Int32(number), error: nil, message: message)
+            if local {
+                var info: NSDictionary?
+                guard let script = NSAppleScript(source: source) else {
+                    handle.markExited(status: -1, error: .launchFailed("cannot create the authorization script"))
+                    return
+                }
+                let result = script.executeAndReturnError(&info)
+                if let info {
+                    finish(handle, errorNumber: (info[NSAppleScript.errorNumber] as? NSNumber)?.intValue ?? 0,
+                           message: info[NSAppleScript.errorMessage] as? String ?? "unknown error")
+                } else {
+                    finish(handle, output: result.stringValue ?? "")
+                }
             } else {
-                handle.markExited(status: -1, error: .launchFailed("\(message) (\(number))"))
+                runOSAScript(source, handle: handle)
             }
         }
         return handle
+    }
+
+    /// The end of a "do shell script": its output on success, or AppleScript's error number and message.
+    private static func finish(_ handle: HelperProcessHandle, output: String) {
+        handle.markExited(status: 0, error: nil, message: normalizedLines(output))
+    }
+
+    private static func finish(_ handle: HelperProcessHandle, errorNumber number: Int, message: String) {
+        if number == -128 {
+            handle.markExited(status: -1, error: .authorizationCancelled)
+        } else if (1...255).contains(number) {
+            // "do shell script" reports a non-zero exit status as the error number, with stderr as the message.
+            handle.markExited(status: Int32(number), error: nil, message: normalizedLines(message))
+        } else {
+            handle.markExited(status: -1, error: .launchFailed("\(message) (\(number))"))
+        }
+    }
+
+    /// AppleScript returns the shell's lines separated by carriage returns.
+    static func normalizedLines(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// osascript prints the result on stdout, or "<range>: execution error: <message> (<number>)" on stderr.
+    private static func runOSAScript(_ source: String, handle: HelperProcessHandle) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", source]
+        process.environment = [:]
+        process.standardInput = FileHandle.nullDevice
+        let stdout = Pipe(), stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do {
+            try process.run()
+        } catch {
+            handle.markExited(status: -1, error: .launchFailed("/usr/bin/osascript: \(error.localizedDescription)"))
+            return
+        }
+        // Both pipes at once: a full one would block osascript before it exits.
+        let errors = OSAScriptErrorOutput()
+        DispatchQueue.global(qos: .utility).async { errors.read(stderr.fileHandleForReading) }
+        let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
+        let errorData = errors.wait()
+        exited.wait()
+        if process.terminationStatus == 0 {
+            finish(handle, output: String(decoding: outputData, as: UTF8.self))
+            return
+        }
+        let text = String(decoding: errorData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsed = parseOSAScriptError(text) else {
+            handle.markExited(status: -1, error: .launchFailed("osascript failed: \(text)"))
+            return
+        }
+        finish(handle, errorNumber: parsed.number, message: parsed.message)
+    }
+
+    private final class OSAScriptErrorOutput: @unchecked Sendable {
+        private let done = DispatchSemaphore(value: 0)
+        private var data = Data()
+
+        func read(_ handle: FileHandle) {
+            data = handle.readDataToEndOfFile()
+            done.signal()
+        }
+
+        func wait() -> Data {
+            done.wait()
+            return data
+        }
+    }
+
+    /// "0:42: execution error: <message> (<number>)" -> (number, message).
+    static func parseOSAScriptError(_ text: String) -> (number: Int, message: String)? {
+        guard let marker = text.range(of: "execution error: "), text.hasSuffix(")"),
+              let open = text.range(of: " (", options: .backwards), open.lowerBound >= marker.upperBound,
+              let number = Int(text[open.upperBound..<text.index(before: text.endIndex)]) else { return nil }
+        return (number, String(text[marker.upperBound..<open.lowerBound]))
     }
 
     /// Runs the helper as the user (playback, fake camera, --release without privileges).
