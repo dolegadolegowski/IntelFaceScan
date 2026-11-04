@@ -43,6 +43,35 @@ enum DeveloperSnapshots {
                 .environment(model)
             if !write(view, to: directory.appendingPathComponent("\(name).png")) { failures += 1 }
         }
+        // The narrowest detail area (window at its minimum width, sidebar at its maximum): the busiest control rows.
+        let narrow: [(String, AppModel.Screen, CameraSourceKind, Bool, Bool)] = [
+            ("preview-live-recording-narrow", .preview, .live, true, false),
+            ("preview-dataset-narrow", .preview, .dataset(URL(fileURLWithPath: "/tmp/anna-0001.ifsdataset")), false, true),
+            ("scan-narrow", .scanning, .live, false, false),
+            ("summary-diagonals-narrow", .scanComplete, .live, false, false),
+        ]
+        for (name, screen, kind, recording, dataset) in narrow {
+            let model = fixture.model(screen: screen, sourceKind: kind, recording: recording, dataset: dataset,
+                                      allPoses: name.contains("diagonals"))
+            let view = DetailScreenForSnapshot(screen: screen)
+                .padding(16)
+                .frame(width: 640, height: 620)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .environment(model)
+            if !write(view, to: directory.appendingPathComponent("\(name).png")) { failures += 1 }
+        }
+        // The whole window through AppKit (sidebar form, pickers, scroll views draw; ImageRenderer cannot draw them).
+        let windows: [(String, AppModel.Screen, CGSize)] = [
+            ("window-preview-min", .preview, CGSize(width: 1040, height: 680)),
+            ("window-scan-min", .scanning, CGSize(width: 1040, height: 680)),
+            ("window-result", .result, CGSize(width: 1280, height: 820)),
+            ("window-sidebar-tall", .welcome, CGSize(width: 1040, height: 1640)),
+        ]
+        for (name, screen, size) in windows {
+            let model = fixture.model(screen: screen, sourceKind: .live, recording: screen == .preview, dataset: false)
+            let view = ContentView().environment(model)
+            if !writeHosted(view, size: size, to: directory.appendingPathComponent("\(name).png")) { failures += 1 }
+        }
         // The scan panel scrolls in the app; ImageRenderer cannot draw AppKit scroll views, so render its content.
         let panel = ScanPanelContent()
             .padding(12)
@@ -127,6 +156,33 @@ enum DeveloperSnapshots {
         return failures
     }
 
+    /// Renders a view hosted in an offscreen window (never shown) with AppKit drawing.
+    private static func writeHosted<V: View>(_ view: V, size: CGSize, to url: URL) -> Bool {
+        _ = NSApplication.shared
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = CGRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: hosting.frame, styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.isRestorable = false
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentView = hosting
+        hosting.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.5))   // SwiftUI updates the AppKit controls
+        hosting.layoutSubtreeIfNeeded()
+        defer { window.close() }
+        guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+            FileHandle.standardError.write(Data("render failed: \(url.lastPathComponent)\n".utf8))
+            return false
+        }
+        hosting.cacheDisplay(in: hosting.bounds, to: rep)
+        guard let image = rep.cgImage,
+              let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+            return false
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        return CGImageDestinationFinalize(destination)
+    }
+
     private static func write<V: View>(_ view: V, to url: URL) -> Bool {
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
@@ -173,8 +229,9 @@ private struct Fixture {
         return try? decoder.decode(DeviceInfo.self, from: Data(json.utf8))
     }()
 
-    func model(screen: AppModel.Screen) -> AppModel {
-        let model = AppModel()
+    func model(screen: AppModel.Screen, sourceKind: CameraSourceKind = .synthetic, recording: Bool = false,
+               dataset: Bool = false, allPoses: Bool = false) -> AppModel {
+        let model = AppModel(defaults: nil)
         let configuration = ScanConfiguration()
         let face = CGRect(x: 520, y: 220, width: 230, height: 280)
         var landmarks: [SIMD2<Float>] = []
@@ -205,8 +262,11 @@ private struct Fixture {
         let frame = CameraFrame(sequence: 0, timestampMs: 0,
                                 color: ColorImage(width: 2, height: 2, bytesPerRow: 6, pixels: Data(count: 12), intrinsics: k),
                                 alignedDepth: DepthImage(width: 2, height: 2, pixels: Data(count: 8), depthScale: 0.0001, intrinsics: k))
-        let keyframes = poses.enumerated().map { i, pose in
-            Keyframe(id: i, frame: frame, scanPose: [ScanPose.front, .up, .down, .left][min(3, i / 3)], headPose: pose,
+        let scanPoses: [ScanPose] = allPoses
+            ? ScanPose.allCases.flatMap { [$0, $0, $0] }
+            : poses.indices.map { [ScanPose.front, .up, .down, .left][min(3, $0 / 3)] }
+        let keyframes = scanPoses.enumerated().map { i, scanPose in
+            Keyframe(id: i, frame: frame, scanPose: scanPose, headPose: poses[min(i, poses.count - 1)],
                      faceRect: face, landmarks: [], mask: nil,
                      quality: FrameQuality(sharpness: 120, angularSpeedDegPerSec: 3, validDepthRatio: 0.97,
                                            validDepthPoints: 41_000, faceDistanceM: 0.63))
@@ -215,16 +275,19 @@ private struct Fixture {
         report.keyframes = 15; report.usedFrames = 15; report.odometryEdges = 14; report.loopClosures = 6
         report.meanRegistrationRMSEmm = 0.62; report.maxRegistrationRMSEmm = 1.10; report.meanFitness = 0.91
         report.voxelSizeMM = 0.75; report.usedGPU = true; report.vertexCount = 412_118; report.triangleCount = 823_904
-        report.durations = ["registration": 2.4, "fusion": 1.1, "meshing": 0.8, "texturing": 3.2]
+        report.durations = ["segmentation": 0.6, "registration": 2.4, "registration check": 0.2, "bounds": 0.1,
+                            "fusion": 1.1, "cleanup": 0.8, "texturing": 3.2, "total": 8.5]
         report.notes = ["Synthetic fixture"]
         let mesh = ReconMesh(positions: [SIMD3(0, 0, 0), SIMD3(0.1, 0, 0), SIMD3(0, 0.1, 0)], indices: [0, 1, 2])
         let result = ReconstructionResult(mesh: mesh, texture: nil, cameraPoses: [], exportTransform: matrix_identity_float4x4,
                                           report: report)
-        model.applyFixture(screen: screen, sourceKind: .synthetic, device: device, tracking: tracking,
-                           scanUpdate: update, scanConfiguration: configuration,
-                           capture: ScanCapture(keyframes: keyframes, device: device),
+        let capture = ScanCapture(keyframes: keyframes, device: device)
+        model.applyFixture(screen: screen, sourceKind: sourceKind, device: device, tracking: tracking,
+                           scanUpdate: update, scanConfiguration: configuration, capture: capture,
                            progress: ReconstructionProgress(stage: .fusion, fraction: 0.46, message: "TSDF 412 / 900"),
-                           result: result, stats: FrameStats(displayFPS: 30, analysisFPS: 24))
+                           result: result, stats: FrameStats(displayFPS: 30, analysisFPS: 24),
+                           recordingStartedAt: recording ? Date(timeIntervalSinceNow: -83) : nil,
+                           datasetCapture: dataset ? capture : nil)
         return model
     }
 }

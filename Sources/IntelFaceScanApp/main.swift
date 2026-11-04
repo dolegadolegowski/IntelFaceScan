@@ -13,6 +13,15 @@ if let index = snapshotArguments.firstIndex(of: "--render-snapshots") {
     let status = MainActor.assumeIsolated { DeveloperSnapshots.render(to: URL(fileURLWithPath: directory)) }
     exit(status)
 }
+// `IntelFaceScan --run-checks [--full] [name ...]`: headless checks of the app model (DeveloperChecks.swift).
+if let index = snapshotArguments.firstIndex(of: "--run-checks") {
+    let rest = Array(snapshotArguments[(index + 1)...])
+    Task { @MainActor in
+        let status = await DeveloperChecks.run(arguments: rest)
+        exit(status)
+    }
+    dispatchMain()
+}
 #endif
 
 IntelFaceScanApp.main()
