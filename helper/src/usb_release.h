@@ -27,7 +27,8 @@ struct UsbReleaseResult
 // until the system drivers are attached again. 'log' receives one line per device and the final state.
 UsbReleaseResult release_realsense_devices( int wait_ms, const std::function< void( const std::string & ) > & log );
 
-// `IntelFaceScanHelper --release [-w]`: same output and exit codes as rs-macos-release.
+// `IntelFaceScanHelper --release [-w]`: same lines and exit codes as rs-macos-release, on stderr (the app's
+// administrator launch discards stdout and shows stderr when the run fails).
 int run_release_tool( int argc, char ** argv );
 
 }  // namespace ifs

@@ -179,8 +179,10 @@ int run_release_tool( int argc, char ** argv )
             return 64;
         }
     }
+    // stderr, not stdout: the app runs this through "do shell script ... >/dev/null", which reports stderr as the
+    // error message of a failed run; stdout would be lost and the app could only say "failed".
     UsbReleaseResult r = release_realsense_devices( wait ? 5000 : 0, []( const std::string & line ) {
-        std::printf( "%s\n", line.c_str() );
+        std::fprintf( stderr, "%s\n", line.c_str() );
     } );
     if( r.failed )
         return r.found ? 1 : 2;
