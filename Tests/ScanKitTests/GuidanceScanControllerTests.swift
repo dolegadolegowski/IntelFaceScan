@@ -272,6 +272,26 @@ import Testing
         #expect(tracker.segmentationCalls >= 3)
     }
 
+    @Test func keepShouldersWithoutSegmentationKeepsTheShoulders() async throws {
+        // No person mask (the scripted tracker has no segmentation): the keyframe masks still contain the shoulders.
+        var configuration = ScanConfiguration.testOffline
+        configuration.keepShoulders = true
+        let (controller, tracker) = makeController(configuration)
+        var sim = ScanSimulation()
+        sim.factory.height = 160
+        await sim.run(controller, tracker: tracker, maxFrames: 300, options: { _ in .init(body: true) },
+                      until: { $0.keyframeCount >= 1 })
+        let mask = try #require(controller.finish().keyframes.first?.mask)
+        var shoulders = 0
+        for y in 0 ..< sim.factory.height {
+            for x in 0 ..< sim.factory.width where sim.factory.inShoulders(x, y) && mask[y * sim.factory.width + x] != 0 {
+                shoulders += 1
+            }
+        }
+        #expect(shoulders > 3000)
+        #expect(tracker.segmentationCalls >= 1)
+    }
+
     @Test func offlineTimingUsesFrameTimestamps() async {
         // Frames 1 ms apart: 200 frames are only 0.2 s of scan time, less than positioning (0.5 s) + hold.
         let (controller, tracker) = makeController()

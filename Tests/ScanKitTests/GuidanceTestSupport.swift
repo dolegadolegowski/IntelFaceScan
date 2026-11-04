@@ -28,6 +28,9 @@ struct GuidanceFrameFactory {
         var gyroRadPerSec: Float = 0
         /// Head pixels without depth (holes), as a fraction of the head ellipse; the face center keeps depth.
         var headDepthHoles: Bool = false
+        /// Neck and shoulders below the head (see inNeck/inShoulders; needs a frame ~160 pixels tall): the neck recedes
+        /// from the head's distance by 2 mm per row below the chin, the shoulders are 5 cm behind the face.
+        var body: Bool = false
     }
 
     func frame(sequence: UInt64, timestampMs: Double, _ options: Options = Options()) -> CameraFrame {
@@ -46,6 +49,18 @@ struct GuidanceFrameFactory {
         let ax = 0.75 * Double(faceRect.width), ay = 0.95 * Double(faceRect.height)
         let dx = (Double(x) + 0.5 - cx) / ax, dy = (Double(y) + 0.5 - cy) / ay
         return dx * dx + dy * dy <= 1
+    }
+
+    /// The neck: 0.6 face widths wide, from the chin down to the shoulders.
+    func inNeck(_ x: Int, _ y: Int) -> Bool {
+        abs(Double(x) + 0.5 - Double(faceRect.midX)) < 0.3 * Double(faceRect.width) && Double(y) >= Double(faceRect.maxY) - 6
+            && y < shoulderTop
+    }
+
+    /// Shoulders: 3 face widths wide, from 22 rows below the chin, 42 rows tall.
+    var shoulderTop: Int { Int(faceRect.maxY) + 22 }
+    func inShoulders(_ x: Int, _ y: Int) -> Bool {
+        abs(Double(x) + 0.5 - Double(faceRect.midX)) < 1.5 * Double(faceRect.width) && y >= shoulderTop && y < shoulderTop + 42
     }
 
     func colorPixels(_ texture: Texture) -> Data {
@@ -94,6 +109,11 @@ struct GuidanceFrameFactory {
                     let nearCenter = abs(Float(x) - center.x) < Float(faceRect.width) * 0.2
                         && abs(Float(y) - center.y) < Float(faceRect.height) * 0.25
                     values[i] = options.headDepthHoles && !nearCenter && (x + y) % 3 != 0 ? 0 : head
+                } else if options.body && inNeck(x, y) {
+                    let below = max(0, Float(y) - Float(faceRect.maxY))
+                    values[i] = UInt16((options.distance + 0.002 * below) / depthScale)
+                } else if options.body && inShoulders(x, y) {
+                    values[i] = UInt16((options.distance + 0.05) / depthScale)
                 } else {
                     values[i] = background
                 }

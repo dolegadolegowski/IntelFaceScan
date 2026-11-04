@@ -89,6 +89,67 @@ import Testing
         #expect(pixel(shoulders, x, factory.height - 1) == 255)
     }
 
+    @Test func shouldersWithoutPersonMaskGrowFromTheHead() {
+        // Segmentation off, failed or rejected: the ellipse covers only the head. With keepShoulders the neck and the
+        // shoulders are grown from it through the depth band, but not a desk, a chair back or a headrest.
+        var tall = factory
+        tall.height = 160
+        var depth = tall.frame(sequence: 0, timestampMs: 0, .init(body: true)).alignedDepth
+        let face = tall.faceRect
+        let deskRows = (tall.shoulderTop + 52) ..< 160                 // in the band, below a gap of background
+        let chairBack = (110 ..< 140, 70 ..< tall.shoulderTop)        // in the band, touching the shoulders, 12 cm behind
+        let headrest = (20 ..< 45, 10 ..< 60)                          // in the band, beside the head, above the chin
+        let scale = depth.depthScale
+        depth.pixels.withUnsafeMutableBytes { raw in
+            let v = raw.bindMemory(to: UInt16.self)
+            func set(_ x: Int, _ y: Int, _ meters: Float) { v[y * tall.width + x] = UInt16(meters / scale) }
+            for y in deskRows { for x in 20 ..< 140 { set(x, y, 0.67) } }
+            for y in chairBack.1 { for x in chairBack.0 where !tall.inShoulders(x, y) { set(x, y, 0.79) } }
+            for y in headrest.1 { for x in headrest.0 { set(x, y, 0.68) } }
+        }
+        let obs = HeadObservation(pose: .frontal, faceRect: face, landmarks: [], personMask: nil)
+        var parameters = HeadMaskParameters()
+        parameters.erosionRadius = 0
+        func build(_ keepShoulders: Bool, depth: DepthImage?) -> Data {
+            parameters.keepShoulders = keepShoulders
+            return HeadMaskBuilder.build(width: tall.width, height: tall.height, observation: obs, depth: depth,
+                                         faceDistanceM: depth == nil ? nil : 0.62, parameters: parameters)
+        }
+        func count(_ mask: Data, _ inside: (Int, Int) -> Bool) -> (inMask: Int, total: Int) {
+            var n = 0, total = 0
+            for y in 0 ..< tall.height {
+                for x in 0 ..< tall.width where inside(x, y) {
+                    total += 1
+                    if mask[y * tall.width + x] != 0 { n += 1 }
+                }
+            }
+            return (n, total)
+        }
+        let below = { (_: Int, y: Int) in y > Int(face.maxY) + 6 }
+        let neck = { (x: Int, y: Int) in tall.inNeck(x, y) && below(x, y) }
+
+        let cut = build(false, depth: depth)
+        #expect(count(cut, below).inMask == 0)
+
+        let shoulders = build(true, depth: depth)
+        let neckPixels = count(shoulders, neck), shoulderPixels = count(shoulders, tall.inShoulders)
+        #expect(neckPixels.inMask == neckPixels.total && neckPixels.total > 300)
+        #expect(shoulderPixels.inMask == shoulderPixels.total && shoulderPixels.total > 4000)
+        #expect(count(shoulders, { _, y in deskRows.contains(y) }).inMask == 0)
+        #expect(count(shoulders, { x, y in chairBack.0.contains(x) && chairBack.1.contains(y) && !tall.inShoulders(x, y) }).inMask == 0)
+        #expect(count(shoulders, { x, y in headrest.0.contains(x) && headrest.1.contains(y) }).inMask == 0)
+        // Everything below the neck cut that was added is neck or shoulders, and nothing changed above the chin.
+        #expect(count(shoulders, { x, y in below(x, y) && !tall.inNeck(x, y) && !tall.inShoulders(x, y) }).inMask == 0)
+        let aboveChin = { (_: Int, y: Int) in y < Int(face.maxY) }
+        #expect(count(shoulders, aboveChin).inMask == count(cut, aboveChin).inMask)
+
+        // Without depth nothing tells the body from the background: the head ellipse only.
+        #expect(count(build(true, depth: nil), below).inMask == 0)
+        // The default erosion keeps the shoulders.
+        parameters.erosionRadius = 2
+        #expect(count(build(true, depth: depth), tall.inShoulders).inMask > 3000)
+    }
+
     @Test func neckCutFollowsRoll() {
         // Head tilted clockwise by 30 deg: the chin direction rotates toward -x, so points straight below the
         // chin but far to the right of the tilted down-axis stay, while points along the axis are cut.
