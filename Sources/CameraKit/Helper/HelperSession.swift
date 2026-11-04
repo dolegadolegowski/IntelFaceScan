@@ -248,6 +248,8 @@ final class HelperCameraSession: @unchecked Sendable {
     private var starting: Active?
     private var connectTask: Task<DeviceInfo, Error>?
     private var shuttingDown = false
+    /// Advanced by every shutdown: a connect started before it may not make its helper the active one afterwards.
+    private var epoch: UInt64 = 0
     private var invalidFrames = 0
     /// A non-real-time playback delivers every frame: frame streams are lossless and the reader waits for them.
     private var losslessFrames: Bool
@@ -287,7 +289,8 @@ final class HelperCameraSession: @unchecked Sendable {
         let task: Task<DeviceInfo, Error> = try lock.withLock {
             if shuttingDown { throw CameraError.notConnected }
             if let connectTask { return connectTask }
-            let task = Task.detached { [self] in try await establish() }
+            let started = epoch
+            let task = Task.detached { [self] in try await establish(epoch: started) }
             connectTask = task
             return task
         }
@@ -327,8 +330,9 @@ final class HelperCameraSession: @unchecked Sendable {
         return args
     }
 
-    private func establish() async throws -> DeviceInfo {
-        defer { lock.withLock { connectTask = nil } }
+    private func establish(epoch started: UInt64) async throws -> DeviceInfo {
+        // A shutdown since this connect began has dropped connectTask already (and a newer connect may own it).
+        defer { lock.withLock { if epoch == started { connectTask = nil } } }
         let helper = try resolvedHelperURL()
         let server = try HelperSocketServer()
         let args = arguments(socket: server.socketPath, helper: helper)
@@ -348,7 +352,7 @@ final class HelperCameraSession: @unchecked Sendable {
         let session = Active(server: server, process: process)
         let raced: Bool = lock.withLock {
             starting = session
-            return shuttingDown
+            return shuttingDown || epoch != started
         }
         if raced { server.abort() }
         defer { lock.withLock { if starting === session { starting = nil } } }
@@ -397,7 +401,7 @@ final class HelperCameraSession: @unchecked Sendable {
             // The helper may already be gone (e.g. it crashed opening the device right after HELLO): connectionClosed()
             // and helperExited() then found no active session to end, so it must not become one now.
             let (cancelled, gone): (Bool, Bool) = lock.withLock {
-                if shuttingDown { return (true, false) }
+                if shuttingDown || epoch != started { return (true, false) }
                 if session.connectionClosed || session.process.hasExited { return (false, true) }
                 active = session
                 return (false, false)
@@ -670,24 +674,21 @@ final class HelperCameraSession: @unchecked Sendable {
     }
 
     /// Ends the session: stops a pending connect, asks the helper to quit and waits (bounded) for its exit, then ends
-    /// the frame and event streams. Idempotent; never needs the main thread.
+    /// the frame and event streams. Idempotent; never needs the main thread, nor a thread of the Swift cooperative
+    /// pool: a pending connect is aborted, not awaited. Its task ends on that pool, which other work can hold for
+    /// many seconds (a 3-core CI runner took 14 s to close a session whose helper never connected); the new epoch
+    /// keeps it from making its helper the active one, and it stops that helper itself.
     func shutdownBlocking(timeout: TimeInterval) {
         let deadline = Date(timeIntervalSinceNow: timeout)
-        let (session, pending, task): (Active?, Active?, Task<DeviceInfo, Error>?) = lock.withLock {
+        let (session, pending): (Active?, Active?) = lock.withLock {
             shuttingDown = true
-            return (active, starting, connectTask)
+            epoch &+= 1
+            connectTask = nil
+            return (active, starting)
         }
         // A lossless consumer that stopped reading must not keep the reader from QUIT's reply and the helper's BYE.
         frames.release()
         pending?.server.abort()
-        if let task {
-            let done = DispatchSemaphore(value: 0)
-            Task.detached {
-                _ = try? await task.value
-                done.signal()
-            }
-            _ = done.wait(timeout: .now() + max(0, deadline.timeIntervalSinceNow))
-        }
         if let session { stop(session, timeout: max(1, deadline.timeIntervalSinceNow)) }
         events.finishAll()
         frames.finishAll()

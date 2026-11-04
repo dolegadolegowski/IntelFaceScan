@@ -147,8 +147,10 @@ struct HelperSessionLaunchTests {
         // The live helper's handle ends only when the in-process AppleScript returns, i.e. after the administrator
         // prompt. A stand-in that never connects and never exits plays the prompt that is still showing (no real
         // prompt in tests). Closing the source used to wait ~15 s for it; the socket is removed instead, so a helper
-        // started after all could not connect and would exit by itself (or with the app). The bound stays below
-        // those 15 s with room for a loaded 3-core runner (4.6 s there in CI run 41797620726).
+        // started after all could not connect and would exit by itself (or with the app). Timed on a thread of its own:
+        // the shutdown needs no thread of the Swift cooperative pool, which the blocking tests of this target running
+        // alongside can hold for seconds on a 3-core runner (awaiting shutdown(timeout:) measured 14 s there in CI run
+        // 41873434467, while the shutdown still awaited the connect task).
         let sleep = URL(fileURLWithPath: "/bin/sleep")
         let session = HelperCameraSession(mode: .live, helperURL: sleep)
         let launched = LaunchRecord()
@@ -160,10 +162,14 @@ struct HelperSessionLaunchTests {
         }
         let attempt = Task { try await session.connect() }
         #expect(await eventually { launched.handle != nil })
-        let t0 = Date()
-        await session.shutdown(timeout: 20)
-        let elapsed = Date().timeIntervalSince(t0)
-        #expect(elapsed < 10, "closing waited \(elapsed) s for a helper that never connected")
+        let elapsed: Double = await withCheckedContinuation { continuation in
+            Thread {
+                let t0 = Date()
+                session.shutdownBlocking(timeout: 20)
+                continuation.resume(returning: Date().timeIntervalSince(t0))
+            }.start()
+        }
+        #expect(elapsed < 5, "closing waited \(elapsed) s for a helper that never connected")
         do {
             _ = try await attempt.value
             Issue.record("connect() succeeded without a helper")
