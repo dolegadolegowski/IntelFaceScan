@@ -108,8 +108,12 @@ struct ResultView: View {
                         .disabled(model.capture == nil)
                     }
                     .controlSize(.large)
-                    ReportView(report: result.report)
-                    Spacer()
+                    // The report grows with the pipeline's notes: it scrolls instead of pushing the panel out of a
+                    // window at its minimum height.
+                    ScrollView(.vertical) {
+                        ReportView(report: result.report)
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
                     if model.canReturnToPreview {
                         Button(S.newScan, systemImage: "arrow.counterclockwise") { model.backToPreview() }
                     }

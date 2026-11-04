@@ -47,7 +47,7 @@ enum DeveloperSnapshots {
         let narrow: [(String, AppModel.Screen, CameraSourceKind, Bool, Bool)] = [
             ("preview-live-recording-narrow", .preview, .live, true, false),
             ("preview-dataset-narrow", .preview, .dataset(URL(fileURLWithPath: "/tmp/anna-0001.ifsdataset")), false, true),
-            ("scan-narrow", .scanning, .live, false, false),
+            ("scan-narrow", .scanning, .live, true, false),
             ("summary-diagonals-narrow", .scanComplete, .live, false, false),
         ]
         for (name, screen, kind, recording, dataset) in narrow {
@@ -65,6 +65,8 @@ enum DeveloperSnapshots {
             ("window-preview-min", .preview, CGSize(width: 1040, height: 680)),
             ("window-scan-min", .scanning, CGSize(width: 1040, height: 680)),
             ("window-result", .result, CGSize(width: 1280, height: 820)),
+            ("window-result-min", .result, CGSize(width: 1040, height: 680)),
+            ("window-summary-min", .scanComplete, CGSize(width: 1040, height: 680)),
             ("window-sidebar-tall", .welcome, CGSize(width: 1040, height: 1640)),
         ]
         for (name, screen, size) in windows {
@@ -79,6 +81,14 @@ enum DeveloperSnapshots {
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(fixture.model(screen: .scanning))
         if !write(panel, to: directory.appendingPathComponent("scan-panel.png")) { failures += 1 }
+        // The result panel's report scrolls too.
+        if let report = fixture.model(screen: .result).result?.report {
+            let view = ReportView(report: report)
+                .frame(width: 320)
+                .padding(12)
+                .background(Color(nsColor: .windowBackgroundColor))
+            if !write(view, to: directory.appendingPathComponent("report.png")) { failures += 1 }
+        }
         let sidebar = SidebarView()
             .frame(width: 330, height: 1500)
             .background(Color(nsColor: .windowBackgroundColor))
@@ -277,7 +287,10 @@ private struct Fixture {
         report.voxelSizeMM = 0.75; report.usedGPU = true; report.vertexCount = 412_118; report.triangleCount = 823_904
         report.durations = ["segmentation": 0.6, "registration": 2.4, "registration check": 0.2, "bounds": 0.1,
                             "fusion": 1.1, "cleanup": 0.8, "texturing": 3.2, "total": 8.5]
-        report.notes = ["Synthetic fixture"]
+        // The notes of a real run (they are as long as this).
+        report.notes = ["initial poses: 14 landmark fits, 0 Vision rotation + landmark translation, 0 Vision rotation "
+                        + "+ head centroid",
+                        "keyframes excluded after registration (surface does not fit): 7, 12"]
         let mesh = ReconMesh(positions: [SIMD3(0, 0, 0), SIMD3(0.1, 0, 0), SIMD3(0, 0.1, 0)], indices: [0, 1, 2])
         let result = ReconstructionResult(mesh: mesh, texture: nil, cameraPoses: [], exportTransform: matrix_identity_float4x4,
                                           report: report)

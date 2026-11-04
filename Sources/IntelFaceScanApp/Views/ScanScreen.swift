@@ -44,6 +44,8 @@ private struct InstructionBanner: View {
                     .foregroundStyle(.yellow)
             }
         }
+        // Centered when the preview is narrow and the instruction wraps (the Polish ones do).
+        .multilineTextAlignment(.center)
         .padding(.horizontal, 18).padding(.vertical, 10)
         .background(.black.opacity(text.isEmpty && update?.rejection == nil ? 0 : 0.6), in: RoundedRectangle(cornerRadius: 12))
         .animation(.easeInOut(duration: 0.2), value: text)
