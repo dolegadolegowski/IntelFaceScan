@@ -186,13 +186,39 @@ extension ReconMesh {
         return mesh
     }
 
-    /// Runs body on a temporary FaceReconCore copy and replaces self with the (modified) result.
+    /// Runs body on a temporary FaceReconCore copy and replaces self with the (modified) result. The synthesized flags
+    /// (which fr_mesh does not carry) stay with their vertices: by position where the vertices were renumbered
+    /// (decimation keeps the positions of the vertices it keeps; UV seam copies share their vertex's position; xatlas
+    /// reorders the vertices even when it splits none), by index where they only moved (smoothing).
     public mutating func withCoreMesh<R>(_ body: (UnsafeMutablePointer<fr_mesh>) throws -> R) throws -> R {
         let mesh = try makeCoreMesh()
         defer { fr_mesh_free(mesh) }
         let result = try body(mesh)
+        let flags = synthesized.count == vertexCount ? synthesized : []
+        let before = flags.isEmpty ? [] : positions
         self = ReconMesh(core: mesh)
+        if !flags.isEmpty {
+            synthesized = Self.carry(flags, from: before, to: positions)
+        }
         return result
+    }
+
+    /// Flags of `old` vertices for the `new` ones.
+    static func carry(_ flags: [Bool], from old: [SIMD3<Float>], to new: [SIMD3<Float>]) -> [Bool] {
+        if old == new { return flags }
+        var marked = Set<SIMD3<Float>>(), known = Set<SIMD3<Float>>()
+        for (p, flag) in zip(old, flags) {
+            known.insert(p)
+            if flag { marked.insert(p) }
+        }
+        // The same vertices, moved in place (smoothing): the indices still match, the positions do not.
+        if old.count == new.count && !new.allSatisfy({ known.contains($0) }) { return flags }
+        return new.map { marked.contains($0) }
+    }
+
+    /// The synthesized flags as bytes for the C API (empty when there are none).
+    var synthesizedBytes: [UInt8] {
+        synthesized.count == vertexCount && synthesized.contains(true) ? synthesized.map { $0 ? 1 : 0 } : []
     }
 }
 

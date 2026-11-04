@@ -71,11 +71,15 @@ fr_status prepare_views( const fr_mesh & mesh, const fr_rgbd_frame * frames, con
                          const char * where );
 
 // Least-squares per-frame, per-channel gains from the colors of shared surface points (log domain, robust).
-void estimate_gains( const float * positions, const float * normals, uint32_t vertex_count, view_set & views );
+// synthesized (nullable, per vertex): surface that was not measured, left out.
+void estimate_gains( const float * positions, const float * normals, uint32_t vertex_count, const uint8_t * synthesized,
+                     view_set & views );
 
-// Blended vertex colors (0..255); vertices no frame sees get colors diffused from their seen neighbors.
-// Returns false when no vertex is seen at all (then every vertex is mid gray).
-bool vertex_colors( const fr_mesh & mesh, const float * normals, const view_set & views, std::vector< float > & rgb );
+// Blended vertex colors (0..255). Vertices no frame sees, and synthesized ones (nullable flags, per vertex; never
+// colored from the frames), get a smooth (harmonic) interpolation of the surrounding seen colors, whose border values
+// are blurred over a few rings first. Returns false when no vertex is seen at all (then every vertex is mid gray).
+bool vertex_colors( const fr_mesh & mesh, const float * normals, const view_set & views, const uint8_t * synthesized,
+                    std::vector< float > & rgb );
 
 // Validates fr_texture_params.
 fr_status check_params( const fr_texture_params * params, const char * where, bool need_texture_size );

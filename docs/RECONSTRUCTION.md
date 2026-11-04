@@ -467,8 +467,9 @@ mean 0.186 / p95 0.331 mm, Poisson depth 9–11 0.344–0.410 / 0.64–1.13 mm.
   * about 690 small noise islands, all under 100 vertices.
 
   The islands and tiny holes are what `MeshProcessing.clean` removes and fills (small components, holes up to
-  `maxHoleEdges`). The large back-of-head opening is a coverage limit of the scan poses, not of the fusion: closing
-  it needs views from behind, or hole filling over a large region.
+  `maxHolePerimeterMM`, 250 mm). The large back-of-head opening is a coverage limit of the scan poses, not of the
+  fusion: with `closeHead` (the default) cleanup closes it with a synthesized surface ("Closing the head"); a
+  measured back needs views from behind.
 
 ## Voxel size and truncation
 
@@ -684,6 +685,128 @@ head off the optical axis and render the color through the D455 lens.
 * Missing on purpose: specular highlights, rolling shutter and motion blur during the hold, and a depth bias that
   depends on the surface material (skin subsurface scattering). Real recordings are the only check for those.
 
+## Mesh cleanup (`MeshProcessing.clean`)
+
+The mesh module's steps after the chin crop, all in FaceReconCore (`fr_mesh.h`):
+
+1. **Weld** vertices within 1 µm (`fr_mesh_clean`), then drop degenerate and duplicate triangles, and on every edge
+   that is still used by more than two triangles or twice in one direction all but the largest triangle per
+   direction. Marching-cubes vertices near a voxel corner lie within a micrometer of each other (318 such pairs on
+   the synthetic head below), and welding them collapses edges without regard to the topology: four vertices merged
+   into one left an edge with three triangles (one a 10⁻⁴ mm² sliver) — the non-manifold edge every export of that
+   scan carried. Hole filling closes the gap the removed triangle leaves.
+2. **Small components** (below 5 % of the largest; connected through edges).
+3. **Smoothing**: bilateral normal filtering, then Taubin (`fr_mesh_smooth`).
+4. **Hole filling and closing** (`fr_mesh_fill_holes_ex`, below).
+5. **Decimation** to `targetTriangles` if set (`fr_mesh_decimate`, meshoptimizer). The simplifier does not keep the
+   surface manifold (a closed 556k-triangle head decimated to 60k had 74 edges with three or four triangles, and two
+   fins: opposed copies of a triangle hanging off a vertex, which a viewer's weld turns into a lone open triangle; at
+   30k one triangle was cut loose). Fins and loose triangles go, then the extra triangles on non-manifold edges, and
+   the small holes that leaves are filled again. Vertices where two sheets touch (a few at 60k–200k) can remain.
+
+`MeshProcessing.clean` returns a summary (holes filled, loops left open, closed or not, trimmed and folded
+triangles, filled area) and sets `ReconMesh.synthesized` for the vertices the filling created.
+
+### Holes
+
+Every boundary loop but the longest one is a hole. A hole whose border is at most `maxHolePerimeterMM` long
+(250 mm; `maxHoleEdges`, 4096, is only a safety cap) is triangulated with Liepa's minimal dihedral-angle / area
+dynamic program, refined to the density of the surrounding mesh and faired as a thin plate. The limit used to be 400
+edges, which left the openings behind both ears open: on the synthetic head below they are 166 mm / 430 edges and
+162 mm / 420 edges at 0.75 mm voxels (the border of a marching-cubes surface is ragged: ~0.4 mm per edge), and more
+edges at finer voxels.
+
+A patch is checked against the surrounding surface: a triangle is folded when its normal points against the summed
+area-weighted normals of its corners (the test of the smoothing's fold guard), counted for the patch and for the
+measured triangles at its border. A folded patch is flipped to Delaunay and faired again, then smoothed locally, then
+replaced by the unrefined triangulation, and otherwise discarded. On the synthetic head the filling took the mesh from
+14 folded triangles after smoothing to 32 (580 holes); now it adds none, and 10 holes whose every patch folds stay
+open (one is the 162 mm opening behind the left ear, a deep cup whose best patch folds 82 of 418 triangles) — unless
+the head is closed, which asks for a watertight result: then every loop is filled with its least folded patch.
+
+### Closing the head (`ReconstructionOptions.closeHead`, default on)
+
+The guided scan never sees the back of the head (|yaw| ≤ 45°), so the longest loop is the open back joined with the
+neck cut: 1777 mm and 4661 edges on the synthetic head. Left open, the model is invisible from behind in one-sided
+viewers (QuickLook, Preview cull back faces) and shows its inside from the side. `closeHead` closes it into a
+watertight bust:
+
+1. **Fringe.** The low-weight fringe of the fusion along the loop (teeth with two border edges, triangles folded over
+   by more than 75° against a neighbor) is trimmed, pieces that cuts off go, and the notches of the zigzag border get
+   triangles of loop vertices only.
+2. **Center and cut.** A sphere fitted to the measured band along the loop (a tenth of its extent wide, without the
+   crop) gives the head center; the planar run of the loop gives the chin crop's plane (crop vertices lie on it to
+   float precision: 597 consecutive loop vertices within 1.3 µm).
+3. **Triangulation.** The loop's directions from the center, stereographically projected from the front, form a
+   nearly simple polygon (local zigzags are straightened); ear clipping, then Liepa refinement graded from the loop's
+   edge length up to 4× the mean edge length (2.6 mm here) and Delaunay flips, all in that plane, where they cannot
+   fold.
+4. **Shape.** The new vertices keep their directions; their distance from the center is a thin plate of the loop's
+   distances (cotangent weights on the second solve), bounded within ±20 % around the membrane solution, and capped
+   where the ray leaves through the crop plane (an active set: held vertices are boundary values). A head is
+   star-shaped around its center and its distance function smooth, so the closing continues its roundness — a
+   Cartesian thin plate flattens such an opening (on a 100 mm sphere opened above y = 20 mm it stayed 10.9 mm off
+   the sphere on average, 26 mm at most; in spherical coordinates the sphere comes back exactly). The loop vertices
+   contribute their distance, not its slope: matching the steep slope at an ear's rim overshot into spikes. Where
+   rays leave through the crop the closing is a flat cap: the neck becomes the flat bottom of a bust.
+5. **Repair.** Remaining folds are smoothed locally. Measured triangles the closing still folds, and those across the
+   loop edges of folded closing triangles, are trimmed and the closing is done again (at most five attempts, ~0.7 s
+   each; the filled holes stay): on the two synthetic heads 48 and 141 folded triangles after three attempts, 37 and
+   110 after five.
+
+Without a usable center (the band does not face away from it) the closing falls back to a refined fan faired in
+Cartesian coordinates. Every other loop is filled regardless of the perimeter limit, so the result is watertight;
+loops beyond it (other openings of the same kind: 462 mm and 316 mm on the head of the 40-keyframe benchmark) are
+trimmed and closed like the longest one.
+
+Measured on the synthetic dataset of `ifscan synth --lighting 0.6` (10 keyframes, 1280×800, 0.75 mm voxels), release
+build, exported OBJ welded by position as viewers do:
+
+| | before | `closeHead` off | `closeHead` on |
+|---|---|---|---|
+| boundary loops | 4 (1777, 166, 162 mm; a 2-edge pinch) | 11 (1777 mm open; 10 holes left by the fold check) | 0: every edge in exactly two triangles, consistently oriented, outward |
+| non-manifold edges | 1 | 0 | 0 |
+| folded triangles | 32 | 13–14 | 28–53 (varies between runs: the Metal fusion is not bit-exact) |
+| intersecting triangle pairs | 145 | 138 | 143–162 |
+| synthesized area | – | 15 cm² of 857 cm² | 549 cm² of 1390 cm² (trimmed fringe: 1326 triangles) |
+| surface to ground truth, measured part: mean / p95 / max | 0.129 / 0.390 / 2.36 mm | 0.128 / 0.387 / 2.54 mm | 0.128 / 0.389 / 2.31 mm |
+| surface to ground truth, whole mesh: mean / p95 / max | 0.129 / 0.390 / 2.36 mm | 0.130 / 0.393 / 2.36 mm | 3.54 / 16.9 / 54.5 mm |
+| cleanup | 0.4 s | 1.2 s | 4.3–5.4 s |
+
+Intersecting pairs are triangles that share no vertex and cross each other: tiny ones along ragged borders and in the
+ears; the measured surface has about a hundred of its own. The measured surface is unchanged. Measured against the
+ground truth as a whole, the closed mesh is far off, by design: the synthesized surface is a plausible guess of what
+no keyframe saw. The flat cap lies across the true neck (which goes on down), 25–55 mm from its wall, and the back of
+the neck is fuller than the truth. Accuracy figures belong to `ReconMesh.measuredSurface`;
+`ReconstructionReport.synthesizedAreaMM2` (and a note) says how much was made up.
+
+SceneKit renders of the export (QuickLook's single-sided materials) from the front, both sides, behind, below and
+above show a closed head: a round back continuing the skull, the openings behind the ears closed, a flat neck. Small
+pinches remain where the cap meets the dome at the back corners of the neck.
+
+## Texturing (`Texturing`)
+
+`colorizeVertices` and `unwrapAndBake` blend the best views per surface point (view angle, quality weight,
+feathering at silhouettes, depth test, exposure compensation). The synthesized vertices (`ReconMesh.synthesized`,
+passed as `fr_texture_params.synthesized`) are never colored from the keyframes — the frames would project whatever
+they saw along those rays onto a guessed surface — and are left out of the exposure compensation. They, and measured
+vertices no frame sees, take a harmonic interpolation (uniform graph Laplacian) of the surrounding seen colors, whose
+border values are blurred over three rings first: on a head the back fades smoothly from the hair at the crown to the
+skin of the neck, instead of the radial streaks of the earlier wave-by-wave diffusion or one global mean color. The
+texture fades the frames out toward synthesized corners and uses the interpolated colors there. The flags follow the
+vertices through UV seam splits and decimation (`withCoreMesh`, by position).
+
+UV unwrapping (xatlas, faces split into chart groups of 10 000) dominates the texturing time: 13–18 s for the
+550k-triangle closed head above, 11.4 s in the 40-keyframe benchmark (10.5 s at integration, before the closing added
+40 % of surface).
+
+## Export (`MeshExport`)
+
+OBJ (+MTL +PNG) and PLY in millimeters in the export frame (+Y up, face toward +Z, origin at the head center). A
+textured OBJ carries its color in the texture only: viewers multiply the texture by "v x y z r g b" colors, so
+`ExportOptions.includeVertexColors` applies to untextured OBJs and to the PLY. UV seams split vertices in the file;
+welded by position (as viewers do), the closed export is watertight.
+
 ## Timings
 
 Measured on an Apple M3 Ultra (28 CPU cores, 96 GB) in a release build: the full pipeline on 40 keyframes at
@@ -697,19 +820,29 @@ reference machine is an M4 Pro; this one is somewhat faster on GPU and CPU throu
 | registration check (pairs across pose groups) | 0.59 |
 | bounds | 0.24–0.38 |
 | fusion (TSDF, Metal; CPU path 0.4 s) and marching cubes | 0.17 |
-| cleanup (crop + `MeshProcessing.clean`) | 0.25 |
-| texturing (mesh module, full-resolution mesh) | 10.5 |
-| **total** | **13.5** |
+| cleanup (crop + `MeshProcessing.clean`) | 0.25 (closing the head: 6.1) |
+| texturing (mesh module, full-resolution mesh) | 10.5 (closed head, 40 % more surface: 11.4) |
+| **total** | **13.5** (closed head: 20.2) |
 
-This is inside the 60 s target; texturing dominates. The registration check was 0.15 s when it compared each frame
-with one view only; it now evaluates about 6 pairs per frame. Lens undistortion, when the keyframes carry
+This is inside the 60 s target; texturing dominates. The figures in parentheses are the same benchmark with
+`closeHead` on (the default since then), measured separately. The registration check was 0.15 s when it compared each
+frame with one view only; it now evaluates about 6 pairs per frame. Lens undistortion, when the keyframes carry
 distortion, adds about 15 ms for 10–18 keyframes at 1280×800 (`ifscan reconstruct`, release; this benchmark has no
 distortion). The debug-build unit tests run the 13-keyframe 640×400 pipeline in 1–3 s plus texturing.
 
 ## Known limits
 
-* **The back of the head is not observed** by the guided-scan poses (|yaw| ≤ 45°), so the TSDF mesh is open there.
-  A closed model needs back or over-the-shoulder views from the scan module, or large-hole filling.
+* **The back of the head is not observed** by the guided-scan poses (|yaw| ≤ 45°). `closeHead` (default) closes it
+  with a synthesized surface ("Closing the head"): plausible, not measured — 40 % of the closed head's surface, a
+  flat cap at the chin crop, and accuracy figures only for `ReconMesh.measuredSurface`. Tests that compare a whole
+  closed mesh with a ground truth measure the guess (3.5 mm mean on the synthetic head, 25–55 mm on the cap inside
+  the true neck). A measured back needs back or over-the-shoulder views from the scan module.
+* **The closing is star-shaped** around the fitted head center: where the measured border is not (an ear's rim on
+  the loop), the closing meets it with a crease rather than following it; small pinches remain where the flat cap
+  meets the dome at the back corners of the neck.
+* **Decimation folds triangles.** meshoptimizer's simplifier keeps the surface manifold after the repair, but on the
+  closed head decimated to 60k triangles about 480 triangles end up folded by the fold test (about 510 on the open
+  head before the closing), against about 30–50 at full resolution.
 * **Frames that cannot be registered** keep their initial pose inside `fr_register_frames`. The C API has no
   per-frame status, so the pipeline re-scores the registered clouds (`RegistrationCheck`, below) and leaves failing
   frames out of fusion.
@@ -723,7 +856,7 @@ distortion). The debug-build unit tests run the 13-keyframe 640×400 pipeline in
   landmark pairs with their depth, so the 2D split is not quite symmetric: 2.3° of roll for a head 10 cm right and
   5 cm down (synthetic); 3D landmarks would avoid it. A systematic Vision yaw bias for a person would tilt the export
   frame by that bias. A symmetry-plane fit on the mesh would remove both.
-* **Chin crop fallback.** While `fr_mesh_crop_plane` is not implemented, the pipeline drops whole triangles below
-  the plane (jagged border) and notes it.
+* **Chin crop fallback.** `fr_mesh_crop_plane` cuts the triangles at the plane; only if it fails does the pipeline
+  drop whole triangles below the plane (jagged border, and no planar run for the closing's flat cap) and note it.
 * **Vertex colors from the TSDF** are count-averaged in RGBA8. They are a fallback: the texture and vertex colors
   of the mesh module replace them.

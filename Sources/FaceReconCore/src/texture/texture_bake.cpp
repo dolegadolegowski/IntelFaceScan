@@ -263,9 +263,9 @@ fr_status fr_bake_texture( const fr_mesh * mesh, const fr_rgbd_frame * frames, c
         if( ! cancel.report( 0.1f, "texture: exposure compensation" ) )
             return fr::fail( FR_ERR_CANCELLED, "fr_bake_texture: cancelled" );
         if( params->exposure_compensation )
-            estimate_gains( mesh->positions, normals, mesh->vertex_count, views );
+            estimate_gains( mesh->positions, normals, mesh->vertex_count, params->synthesized, views );
         std::vector< float > fallback;
-        if( ! vertex_colors( *mesh, normals, views, fallback ) )
+        if( ! vertex_colors( *mesh, normals, views, params->synthesized, fallback ) )
             return fr::fail( FR_ERR_NOT_ENOUGH_DATA, "fr_bake_texture: no frame sees the mesh (check the poses)" );
         if( ! cancel.report( 0.2f, "texture: rasterizing the atlas" ) )
             return fr::fail( FR_ERR_CANCELLED, "fr_bake_texture: cancelled" );
@@ -310,23 +310,27 @@ fr_status fr_bake_texture( const fr_mesh * mesh, const fr_rgbd_frame * frames, c
                             li /= lsum;
                         const uint32_t * tri = mesh->indices + size_t( f ) * 3;
                         vec3 p, n;
-                        float fb[3] = { 0, 0, 0 };
+                        float fb[3] = { 0, 0, 0 }, synthetic = 0;
                         for( int k = 0; k < 3; ++k )
                         {
                             p += vec3::load( mesh->positions + size_t( tri[k] ) * 3 ) * l[k];
                             n += vec3::load( normals + size_t( tri[k] ) * 3 ) * l[k];
                             for( int c = 0; c < 3; ++c )
                                 fb[c] += fallback[size_t( tri[k] ) * 3 + c] * l[k];
+                            if( params->synthesized && params->synthesized[tri[k]] )
+                                synthetic += l[k];
                         }
                         n = normalized( n );
-                        const int found = views.evaluate( p, n, samples, views.blend );
-                        float wsum = fallback_weight, rgb[3] = { fb[0] * fallback_weight, fb[1] * fallback_weight,
-                                                                 fb[2] * fallback_weight };
+                        // Synthesized surface takes the interpolated colors; the frames fade out toward it.
+                        const int found = synthetic < 1.f ? views.evaluate( p, n, samples, views.blend ) : 0;
+                        const float own = std::max( fallback_weight, synthetic );
+                        float wsum = own, rgb[3] = { fb[0] * own, fb[1] * own, fb[2] * own };
                         for( int i = 0; i < found; ++i )
                         {
-                            wsum += samples[i].weight;
+                            const float w = samples[i].weight * ( 1.f - synthetic );
+                            wsum += w;
                             for( int c = 0; c < 3; ++c )
-                                rgb[c] += samples[i].weight * samples[i].rgb[c];
+                                rgb[c] += w * samples[i].rgb[c];
                         }
                         uint8_t * px = texture->rgba + idx * 4;
                         for( int c = 0; c < 3; ++c )
@@ -367,9 +371,9 @@ fr_status fr_colorize_vertices( fr_mesh * mesh, const fr_rgbd_frame * frames, co
             != FR_OK )
             return s;
         if( params->exposure_compensation )
-            estimate_gains( mesh->positions, normals, mesh->vertex_count, views );
+            estimate_gains( mesh->positions, normals, mesh->vertex_count, params->synthesized, views );
         std::vector< float > rgb;
-        if( ! vertex_colors( *mesh, normals, views, rgb ) )
+        if( ! vertex_colors( *mesh, normals, views, params->synthesized, rgb ) )
             return fr::fail( FR_ERR_NOT_ENOUGH_DATA, "fr_colorize_vertices: no frame sees the mesh (check the poses)" );
         const uint32_t flags = FR_MESH_COLORS | ( mesh->normals ? FR_MESH_NORMALS : 0u ) | ( mesh->uvs ? FR_MESH_UVS : 0u );
         if( ( s = fr_mesh_set_attributes( mesh, flags ) ) != FR_OK )

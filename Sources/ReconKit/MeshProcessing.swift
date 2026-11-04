@@ -1,6 +1,7 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
-// Mesh post-processing of the reconstructed surface: cleanup, detail-preserving smoothing, hole filling, decimation.
+// Mesh post-processing of the reconstructed surface: cleanup, detail-preserving smoothing, hole filling (and closing
+// the open back of the head), decimation.
 
 import FaceReconCore
 import Foundation
@@ -10,10 +11,30 @@ public enum MeshProcessing {
     /// below the 0.5-1 mm voxel size).
     static let weldEpsilonM: Float = 1e-6
 
-    /// Removes small components, smooths (detail preserving), fills small holes, optionally decimates.
-    public static func clean(_ mesh: inout ReconMesh, options: ReconstructionOptions) throws {
-        guard mesh.triangleCount > 0 else { return }
+    /// What the cleanup did to the boundary.
+    public struct Summary: Sendable, Equatable {
+        /// Holes filled (not counting the closed head).
+        public var filledHoles = 0
+        /// Boundary loops left open (0: watertight).
+        public var openLoops = 0
+        /// The open back of the head and the neck cut were closed.
+        public var closedHead = false
+        /// Fringe triangles removed along that border before closing it.
+        public var trimmedTriangles = 0
+        /// Filling triangles still folded against the surrounding surface.
+        public var foldedTriangles = 0
+        /// Area of all filling (synthesized) triangles, mm².
+        public var filledAreaMM2: Float = 0
+    }
+
+    /// Removes small components, smooths (detail preserving), fills holes and (with `closeHead`) closes the head,
+    /// optionally decimates. Sets `mesh.synthesized` for the vertices the filling created.
+    @discardableResult
+    public static func clean(_ mesh: inout ReconMesh, options: ReconstructionOptions) throws -> Summary {
+        var summary = Summary()
+        guard mesh.triangleCount > 0 else { return summary }
         try validate(mesh)
+        var firstNew: Int?
         try mesh.withCoreMesh { m in
             try checkCore(fr_mesh_clean(m, weldEpsilonM), "cleanup")
             if options.minComponentFraction > 0 {
@@ -24,13 +45,42 @@ public enum MeshProcessing {
                 try checkCore(fr_mesh_smooth(m, &params), "smoothing")
             }
             if options.fillHoles && options.maxHoleEdges >= 3 {
-                try checkCore(fr_mesh_fill_holes(m, UInt32(clamping: options.maxHoleEdges), nil), "hole filling")
-            }
-            if let target = options.targetTriangles, target > 0, target < Int(m.pointee.triangle_count) {
-                try checkCore(fr_mesh_decimate(m, UInt32(clamping: target), 0), "decimation")
+                var params = fillParameters(options)
+                var report = fr_fill_report()
+                try checkCore(fr_mesh_fill_holes_ex(m, &params, &report), "hole filling")
+                summary.filledHoles = Int(report.filled_holes)
+                summary.openLoops = Int(report.open_loops)
+                summary.closedHead = report.closed_largest != 0
+                summary.trimmedTriangles = Int(report.trimmed_triangles)
+                summary.foldedTriangles = Int(report.folded_triangles)
+                summary.filledAreaMM2 = report.filled_area_m2 * 1e6
+                firstNew = Int(report.first_new_vertex)
             }
             try checkCore(fr_mesh_compute_normals(m), "normals")
         }
+        if let firstNew {
+            // Flags from an earlier filling (carried through withCoreMesh) stay.
+            let earlier = mesh.synthesized.count == mesh.vertexCount ? mesh.synthesized : []
+            let flags = (0 ..< mesh.vertexCount).map { $0 >= firstNew || (!earlier.isEmpty && earlier[$0]) }
+            mesh.synthesized = flags.contains(true) ? flags : []
+        }
+        // Decimation renumbers the vertices: separate, so that the flags follow them (withCoreMesh).
+        if let target = options.targetTriangles, target > 0, target < mesh.triangleCount {
+            try mesh.withCoreMesh { m in
+                try checkCore(fr_mesh_decimate(m, UInt32(clamping: target), 0), "decimation")
+                try checkCore(fr_mesh_compute_normals(m), "normals")
+            }
+        }
+        return summary
+    }
+
+    static func fillParameters(_ options: ReconstructionOptions) -> fr_fill_params {
+        var params = fr_fill_params()
+        fr_fill_params_default(&params)
+        params.max_hole_perimeter_m = options.maxHolePerimeterMM.isFinite ? max(0, options.maxHolePerimeterMM) / 1000 : 0
+        params.max_hole_edges = UInt32(clamping: options.maxHoleEdges)
+        params.close_largest = options.closeHead ? 1 : 0
+        return params
     }
 
     /// Taubin passes as requested, preceded by bilateral normal filtering that keeps creases (lips, eyelids, nostrils)
@@ -55,5 +105,8 @@ public enum MeshProcessing {
         guard n <= Int(UInt32.max) else { throw invalid("too many vertices") }
         guard mesh.normals.isEmpty || mesh.normals.count == n, mesh.colors.isEmpty || mesh.colors.count == n,
               mesh.uvs.isEmpty || mesh.uvs.count == n else { throw invalid("attribute arrays do not match the vertices") }
+        guard mesh.synthesized.isEmpty || mesh.synthesized.count == n else {
+            throw invalid("synthesized flags do not match the vertices")
+        }
     }
 }
