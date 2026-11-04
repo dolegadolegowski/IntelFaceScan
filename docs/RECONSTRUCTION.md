@@ -4,7 +4,7 @@ This document covers how IntelFaceScan turns the guided-scan keyframes into a he
 registration, the pose graph, TSDF fusion on Metal with marching cubes, and screened Poisson as the comparison
 method. It records the voxel size choice and the measurements behind it. The code lives in
 `Sources/FaceReconCore/src/{registration,fusion,third_party/poisson_*}` (C API: `fr_registration.h`,
-`fr_fusion.h`) and `Sources/ReconKit/{ReconstructionPipeline,Registration*,Segmentation*}.swift`.
+`fr_fusion.h`) and `Sources/ReconKit/{ReconstructionPipeline,Registration*,Segmentation*,LensUndistortion}.swift`.
 
 Conventions follow `fr_types.h`. Units are meters. The camera frame is +X right, +Y down, +Z forward. Poses are
 `world_from_camera`, and the **world is the camera frame of the first usable frontal keyframe** (the reference,
@@ -14,10 +14,10 @@ frame 0 of the registration).
 
 | stage (progress) | what happens | where |
 |---|---|---|
-| preparing | order keyframes front, up, down, left, right, diagonals (stable); drop frames with inconsistent image data | Swift |
+| preparing | order keyframes front, up, down, left, right, diagonals (stable); drop frames with inconsistent image data; remove the color lens distortion (below) | Swift, `LensUndistortion.swift` |
 | segmentation | head masks per keyframe (below); at least 5 usable keyframes including a frontal one, otherwise `notEnoughKeyframes` / `core(stage: "validation")` | `SegmentationHeadMask.swift` |
 | registration | initial poses, `fr_register_frames` (clouds, pairwise ICP, loop closures) | `RegistrationInitialPoses.swift`, `fr_register_frames.cpp` |
-| globalOptimization | pose graph (reported by the core's progress), then a registration check that drops frames whose surface does not fit (below) | `fr_pose_graph.cpp`, `RegistrationCheck` |
+| globalOptimization | pose graph (reported by the core's progress), then a registration check that drops frames whose surface or face landmarks do not fit (below) | `fr_pose_graph.cpp`, `RegistrationCheck` |
 | fusion | robust bounds of the registered clouds + margin, then TSDF integration on Metal (CPU fallback), or screened Poisson | `fr_tsdf.cpp`, `tsdf_metal.mm`, `fr_poisson.cpp` |
 | meshing | marching cubes | `marching_cubes.cpp` |
 | cleanup | crop below the chin unless `keepShoulders`, then `MeshProcessing.clean` | pipeline + mesh module |
@@ -31,6 +31,81 @@ inside the mesh module's steps (cleanup, texturing) becomes a report note rather
 not lost. `ReconstructionResult.cameraPoses` holds one pose per *used* keyframe, in the original capture order,
 which is the same order passed to texturing. `report.usedFrames` gives the count, and the notes name any excluded
 keyframes.
+
+### Lens distortion
+
+FaceReconCore treats every camera as an ideal pinhole (`fr_types.h`): clouds, the TSDF on the CPU and on Metal, and
+texture projection use fx, fy, cx, cy only. The D455 color sensor reports inverse Brown-Conrady coefficients (typical
+k1 −0.056, k2 0.068, p1 −0.0006, p2 0.0006, k3 −0.022). They move a pixel by 0.1 px near the image center, by 1–2
+px on a face 15 cm off the optical axis at 0.6 m, and by up to 6 px at the image edges. The pipeline therefore remaps
+every keyframe **once**, before segmentation, to the pinhole camera with the same fx, fy, ppx, ppy, and marks its
+intrinsics distortion-free: color bilinearly, the person mask by nearest neighbor, the Vision landmarks and the face
+rectangle through the inverse model. Everything after it, including texturing, sees one consistent pinhole camera.
+Keyframes without distortion pass unchanged, and the report notes the removed model.
+
+**Math.** `LensDistortion` ports `rs2_project_point_to_pixel` and `rs2_deproject_pixel_to_point` (librealsense
+2.58.4, `src/rs.cpp`) operation by operation in Float. In 2.58 the polynomial of every Brown-Conrady variant maps
+ideal (pinhole) normalized coordinates to image coordinates in closed form, and the inverse takes 10 fixed-point
+iterations. Brown-Conrady evaluates the tangential terms before the radial factor; the inverse and modified variants
+after it. librealsense cannot deproject the modified model; the port inverts its forward formula with the inverse
+Brown-Conrady iteration. A test compares against values computed by the helper's SDK build (4 points × 3 models,
+within 2·10⁻⁴ px; round trip within 10⁻⁶ m).
+
+**What the aligned depth pixels mean.** The generic `align` (`src/proc/align.cpp`) maps each depth pixel's corners
+into the color image with `rs2_project_point_to_pixel`, so its aligned depth follows the color distortion. But it
+is compiled only without SIMD. On Apple Silicon the helper's SDK uses the NEON align (`src/proc/neon/neon-align.cpp`,
+`BUILD_WITH_NEON` is on by default for arm64), and the SSE align on x86 behaves the same: it applies the color
+distortion for modified Brown-Conrady only, and projects every other model, inverse Brown-Conrady included, as an
+ideal pinhole. The aligned frame still reports the color intrinsics with their coefficients. Measured with the SDK
+build (software device, identity extrinsics, equal camera matrices): a depth pixel at (1200, 400) lands on color pixel
+(1200, 400) with the D455 coefficients as inverse Brown-Conrady, and on (1193, 399) with the same coefficients as
+modified Brown-Conrady (`rs2_project_point_to_pixel`: 1193.66, 399.72). **A D455's aligned depth is therefore
+already in the pinhole geometry; only color, mask and landmarks are distorted.** The pipeline remaps the depth only
+when it follows the distortion (`LensDistortion.alignedDepthFollowsDistortion`: modified Brown-Conrady). It
+interpolates bilinearly where the four source pixels are valid and lie on one surface (spread within max(5 mm,
+2 z / fx · tan 75°), the silhouette test of `fr_cloud_from_rgbd`), and takes the nearest pixel otherwise, so it never
+mixes depths of different surfaces. Nearest neighbor everywhere leaves up to half a pixel of lateral jitter in sloped
+surfaces, the same in every keyframe; on the off-center scan below that cost 0.15° mean rotation error and 0.17 mm
+mean surface error.
+
+**Measured.** One view, 1280×800, head 16 cm right and 8 cm down, rendered through the lens and as a pinhole
+(`ReconLensDistortionTests`). The landmarks are off by up to 1.79 px, and 0.0001 px after undistortion. The mean
+color difference to the pinhole render on the head drops from 2.10 to 0.92 levels; the rest is bilinear smoothing.
+Mask pixels that disagree drop from 488 to 129. When the depth follows the distortion, 81 % of it is within 1 mm of
+the pinhole render before and 99.7 % after (mean 0.82 → 0.03 mm), with no value between two surfaces at any of
+the 2,841 silhouette pixels. Full pipeline, 5 poses × 2 at 1280×800, `SyntheticScan` lens option (`IFS_RECON_STUDY=1`,
+`lensDistortionTable`):
+
+| scan | undistorted | rotation error mean / max | head misalignment max | surface mean / p95 |
+|---|---|---|---|---|
+| pinhole, centered | – | 0.035° / 0.066° | 0.16 mm | 0.128 / 0.386 mm |
+| pinhole, 15 cm right, 6 cm down | – | 0.043° / 0.097° | 0.22 mm | 0.126 / 0.373 mm |
+| D455 color distortion, centered | yes | 0.035° / 0.066° | 0.16 mm | 0.128 / 0.388 mm |
+| D455 color distortion, centered | no | 0.036° / 0.067° | 0.16 mm | 0.128 / 0.385 mm |
+| D455 color distortion, off-center | yes | 0.043° / 0.092° | 0.21 mm | 0.125 / 0.372 mm |
+| D455 color distortion, off-center | no | 0.042° / 0.088° | 0.20 mm | 0.126 / 0.373 mm |
+| depth distorted too, off-center | yes | 0.021° / 0.034° | 0.11 mm | 0.098 / 0.280 mm |
+| depth distorted too, off-center | no | 0.121° / 0.330° | 1.47 mm | 0.521 / 1.626 mm |
+
+* With the D455 (depth already pinhole) the geometry does not change: what undistortion fixes there is the
+  registration of color, mask and landmarks to the depth (texture up to 1–2 px off on an off-center face, 6 px at the
+  image edges; landmark depths looked up beside the landmark).
+* Depth that follows the distortion warps each view differently; read as a pinhole it costs 4× the surface error.
+  Undistorted, the scan is slightly better than the pinhole render, because bilinear resampling averages depth noise.
+
+The same through `ifscan reconstruct` (release), on datasets written by `IFS_WRITE_LENS_DATASETS` (lens intrinsics in
+the manifest, ground truth), before (933c323) and after this change, which also takes Vision's line of sight out of
+the initial and export rotations ("Initial poses"); export error = angle between the export rotation and the true
+one:
+
+| dataset | ifscan | rotation error mean / max | head misalignment max | surface mean / p95 | export error |
+|---|---|---|---|---|---|
+| D455 distortion, head 10 cm right / 5 cm down, 9 poses × 2 | before | 0.044° / 0.077° | 0.21 mm | 0.082 / 0.222 mm | 7.8° |
+| same | after | 0.045° / 0.079° | 0.22 mm | 0.084 / 0.230 mm | 2.3° (roll) |
+| depth distorted too, 15 cm right / 6 cm down, 5 poses × 2 | before | 0.122° / 0.327° | 1.47 mm | 0.523 / 1.632 mm | 11.6° |
+| same | after | 0.023° / 0.037° | 0.12 mm | 0.098 / 0.281 mm | 1.4° |
+
+Undistortion takes 15 ms for 10–18 keyframes at 1280×800 (release, all cores; the map is computed once per camera).
 
 ### Segmentation
 
@@ -52,7 +127,11 @@ the shoulders sit in a different place relative to the head and would smear.
 **Roll from landmarks.** The landmark ordering is not relied on. The landmarks are leveled with the current roll
 estimate, and the upper part of the face (excluding the center strip) is split into left and right halves. The
 line between the centroids of the two halves is parallel to the eye line for any symmetric landmark
-constellation. Three iterations converge. The estimate falls back to the Vision roll when there are fewer than 8
+constellation. Three iterations converge. The weights ramp up over 10 % of the face size past the height and
+center-strip limits: with hard limits, the jaw contour points at eye height joined one half and not the other with a
+pixel of noise or a few degrees of yaw (200 near-frontal synthetic constellations with 1 px noise: 1.33° mean, 3.5°
+p95 error with hard limits, 0.47° / 1.08° with ramps; the default `ifscan synth` scan was exported rolled by 3.1°,
+now 0.02°). The estimate falls back to the Vision roll when there are fewer than 8
 landmarks or the result is more than 15° away from Vision.
 
 ### Initial poses
@@ -71,7 +150,31 @@ from the first of these that succeeds:
    back along the viewing ray, because the visible surface of a sphere has its centroid r/2 in front of the
    center.
 
-Non-finite Vision angles count as 0. In the synthetic tests, every non-reference keyframe takes path 1.
+Non-finite Vision angles count as 0. In the synthetic tests (head centered), every non-reference keyframe takes
+path 1.
+
+**Line of sight.** Vision measures yaw and pitch relative to the line of sight through the face, not the optical
+axis, and the guidance keeps that frame (`VisionPoseConvention`). A face seen at angle a right of (below) the image
+center reads about g · a more yaw (less pitch). That happens to a person sitting off the axis, and to every turned
+pose: turning 45° about the neck moves the face about 7 cm sideways. R_i therefore comes from the Vision angles with
+yaw − g_yaw · atan((u − cx) / fx) and pitch + g_pitch · atan((v − cy) / fy), (u, v) being the center of the
+keyframe's face rectangle (after undistortion). The same corrected rotations feed the export orientation
+(`HeadFrame`). Gains: Apple Vision (macOS 27.2) on the rendered head at 1280×800, 0.6 m, lighting 0.6, moved up to
+12 cm sideways and 9 cm vertically at 7 head orientations; least-squares slope of the reading over the line-of-sight
+angle per orientation (`IFS_RECON_STUDY=1`, `visionLineOfSightGainStudy`):
+
+| true yaw / pitch | 0 / 0 | 20 / 0 | −20 / 0 | 0 / 15 | 0 / −15 | 40 / 0 | −40 / 0 | median |
+|---|---|---|---|---|---|---|---|---|
+| yaw slope | 0.78 | 1.45 | 0.73 | 0.68 | 0.74 | 0.25 | 0.94 | **0.75** (g_yaw) |
+| −pitch slope | 0.46 | 0.63 | 0.77 | 1.31 | 0.14 | 0.67 | 0.69 | **0.67** (g_pitch) |
+
+Vision on the synthetic face is noisy (several degrees per reading, unreliable at 40° yaw), hence the medians. The
+signs agree with geometry: from a camera to its left, a frontal face looks turned toward the image right. Real faces
+may give other gains; the check is the same study on recorded keyframes. `SyntheticScan` simulates the effect with
+these gains (`visionLineOfSightGain`, on by default). With a head 12 cm right and 6 cm down and no random Vision
+error (`ReconInitialPoseTests`): yaw error mean 7.98° → 0.04°, pitch 3.47° → 0.02°; Vision rotation relative to the
+reference 3.23° → 0.06° (max 5.11° → 0.13°); export face direction 8.39° → 0.02°. Landmark fits are not lost
+(7 of 9 in both cases at that offset; the two left views fail the fit's own checks).
 
 ## Point clouds (`fr_cloud_from_rgbd`)
 
@@ -177,6 +280,28 @@ its frames are each other's most similar views, and passed; a correct frame whos
 misregistered one was dropped (tests with a 3.6 mm offset of one frame and of a two-frame group). Comparing with a
 fixed number of most similar views is not enough either: with four keyframes per pose those are all siblings, and
 the left groups of the 40-keyframe benchmark were never linked to the reference (test with four views per pose).
+
+**Face-landmark term.** The surface cannot see a frame rotated a few degrees about the head center, because the
+near-spherical skull slides along itself: 4° of yaw leaves the best pair at an RMSE of 1.0 mm, under the limit of
+about 1.4 mm. The face sits 8–10 cm in front of the head center, so its landmarks move 5–7 mm. The check takes the
+camera-frame 3D landmarks of the initial poses (depth median within 2 px). For each frame, the residual is the
+25th percentile of the distances between its landmarks and the reference's, both carried into the world. A low
+quantile, because Vision places the landmarks of occluded face parts on other surfaces in turned views. A frame with
+at least 8 landmark pairs and a residual above max(4 mm, 2.5 × the median frame's) neither passes nor links others,
+and the report names it separately ("face landmarks do not fit"). Measured (`PipelineRegistrationCheckTests`,
+`IFS_RECON_STUDY=1` `landmarkTermStudy`):
+
+| rotation about the head center | surface check | landmark residual |
+|---|---|---|
+| none (13 frames, ellipsoid test head, exact landmarks) | all pass | 0.16–1.03 mm |
+| none (textured `SyntheticScan` head, 1 px landmark noise) | all pass | 1.27–2.31 mm |
+| none (robustness table below: no run drops a frame; residuals of its first 18 runs) | – | 1.05–2.60 mm |
+| 2° yaw or pitch (5 views) | passes | 3.03–3.63 mm (passes) |
+| **4° yaw or pitch** (5 views; textured head: left view) | **passes** | **5.23–7.16 mm (caught)**; 6.48 mm |
+| 4° roll about the viewing axis | passes | 1.91–2.77 mm (passes) |
+
+The relative limit keeps correct frames when the landmarks of a whole scan are noisier than the synthetic ones; real
+Vision landmarks have view-dependent biases that only recordings can measure.
 
 ## Pose graph (`fr_pose_graph_*`)
 
@@ -504,29 +629,40 @@ median is about 0.36 mm; all 40 keyframes pass the registration check.
 
 The synthetic renderer has independent depth noise, depth wherever the surface is visible, exact intensities and
 the scan poses in order. `PipelineRobustnessTests` adds what real D455 scans have, one at a time and all together
-(textured `SyntheticData` head, 5 poses × 2 at 1280×800 and 0.6 m, lighting 0.25, full pipeline; `IFS_RECON_STUDY=1`
-prints the table, the default run checks the combined scenario):
+(textured `SyntheticData` head, 5 poses × 2 at 1280×800 and 0.6 m, lighting 0.25, simulated Vision with its
+line-of-sight effect, full pipeline; `IFS_RECON_STUDY=1` prints the table, the default run checks the combined
+scenario):
 
 | scenario | ICP | rotation error mean / max | head misalignment max | surface mean / p95 |
 |---|---|---|---|---|
-| clean | point-to-plane | 0.04° / 0.07° | 0.16 mm | 0.12 / 0.38 mm |
-| clean | colored | 0.56° / 1.28° | 3.74 mm | 0.40 / 1.30 mm |
-| correlated noise 0.5 mm + waviness 0.3 mm (at 0.6 m) | point-to-plane | 0.29° / 0.52° | 1.30 mm | 0.33 / 0.90 mm |
-| correlated noise 0.5 mm + waviness 0.3 mm (at 0.6 m) | colored | 0.73° / 1.48° | 3.81 mm | 0.54 / 1.65 mm |
-| no depth on 80 % of dark pixels (hair, brows, pupils) | point-to-plane | 0.04° / 0.07° | 0.18 mm | 0.14 / 0.42 mm |
-| no depth on 80 % of dark pixels (hair, brows, pupils) | colored | 0.65° / 1.67° | 4.03 mm | 0.39 / 1.63 mm |
-| silhouettes eroded by 6 px | point-to-plane | 0.05° / 0.11° | 0.28 mm | 0.14 / 0.43 mm |
-| silhouettes eroded by 6 px | colored | 0.66° / 1.34° | 2.96 mm | 0.33 / 1.24 mm |
-| Vision error 4° per angle (σ) | point-to-plane | 0.04° / 0.07° | 0.16 mm | 0.12 / 0.38 mm |
-| Vision error 4° per angle (σ) | colored | 0.57° / 1.37° | 4.07 mm | 0.47 / 1.64 mm |
-| exposure ±20 % per keyframe | point-to-plane | 0.04° / 0.07° | 0.16 mm | 0.12 / 0.38 mm |
-| exposure ±20 % per keyframe | colored | 0.54° / 1.15° | 3.29 mm | 0.33 / 1.04 mm |
-| frontal keyframes last in the capture | point-to-plane | 0.04° / 0.07° | 0.16 mm | 0.13 / 0.38 mm |
-| frontal keyframes last in the capture | colored | 0.56° / 1.28° | 3.74 mm | 0.40 / 1.29 mm |
-| 8 % scattered depth holes | point-to-plane | 0.04° / 0.06° | 0.18 mm | 0.14 / 0.41 mm |
-| 8 % scattered depth holes | colored | 0.56° / 1.24° | 3.58 mm | 0.39 / 1.27 mm |
-| all combined (Vision 3°, 5 % holes) | point-to-plane | 0.40° / 0.87° | 2.57 mm | 0.36 / 0.97 mm |
-| all combined (Vision 3°, 5 % holes) | colored | 1.05° / 1.95° | 4.78 mm | 0.71 / 2.40 mm |
+| clean | point-to-plane | 0.04° / 0.07° | 0.16 mm | 0.13 / 0.39 mm |
+| clean | colored | 0.56° / 1.28° | 3.74 mm | 0.41 / 1.33 mm |
+| correlated noise 0.5 mm + waviness 0.3 mm (at 0.6 m) | point-to-plane | 0.29° / 0.51° | 1.30 mm | 0.34 / 0.92 mm |
+| correlated noise 0.5 mm + waviness 0.3 mm (at 0.6 m) | colored | 0.73° / 1.47° | 3.79 mm | 0.55 / 1.67 mm |
+| no depth on 80 % of dark pixels (hair, brows, pupils) | point-to-plane | 0.04° / 0.07° | 0.18 mm | 0.14 / 0.43 mm |
+| no depth on 80 % of dark pixels (hair, brows, pupils) | colored | 0.65° / 1.66° | 4.00 mm | 0.39 / 1.62 mm |
+| silhouettes eroded by 6 px | point-to-plane | 0.05° / 0.12° | 0.30 mm | 0.15 / 0.44 mm |
+| silhouettes eroded by 6 px | colored | 0.66° / 1.36° | 3.00 mm | 0.33 / 1.21 mm |
+| Vision error 4° per angle (σ) | point-to-plane | 0.04° / 0.07° | 0.16 mm | 0.13 / 0.39 mm |
+| Vision error 4° per angle (σ) | colored | 0.57° / 1.38° | 4.09 mm | 0.48 / 1.67 mm |
+| exposure ±20 % per keyframe | point-to-plane | 0.04° / 0.07° | 0.16 mm | 0.13 / 0.39 mm |
+| exposure ±20 % per keyframe | colored | 0.54° / 1.15° | 3.31 mm | 0.34 / 1.08 mm |
+| frontal keyframes last in the capture | point-to-plane | 0.04° / 0.07° | 0.16 mm | 0.13 / 0.39 mm |
+| frontal keyframes last in the capture | colored | 0.56° / 1.28° | 3.74 mm | 0.40 / 1.32 mm |
+| 8 % scattered depth holes | point-to-plane | 0.04° / 0.06° | 0.17 mm | 0.14 / 0.43 mm |
+| 8 % scattered depth holes | colored | 0.56° / 1.24° | 3.58 mm | 0.40 / 1.31 mm |
+| D455 color distortion, head 15 cm right, 6 cm down | point-to-plane | 0.04° / 0.08° | 0.20 mm | 0.13 / 0.37 mm |
+| D455 color distortion, head 15 cm right, 6 cm down | colored | 0.72° / 1.88° | 5.11 mm | 0.58 / 2.09 mm |
+| all combined (Vision 3°, 5 % holes) | point-to-plane | 0.41° / 0.87° | 2.57 mm | 0.36 / 0.96 mm |
+| all combined (Vision 3°, 5 % holes) | colored | 1.05° / 1.95° | 4.79 mm | 0.68 / 2.31 mm |
+| all combined, D455 color distortion, head 8 cm right, 4 cm down | point-to-plane | 0.49° / 1.15° | 2.61 mm | 0.33 / 1.02 mm |
+| all combined, D455 color distortion, head 8 cm right, 4 cm down | colored | 0.93° / 1.83° | 4.29 mm | 0.61 / 2.32 mm |
+
+Every run keeps all 10 keyframes. Re-measured after the lens undistortion, the line-of-sight correction, the
+landmark term of the registration check and the ramped eye-line weights, against the same table
+measured at 933c323 on the same machine: the point-to-plane rows of the scenarios that existed before moved by at
+most 0.01° and 0.02 mm, the colored rows by at most 0.02° and 0.05 mm, in both directions. The two new rows put the
+head off the optical axis and render the color through the D455 lens.
 
 * Correlated noise and low-frequency waviness are the one imperfection that costs accuracy, and it is inherent:
   each frame's surface is slightly deformed, so no rigid registration fits all views exactly.
@@ -557,8 +693,10 @@ reference machine is an M4 Pro; this one is somewhat faster on GPU and CPU throu
 | **total** | **13.5** |
 
 This is inside the 60 s target; texturing dominates. The registration check was 0.15 s when it compared each frame
-with one view only; it now evaluates about 6 pairs per frame. The debug-build unit tests run the 13-keyframe
-640×400 pipeline in 1–3 s plus texturing.
+with one view only; it now evaluates about 6 pairs per frame (its landmark term reuses the initial poses' landmarks
+and costs nothing measurable). Lens undistortion, when the keyframes carry distortion, adds about 15 ms for 10–18
+keyframes at 1280×800 (`ifscan reconstruct`, release; this benchmark has no distortion). The debug-build unit tests
+run the 13-keyframe 640×400 pipeline in 1–3 s plus texturing.
 
 ## Known limits
 
@@ -568,11 +706,15 @@ with one view only; it now evaluates about 6 pairs per frame. The debug-build un
   per-frame status, so the pipeline re-scores the registered clouds (`RegistrationCheck`, below) and leaves failing
   frames out of fusion.
 * **Registration check blind spot.** An error that rotates a frame about the head center mostly slides the
-  near-spherical skull along itself; only the face features show it, and the surface check does not see a few
-  degrees of it. The pose graph and the edge rejection are the defense there.
+  near-spherical skull along itself; the surface check does not see a few degrees of it. The landmark term catches
+  about 4° of yaw or pitch, not roll about the viewing axis (the face landmarks lie within ~5 cm of that axis), and
+  not less than ~3° (landmark noise). The pose graph and the edge rejection are the defense there.
 * **Export orientation.** Yaw and pitch come from the mean of all keyframes' Vision head poses carried into the
-  world (outliers more than 10° off ignored). Roll comes from the reference eye line. A systematic Vision yaw bias
-  for a person would tilt the export frame by that bias. A symmetry-plane fit on the mesh would remove it.
+  world (outliers more than 10° off ignored), with the line of sight taken out ("Initial poses"). Roll comes from the
+  reference eye line in the image. For a face off the optical axis, perspective moves the image midpoint of symmetric
+  landmark pairs with their depth, so the 2D split is not quite symmetric: 2.3° of roll for a head 10 cm right and
+  5 cm down (synthetic); 3D landmarks would avoid it. A systematic Vision yaw bias for a person would tilt the export
+  frame by that bias. A symmetry-plane fit on the mesh would remove both.
 * **Chin crop fallback.** While `fr_mesh_crop_plane` is not implemented, the pipeline drops whole triangles below
   the plane (jagged border) and notes it.
 * **Vertex colors from the TSDF** are count-averaged in RGBA8. They are a fallback: the texture and vertex colors
