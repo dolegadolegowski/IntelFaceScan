@@ -27,7 +27,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         set(CMAKE_BUILD_TYPE Release)
     endif()
     set(IFS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../build/sdk/install" CACHE PATH "librealsense install prefix")
-    find_package(realsense2 REQUIRED PATHS "${IFS_SDK_DIR}" NO_DEFAULT_PATH)
+    # Search IFS_SDK_DIR on every configure (find_package would keep a cached realsense2_DIR of another SDK).
+    unset(realsense2_DIR CACHE)
+    find_package(realsense2 REQUIRED CONFIG PATHS "${IFS_SDK_DIR}" NO_DEFAULT_PATH)
 endif()
 
 set(IFS_HELPER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../src")

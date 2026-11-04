@@ -16,7 +16,13 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(IFS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../build/sdk/install" CACHE PATH "librealsense install prefix")
-find_package(realsense2 REQUIRED PATHS "${IFS_SDK_DIR}" NO_DEFAULT_PATH)
+if(NOT EXISTS "${IFS_SDK_DIR}/lib/cmake/realsense2/realsense2Config.cmake")
+    message(FATAL_ERROR "no librealsense in IFS_SDK_DIR=${IFS_SDK_DIR} (build it with scripts/build-sdk.sh)")
+endif()
+# find_package caches realsense2_DIR: search IFS_SDK_DIR on every configure, or a reconfigure with another
+# -DIFS_SDK_DIR would keep linking the previous SDK.
+unset(realsense2_DIR CACHE)
+find_package(realsense2 REQUIRED CONFIG PATHS "${IFS_SDK_DIR}" NO_DEFAULT_PATH)
 
 # All sources in src/ (the platform and capture work streams add files there independently).
 file(GLOB IFS_HELPER_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c")
