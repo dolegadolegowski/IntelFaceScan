@@ -30,6 +30,15 @@ final class HelperProcessHandle: @unchecked Sendable {
         condition.withLock { self.process = process }
     }
 
+    /// The helper's own pid when the app started it directly (playback, fake). nil for the privileged helper: the
+    /// administrator launch runs it through a root shell whose pid the app never learns.
+    var processIdentifier: pid_t? {
+        condition.withLock {
+            guard let process, process.processIdentifier > 0 else { return nil }
+            return process.processIdentifier
+        }
+    }
+
     fileprivate func appendStderr(_ data: Data) {
         condition.withLock {
             stderrTail.append(data)

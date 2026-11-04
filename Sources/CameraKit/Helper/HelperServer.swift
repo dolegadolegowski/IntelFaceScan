@@ -149,9 +149,10 @@ final class HelperSocketServer: @unchecked Sendable {
 
     // MARK: Peer verification
 
-    /// Checks the connected peer: effective uid (LOCAL_PEERCRED) and executable (LOCAL_PEERPID + proc_pidpath, the
-    /// same file as `helperPath`). Returns the peer's pid.
-    static func verifyPeer(fd: Int32, expectedUID: uid_t, helperPath: String) throws -> pid_t {
+    /// Checks the connected peer: effective uid (LOCAL_PEERCRED), executable (LOCAL_PEERPID + proc_pidpath, the
+    /// same file as `helperPath`) and, when the app knows it (a helper it started directly), the pid. Returns the
+    /// peer's pid.
+    static func verifyPeer(fd: Int32, expectedUID: uid_t, helperPath: String, expectedPID: pid_t? = nil) throws -> pid_t {
         var cred = xucred()
         var length = socklen_t(MemoryLayout<xucred>.size)
         guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERCRED, &cred, &length) == 0,
@@ -166,6 +167,12 @@ final class HelperSocketServer: @unchecked Sendable {
         length = socklen_t(MemoryLayout<pid_t>.size)
         guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0, pid > 0 else {
             throw CameraError.connectionFailed("cannot read the pid of the connected process")
+        }
+        // A process of the same user that connected first and then executed the real helper would pass the checks
+        // below; it cannot have the pid of the process the app started.
+        if let expectedPID, pid != expectedPID {
+            throw CameraError.connectionFailed(
+                "the connected process (pid \(pid)) is not the camera helper the app started (pid \(expectedPID))")
         }
         var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
         guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else {

@@ -239,6 +239,8 @@ final class HelperCameraSession: @unchecked Sendable {
     let events = Broadcaster<CameraEvent>()
     /// How long to wait for the helper to connect: the live camera waits for the user to type the password.
     var connectTimeout: TimeInterval
+    /// Tests: starts the helper in place of HelperLauncher (helper, arguments), e.g. a process that never connects.
+    var launchOverride: ((URL, [String]) throws -> HelperProcessHandle)?
 
     private let logger = Logger(subsystem: "io.github.dolegadolegowski.IntelFaceScan", category: "camera-helper")
     private let lock = NSLock()
@@ -332,9 +334,13 @@ final class HelperCameraSession: @unchecked Sendable {
         let args = arguments(socket: server.socketPath, helper: helper)
         let process: HelperProcessHandle
         do {
-            process = mode == .live
-                ? HelperLauncher.launchPrivileged(helper: helper, arguments: args)
-                : try HelperLauncher.launchAsUser(helper: helper, arguments: args)
+            if let launchOverride {
+                process = try launchOverride(helper, args)
+            } else {
+                process = mode == .live
+                    ? HelperLauncher.launchPrivileged(helper: helper, arguments: args)
+                    : try HelperLauncher.launchAsUser(helper: helper, arguments: args)
+            }
         } catch {
             server.close()
             throw error
@@ -362,8 +368,9 @@ final class HelperCameraSession: @unchecked Sendable {
                 }
             }
             do {
+                // The pid is known for a helper started directly (playback, fake), not for the privileged one.
                 _ = try HelperSocketServer.verifyPeer(fd: fd, expectedUID: mode == .live ? 0 : getuid(),
-                                                      helperPath: helper.path)
+                                                      helperPath: helper.path, expectedPID: process.processIdentifier)
             } catch {
                 Darwin.close(fd)
                 throw error
@@ -704,7 +711,17 @@ final class HelperCameraSession: @unchecked Sendable {
             }
             connection.close()
         }
-        if !session.process.waitForExit(timeout: remaining()) {
+        if session.connection == nil && !session.process.hasExited {
+            // Never connected, e.g. the administrator prompt is still showing (the handle of a live helper only ends
+            // when the in-process AppleScript returns, after the prompt). Nothing to wait for: the socket is removed
+            // below, so a helper started after all cannot connect and exits, and it also exits with the app.
+            if mode == .live {
+                logger.info("the camera helper never connected; not waiting for it")
+            } else {
+                session.process.terminate()
+                if !session.process.waitForExit(timeout: min(3, remaining())) { session.process.kill() }
+            }
+        } else if !session.process.waitForExit(timeout: remaining()) {
             if mode == .live {
                 // Root cannot be signalled from here; it exits by itself once it notices the closed socket.
                 logger.error("the camera helper did not exit in time")
