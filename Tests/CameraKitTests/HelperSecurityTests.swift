@@ -67,6 +67,41 @@ struct HelperSecurityPeerTests {
         #expect((try client.reply(to: id)?["error"] as? String)?.contains("set-user-ID") == true)
     }
 
+    @Test func staleRecordingSpoolsAreRemoved() throws {
+        // A helper killed in the middle of a recording leaves its spool in a directory only its user (root, live) can
+        // enter. The fake helper spools in this user's Darwin temporary directory, so the same rule is visible here.
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        try #require(confstr(_CS_DARWIN_USER_TEMP_DIR, &buffer, buffer.count) > 0)
+        let base = try #require(realpath(String(cString: buffer), nil).map { p in defer { free(p) }; return String(cString: p) })
+        let tag = UUID().uuidString
+        let old = base + "/ifs-recording.sectest-old-" + tag
+        let fresh = base + "/ifs-recording.sectest-fresh-" + tag
+        let foreign = base + "/other.sectest-" + tag  // not a spool name: never touched
+        for dir in [old, fresh, foreign] {
+            #expect(mkdir(dir, 0o700) == 0)
+            #expect(FileManager.default.createFile(atPath: dir + "/recording.db3", contents: Data([1, 2, 3])))
+        }
+        defer { for dir in [old, fresh, foreign] { try? FileManager.default.removeItem(atPath: dir) } }
+        let twoDaysAgo = Date().addingTimeInterval(-2 * 86400)
+        for dir in [old, foreign] {
+            try FileManager.default.setAttributes([.modificationDate: twoDaysAgo], ofItemAtPath: dir)
+        }
+
+        let client = try RawHelperClient(helper: helper)
+        let dir = try TestHelper.scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fd = open(dir.appendingPathComponent("out.db3").path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+        defer { close(fd) }
+        let start = try client.send(HelperMessageType.recordStart.rawValue, ["format": "db3"], descriptor: fd)
+        #expect(try client.reply(to: start)?["ok"] as? Bool == true)
+        let stop = try client.send(HelperMessageType.recordStop.rawValue)
+        #expect(try client.reply(to: stop)?["ok"] as? Bool == true)
+
+        #expect(!FileManager.default.fileExists(atPath: old), "a spool untouched for two days is removed")
+        #expect(FileManager.default.fileExists(atPath: fresh + "/recording.db3"), "a recent spool is kept")
+        #expect(FileManager.default.fileExists(atPath: foreign + "/recording.db3"), "other names are not touched")
+    }
+
     @Test func overflowingRegionIsRefused() throws {
         let client = try RawHelperClient(helper: helper)
         let id = try client.send(HelperMessageType.setROI.rawValue,

@@ -9,6 +9,7 @@
 #include <climits>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdexcept>
@@ -91,6 +92,41 @@ void remove_tree( int parent, const std::string & name, int depth )
     ::unlinkat( parent, name.c_str(), AT_REMOVEDIR );
 }
 
+constexpr const char * kSpoolPrefix = "ifs-recording.";
+constexpr time_t kStaleSpoolSeconds = 24 * 60 * 60;
+
+// Spools of helpers that ended in the middle of a recording (SIGKILL, crash) stay in a directory only root can
+// enter: invisible to the user, and a recording can be gigabytes. Removed when the next recording starts. Only a
+// helper that owns the camera records, so no other live recording can be using an old spool.
+void remove_stale_spools( const std::string & base )
+{
+    UniqueFd dir( ::open( base.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC ) );
+    if( ! dir.valid() )
+        return;
+    int listing = ::dup( dir.get() );
+    DIR * d = listing >= 0 ? ::fdopendir( listing ) : nullptr;
+    if( ! d )
+    {
+        if( listing >= 0 )
+            ::close( listing );
+        return;
+    }
+    const time_t now = ::time( nullptr );
+    std::vector< std::string > stale;
+    while( dirent * entry = ::readdir( d ) )
+    {
+        if( std::strncmp( entry->d_name, kSpoolPrefix, std::strlen( kSpoolPrefix ) ) != 0 )
+            continue;
+        struct stat st;
+        if( ::fstatat( dir.get(), entry->d_name, &st, AT_SYMLINK_NOFOLLOW ) == 0 && S_ISDIR( st.st_mode )
+            && st.st_uid == ::geteuid() && now - st.st_mtimespec.tv_sec > kStaleSpoolSeconds )
+            stale.emplace_back( entry->d_name );
+    }
+    ::closedir( d );
+    for( const std::string & name : stale )
+        remove_tree( dir.get(), name, 4 );
+}
+
 bool regular_file( const std::string & path )
 {
     struct stat st;
@@ -163,7 +199,9 @@ std::unique_ptr< RecordingSpool > RecordingSpool::create( const std::string & fo
 {
     if( format != "db3" && format != "bag" )
         fail( "unsupported recording format '" + format + "'" );
-    std::string templ = private_base() + "/ifs-recording.XXXXXX";
+    const std::string base = private_base();
+    remove_stale_spools( base );
+    std::string templ = base + "/" + kSpoolPrefix + "XXXXXX";
     std::vector< char > buf( templ.begin(), templ.end() );
     buf.push_back( '\0' );
     if( ! ::mkdtemp( buf.data() ) )
