@@ -30,7 +30,9 @@ typedef struct fr_texture_params {
     int32_t blend_views;         /* blend the N best views per texel (1 = best view only), e.g. 3 */
     float occlusion_epsilon_m;   /* depth test tolerance against each frame's depth map, e.g. 0.004 */
     int32_t dilate_px;           /* fill the atlas gutter by dilation, e.g. 8 */
-    int32_t exposure_compensation; /* 1 = per-frame gain normalization before blending */
+    int32_t exposure_compensation; /* 1 = color compensation before blending: per-frame camera gains (from the static
+                                      background, else brightness from the overlaps) and a smooth per-view correction
+                                      that levels the views where they overlap (docs/RECONSTRUCTION.md, "Texturing") */
     /* Nullable, one byte per mesh vertex: non-zero marks surface that was synthesized, not measured (hole filling,
        the closed back of a head; fr_fill_report.first_new_vertex). The frames are not projected onto it (its
        position is a guess); it takes a smooth interpolation of the surrounding measured colors instead. */

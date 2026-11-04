@@ -1,7 +1,7 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
-// Ray-cast RGB-D views of an analytically textured sphere (with optional occluder and exposure gain), used as
-// ground truth for texture baking and vertex coloring.
+// Ray-cast RGB-D views of an analytically textured sphere (with optional occluder, exposure gain, lighting and static
+// background), used as ground truth for texture baking and vertex coloring.
 
 import FaceReconCore
 import Foundation
@@ -26,17 +26,56 @@ enum TexturedSphere {
         return simd_float4x4(columns: (SIMD4(x, 0), SIMD4(y, 0), SIMD4(z, 0), SIMD4(eye, 1)))
     }
 
+    /// Unit direction at an azimuth (deg, from -Z toward +X) and elevation (deg, toward -Y: world +Y is down).
+    static func direction(azimuth: Float, elevation: Float) -> SIMD3<Float> {
+        let a = azimuth * .pi / 180, e = elevation * .pi / 180
+        return SIMD3(cos(e) * sin(a), -sin(e), -cos(e) * cos(a))
+    }
+
+    /// Azimuth (deg) of a direction, as in direction(azimuth:elevation:).
+    static func azimuth(_ d: SIMD3<Float>) -> Float { atan2(d.x, -d.z) * 180 / .pi }
+
+    /// A camera looking at the center from `distance` in the given direction.
+    static func pose(azimuth: Float, elevation: Float, distance: Float = 0.5) -> simd_float4x4 {
+        lookAt(eye: distance * direction(azimuth: azimuth, elevation: elevation))
+    }
+
     /// 8 views around the equator and 4 above / 4 below, at `distance` from the center.
     static func surroundingPoses(distance: Float = 0.5) -> [simd_float4x4] {
         var poses: [simd_float4x4] = []
-        func eye(azimuth: Float, elevation: Float) -> SIMD3<Float> {
-            let a = azimuth * .pi / 180, e = elevation * .pi / 180
-            return distance * SIMD3(cos(e) * sin(a), -sin(e), -cos(e) * cos(a))
-        }
-        for k in 0 ..< 8 { poses.append(lookAt(eye: eye(azimuth: Float(k) * 45, elevation: 0))) }
-        for k in 0 ..< 4 { poses.append(lookAt(eye: eye(azimuth: 22.5 + Float(k) * 90, elevation: 50))) }
-        for k in 0 ..< 4 { poses.append(lookAt(eye: eye(azimuth: 67.5 + Float(k) * 90, elevation: -50))) }
+        for k in 0 ..< 8 { poses.append(pose(azimuth: Float(k) * 45, elevation: 0, distance: distance)) }
+        for k in 0 ..< 4 { poses.append(pose(azimuth: 22.5 + Float(k) * 90, elevation: 50, distance: distance)) }
+        for k in 0 ..< 4 { poses.append(pose(azimuth: 67.5 + Float(k) * 90, elevation: -50, distance: distance)) }
         return poses
+    }
+
+    /// Like a guided head scan: three near-duplicate frames each from the front, 50 deg to either side and 35 deg above
+    /// and below.
+    static func scanPoses() -> [simd_float4x4] {
+        let directions: [(Float, Float)] = [(0, 0), (50, 0), (-50, 0), (0, 35), (0, -35)]
+        return directions.flatMap { a, e in [-2, 0, 2].map { pose(azimuth: a + Float($0), elevation: e) } }
+    }
+
+    /// A cool light from the camera's left and a warm one from its right plus a little ambient light, by the unit
+    /// normal in camera coordinates (x right, y down, z forward): the lights of a room, which stay with the camera
+    /// while the head turns, so every view sees a surface point lit differently.
+    static func roomLight(_ n: SIMD3<Float>) -> SIMD3<Float> {
+        let cool = simd_normalize(SIMD3<Float>(-1, -0.3, -1)), warm = simd_normalize(SIMD3<Float>(1, -0.2, -1))
+        return SIMD3(0.2, 0.2, 0.2) + max(0, simd_dot(n, cool)) * SIMD3(0.35, 0.45, 0.7)
+            + max(0, simd_dot(n, warm)) * SIMD3(0.7, 0.5, 0.3)
+    }
+
+    /// Unit vector d in the camera coordinates of world_from_camera `pose`.
+    static func inCamera(_ d: SIMD3<Float>, _ pose: simd_float4x4) -> SIMD3<Float> {
+        SIMD3(simd_dot(d, SIMD3(pose.columns.0.x, pose.columns.0.y, pose.columns.0.z)),
+              simd_dot(d, SIMD3(pose.columns.1.x, pose.columns.1.y, pose.columns.1.z)),
+              simd_dot(d, SIMD3(pose.columns.2.x, pose.columns.2.y, pose.columns.2.z)))
+    }
+
+    /// Mid-tone pattern of a static scene behind the sphere, by pixel.
+    static func backdrop(_ x: Int, _ y: Int) -> SIMD3<Float> {
+        let fx = Float(x), fy = Float(y)
+        return SIMD3(140 + 50 * sin(fx / 9) * cos(fy / 13), 130 + 45 * sin(fx / 11 + 1), 120 + 40 * cos(fy / 7 + fx / 15))
     }
 }
 
@@ -57,8 +96,13 @@ struct SyntheticView {
         var color: SIMD3<UInt8>
     }
 
+    /// shading: factor of the sphere's albedo by the unit normal in camera coordinates (TexturedSphere.roomLight).
+    /// background: color of the pixels that miss the sphere (depth 0 = out of range, mask 0), by pixel. The gain (the
+    /// camera's exposure and white balance) applies to both.
     static func render(pose: simd_float4x4, width: Int = 480, height: Int = 360, focal: Float = 420,
-                       gain: SIMD3<Float> = [1, 1, 1], occluder: Occluder? = nil) -> SyntheticView {
+                       gain: SIMD3<Float> = [1, 1, 1], occluder: Occluder? = nil,
+                       shading: ((SIMD3<Float>) -> SIMD3<Float>)? = nil,
+                       background: ((Int, Int) -> SIMD3<Float>)? = nil) -> SyntheticView {
         let cx = Float(width - 1) / 2, cy = Float(height - 1) / 2
         var rgb = [UInt8](repeating: 0, count: width * height * 3)
         var depth = [UInt16](repeating: 0, count: width * height)
@@ -82,13 +126,23 @@ struct SyntheticView {
                 let d = r * dc.x + u * dc.y + f * dc.z
                 var t = hit(d, .zero, TexturedSphere.radius)
                 var color = SIMD3<Float>.zero
-                if let t0 = t { color = TexturedSphere.color(simd_normalize(eye + t0 * d)) * gain }
+                if let t0 = t {
+                    let n = simd_normalize(eye + t0 * d)
+                    color = TexturedSphere.color(n) * gain
+                    if let light = shading { color *= light(TexturedSphere.inCamera(n, pose)) }
+                }
                 if let occ = occluder, let to = hit(d, occ.center, occ.radius), to < (t ?? .infinity) {
                     t = to
                     color = SIMD3<Float>(occ.color)
                 }
-                guard let z = t else { continue }
                 let i = y * width + x
+                guard let z = t else {
+                    if let scene = background {
+                        let c = simd_clamp((scene(x, y) * gain).rounded(.toNearestOrEven), .zero, SIMD3(repeating: 255))
+                        rgb[3 * i] = UInt8(c.x); rgb[3 * i + 1] = UInt8(c.y); rgb[3 * i + 2] = UInt8(c.z)
+                    }
+                    continue
+                }
                 depth[i] = UInt16(min(65535, (z / depthScale).rounded()))
                 mask[i] = 255
                 rgb[3 * i] = UInt8(max(0, min(255, color.x.rounded())))

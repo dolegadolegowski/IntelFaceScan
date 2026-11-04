@@ -19,7 +19,7 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
   on an M3 Ultra (28 cores, Command Line Tools), November 2026: ScanKitTests 127 tests ~27 s (Vision),
   ReconKitTests 88 tests ~75–100 s (the longest single test sets it: the combined-imperfections reconstruction of
   `Pipeline robustness`; the two 1280×800 reconstructions of `Pipeline wide side views` run beside it),
-  IntelFaceScanAppTests 40 tests ~8 s, FaceReconCoreTests 91 tests ~7 s, CameraKitTests 77 tests ~27 s (most of it
+  IntelFaceScanAppTests 40 tests ~8 s, FaceReconCoreTests 93 tests ~9 s, CameraKitTests 77 tests ~27 s (most of it
   `Helper playback backpressure`); about 2.5–3 min in all when nothing changed, about 3.5 min from a clean debug
   build (about 40 s of it building).
 * The reconstruction tests of ReconKitTests (the suites and tests marked `.heavyReconstruction`,

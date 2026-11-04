@@ -950,14 +950,77 @@ pinches remain where the cap meets the dome at the back corners of the neck.
 ## Texturing (`Texturing`)
 
 `colorizeVertices` and `unwrapAndBake` blend the best views per surface point (view angle, quality weight,
-feathering at silhouettes, depth test, exposure compensation). The synthesized vertices (`ReconMesh.synthesized`,
+feathering at silhouettes, depth test, color compensation: below). The synthesized vertices (`ReconMesh.synthesized`,
 passed as `fr_texture_params.synthesized`) are never colored from the keyframes — the frames would project whatever
-they saw along those rays onto a guessed surface — and are left out of the exposure compensation. They, and measured
+they saw along those rays onto a guessed surface — and are left out of the color compensation. They, and measured
 vertices no frame sees, take a harmonic interpolation (uniform graph Laplacian) of the surrounding seen colors, whose
 border values are blurred over three rings first: on a head the back fades smoothly from the hair at the crown to the
 skin of the neck, instead of the radial streaks of the earlier wave-by-wave diffusion or one global mean color. The
 texture fades the frames out toward synthesized corners and uses the interpolated colors there. The flags follow the
 vertices through UV seam splits and decimation (`withCoreMesh`, by position).
+
+### Color compensation (`fr_texture_params.exposure_compensation`, default on)
+
+Two things change a surface point's color between keyframes: the camera's auto exposure and white balance, and the
+light on the point, since the head turns under fixed room lights. Only the first is corrected globally. The colors keep
+the lighting of each view, and where views overlap they are leveled locally:
+
+* **Camera gains.** When the camera stood still, they come from the static background (one log gain per frame and
+  channel). The background is the pixels away from every frame's head mask and mesh projection (widened by 3 % of
+  the width), without depth within 0.3 m behind the head (the body turns with the head), mid-tones (40–235) in every
+  frame, and consistent over the frames. The estimate alternates medians: a per-pixel reference, a per-frame gain,
+  and pixels within 0.08 log of the model in every frame. It is used when at least 2 % of the image is consistent and
+  the median deviation is below 0.03 log. Otherwise (no background, a moving camera) each frame gets one brightness
+  gain from the shared surface points instead, the same for all channels.
+* **Local field.** A per-view log correction on a 20 mm grid (trilinear over its nodes), fitted on the shared points
+  of every pair of a point's best 8 views (Huber), with smoothness between neighboring nodes and a pull to zero. It
+  levels the views where they overlap and fades to zero within about 3 cm of the overlaps. `view_set::evaluate`
+  multiplies each sample by the frame's gain times the field at the point (total clamped to 1/3..3), so vertex colors
+  and the texture both use it.
+
+The earlier method fitted per-frame, per-channel gains on the shared points, and it went wrong on a real D455 scan
+(`scan.ifsdataset`, 15 keyframes: front, up, down, 45° left, 51° right). The room had a daylight window on the
+person's left and a warm lamp on the right. As the head turned, the per-channel gains read the change in light on
+the face front as white balance and applied it to the whole frame. The right-turned frames, the only ones that see the
+person's left side, got +0.19 log B/R beyond the camera's own change, which the background measures. The left-turned
+frames got −0.21. The camera's own change: the front frames were 0.20–0.27 log brighter in R and 0.13–0.18 in B than
+all later ones, which lie within ±0.035 of each other. Area-weighted texture B/R at mid height, by surface-normal
+azimuth (+ = the person's left):
+
+| region | per-channel gains | camera gains + field |
+|---|---|---|
+| face front (±15°) | 0.80 | 0.82 |
+| left cheek 15–45° / right 15–45° | 0.93 / 0.74 | 0.88 / 0.80 |
+| left 45–75° / right 45–75° | 1.06 / 0.67 | 0.92 / 0.79 |
+| left 75–120° (ear) / right 75–120° | 1.28 / 0.65 | 1.09 / 0.78 |
+| texture with B/R > 1 / < 0.66 | 413 / 174 cm² | 236 / 8 cm² |
+| residual between poses, log R G B (B/R) | 0.098 0.121 0.122 (0.070) | 0.090 0.103 0.100 (0.058) |
+
+Without any compensation, the surface around the left ear is at B/R 1.10: it is lit by daylight, and that stays.
+Removing it would take de-lighting. The residual between poses is the weighted RMS of the log color difference of
+views more than 20° apart at shared points. Same-pose frames differ by 0.04–0.05 (B/R 0.037). What remains above that
+is high-frequency: texture misregistration and specular highlights. Camera gains alone leave the poses 0.20 / 0.18 /
+0.14 apart (B/R 0.163).
+
+Richer global models per frame are not better constrained, because the shared colors are all skin tones. The two
+minor color axes are at noise level (2–3.5 levels):
+
+* A 3×3 matrix lowered the B/R residual to 0.041 only by collapsing chroma toward the reference skin hue. Its
+  singular values were 1 : 0.11 : 0.01–0.02, it kept 8–18 % of the color contrast, and the renders were washed out.
+* Gain plus offset improved the residual mostly by compressing contrast. It fitted +12..+22 levels of blue offset on
+  a side frame and left the side tints as they were.
+
+The field's decay of 1.5 cells is a trade-off. On a synthetic sphere under lights that turn with the head
+(`TextureBakingTests`), the surface one pose sees alone changed by 0.025 / 0.053 / 0.085 log B/R with 1.5 / 2 / 2.5
+cells, against 0.50 with the per-channel gains. The p99 B−R steps across edges were 0.069 / 0.072 / 0.076, against
+0.134 with the per-channel gains and 0.162 for a perfect camera with no compensation. On the real scan, the residual
+between poses was 0.058 / 0.056 / 0.054 B/R.
+
+`FR_DEBUG_TEXTURE=1` prints the background statistics, the gains and the shared-point residuals. The compensation adds
+about 0.35 s per call. The pipeline runs it twice: vertex colors, then the texture.
+
+Locking the color exposure and white balance once the front pose is held would remove the camera part at the
+source. That still needs checking against the helper's SDK options.
 
 UV unwrapping (xatlas, faces split into chart groups of 10 000) dominates the texturing time: 13–18 s for the
 550k-triangle closed head above, 11.4 s in the 40-keyframe benchmark (10.5 s at integration, before the closing added
@@ -999,6 +1062,15 @@ distortion, adds about 15 ms for 10–18 keyframes at 1280×800 (`ifscan reconst
 distortion). The debug-build unit tests run the 13-keyframe 640×400 pipeline in 1–3 s plus texturing.
 
 ## Known limits
+
+* **Color compensation without a usable background keeps half of the old error.** Without a still camera and a
+  consistent background (dark below 40 levels, something within 0.3 m behind the head, a moving camera), each frame
+  gets one brightness gain from the shared surface, which again reads the change of light on the face front as the
+  camera's and applies it to the whole frame: on the scan above, with its background blacked out, one side came out
+  about 1.5x brighter than the other (the chroma stays right). The camera gains are also one median per frame and
+  channel, dominated by the bright background; at skin levels the side frames stay about 0.04–0.06 log too dark and
+  0.03 too blue (B/R) where only one pose sees the surface. The daylight tint of a side that only one turn sees stays
+  by design.
 
 * **The back of the head is not observed** by the guided-scan poses (|yaw| ≤ 45°). `closeHead` (default) closes it
   with a synthesized surface ("Closing the head"): plausible, not measured — 40 % of the closed head's surface, a
