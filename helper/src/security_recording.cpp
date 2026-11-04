@@ -147,6 +147,10 @@ std::string check_recording_destination( int fd )
         return "cannot inspect the recording destination: " + errno_text();
     if( ! S_ISREG( st.st_mode ) )
         return "the recording destination is not a regular file";
+    // The kernel clears these bits when anyone but root writes to a file; root writing through the app's descriptor
+    // would keep them (e.g. on a set-id file the app's user may write to but should not be able to fill as root).
+    if( st.st_mode & ( S_ISUID | S_ISGID ) )
+        return "the recording destination has the set-user-ID or set-group-ID bit";
     int flags = ::fcntl( fd, F_GETFL );
     if( flags < 0 )
         return "cannot inspect the recording destination: " + errno_text();

@@ -15,8 +15,8 @@
 namespace ifs
 {
 
-// Checks a descriptor received for RECORD_START: a regular file opened for writing. Returns an empty string when
-// it is acceptable, otherwise the reason.
+// Checks a descriptor received for RECORD_START: a regular file without set-user-ID/set-group-ID bits, opened for
+// writing. Returns an empty string when it is acceptable, otherwise the reason.
 std::string check_recording_destination( int fd );
 
 class RecordingSpool
