@@ -66,7 +66,7 @@ fi
 # A build folder configured from another checkout (an IFS_SDK_DIR shared between worktrees) cannot build this one.
 if [ -f "$BUILD/CMakeCache.txt" ]; then
     CONFIGURED_SRC="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$BUILD/CMakeCache.txt")"
-    if [ "$(cd "$CONFIGURED_SRC" 2>/dev/null && pwd -P)" != "$(cd "$SRC" && pwd -P)" ]; then
+    if [ -n "$CONFIGURED_SRC" ] && [ "$(cd "$CONFIGURED_SRC" 2>/dev/null && pwd -P)" != "$(cd "$SRC" && pwd -P)" ]; then
         echo "error: $BUILD was configured for $CONFIGURED_SRC, not $SRC: use another IFS_SDK_DIR for this" \
              "checkout, or remove $BUILD" >&2
         exit 1
@@ -79,6 +79,7 @@ cmake -S "$SRC" -B "$BUILD" -G "Unix Makefiles" \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
+    -DCMAKE_INSTALL_RPATH="@loader_path/../lib" \
     -DCMAKE_C_FLAGS="$PREFIX_MAP" \
     -DCMAKE_CXX_FLAGS="$PREFIX_MAP" \
     -DBUILD_SHARED_LIBS=ON \
@@ -96,6 +97,9 @@ cmake -S "$SRC" -B "$BUILD" -G "Unix Makefiles" \
     -DENABLE_CCACHE=OFF
 
 cmake --build "$BUILD" -j "$JOBS"
+# Installing over tools that were not relinked makes install_name_tool fail (harmlessly, but loudly) on build rpaths
+# the previous install already removed: install them fresh.
+rm -rf "${PREFIX:?}/bin"
 cmake --install "$BUILD" >/dev/null
 
 # nlohmann/json is fetched by librealsense at configure time; the helper uses the same copy

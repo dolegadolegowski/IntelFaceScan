@@ -63,7 +63,10 @@ restore() {
         [ -f "$RECORD" ] && sed -n 's/^created //p' "$RECORD"
         for patch in "${PATCHES[@]}"; do created_files "$patch"; done
     } | sort -u | while IFS= read -r file; do
-        [ -n "$file" ] && rm -f "$SRC/$file"
+        case "$file" in
+            "" | /* | .. | ../* | */.. | */../*) continue ;;   # only paths inside the submodule
+        esac
+        rm -f "$SRC/$file"
     done
     git -C "$SRC" reset --hard --quiet
     rm -f "$RECORD"
