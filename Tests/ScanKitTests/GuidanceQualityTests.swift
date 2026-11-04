@@ -167,8 +167,8 @@ import Testing
     }
 
     @Test func jumpRemovalLowersTheSpeedOfAStillHead() {
-        // Vision on a held head: steps of 4 degrees every 6-14 frames, 5-degree single-frame outliers, 0.5 degree jitter.
-        // Each step is a least-squares slope of up to 23 deg/s for several frames.
+        // Vision on a held head: steps of 4 degrees every 15-45 frames, 5-degree single-frame outliers, 0.5 degree
+        // jitter. Each step is a least-squares slope of up to 23 deg/s for several frames.
         for seed: UInt64 in 1 ... 5 {
             func run(_ minJumpRate: Double) -> [Float] {
                 var jitter = VisionJitter(seed: seed)
@@ -234,6 +234,37 @@ import Testing
         #expect(near(clean([0, 0, 0, 0, 0, 0, 0, 6]), [0, 0, 0, 0, 0, 0, 0, 6]))
         // A step slower than the jump rate (1.5 degrees in a frame = 45 deg/s) is not removed.
         #expect(near(clean([0, 0, 0, 1.5, 1.5, 1.5, 1.5, 1.5]), [0, 0, 0, 1.5, 1.5, 1.5, 1.5, 1.5]))
+    }
+
+    @Test func repeatedStepsReadAsMotion() {
+        // Vision reads a 2.5 Hz +-6 degree yaw shake of the synthetic head as a square wave: about -1 and -6.5 degrees,
+        // switching every 6 frames (GuidanceSyntheticVisionStudy). Each step alone looks like one of Vision's jumps on
+        // a still head, but steps that repeat are motion: no stretch of 12 frames (the 0.4 s hold) below 20 deg/s.
+        var noise = VisionJitter(seed: 3)
+        noise.stepDeg = 0; noise.spikeProbability = 0; noise.noiseDeg = 0.3
+        let measured = speeds(frames: 150) { i in
+            let e = noise.next()
+            return HeadPose(yaw: ((i / 6) % 2 == 0 ? -1 : -6.5) + e.x, pitch: -2 + e.y, roll: e.z)
+        }
+        var run = 0, longest = 0
+        for s in measured {
+            run = s <= 20 ? run + 1 : 0
+            longest = max(longest, run)
+        }
+        #expect(longest < 12, "\(longest) frames in a row below 20 deg/s: \(measured)")
+        #expect(measured.filter { $0 > 20 }.count * 2 >= measured.count, "\(measured)")
+
+        let t = (0 ..< 18).map { Double($0) / 30 }
+        let wave = (0 ..< 18).map { ($0 / 6) % 2 == 0 ? 0.0 : 5.5 }
+        #expect(PoseHistory.withoutJumps(wave, t: t, minJumpRate: 60, neighborRatio: 0.5, isolation: 0.35) == wave)
+        #expect(PoseHistory.withoutJumps(wave, t: t, minJumpRate: 60, neighborRatio: 0.5).allSatisfy { $0 == 0 })
+        // A lone step in a history as long is still a jump.
+        let step = (0 ..< 18).map { $0 < 9 ? 0.0 : 5.5 }
+        #expect(PoseHistory.withoutJumps(step, t: t, minJumpRate: 60, neighborRatio: 0.5, isolation: 0.35).allSatisfy { $0 == 0 })
+        // The smoothed pose still averages only the window.
+        var history = PoseHistory(window: 0.25)
+        for i in 0 ..< 30 { history.add(HeadPose(yaw: i < 15 ? 10 : 0, pitch: 0, roll: 0), at: Double(i) / 30) }
+        #expect(history.smoothed?.yaw == 0)
     }
 
     @Test func poseHistoryResetsOnGapsAndBackwardTime() {

@@ -123,9 +123,10 @@ import Testing
     }
 
     @Test func jitteryVisionOnAStillHeadDoesNotBlockThePoses() async {
-        // Vision jumps by 4 degrees every 6-14 frames per angle and has single-frame outliers while the head is held:
-        // the scan must take about as long as with exact readings. The motion gate used to read every jump as
-        // 20-25 deg/s and restart the hold (seeds 1-3: not finished in 900 frames, 540-570 x headMoving).
+        // Vision jumps by 4 degrees every 15-45 frames per angle and has single-frame outliers while the head is held:
+        // the scan must take about as long as with exact readings. The plain least-squares gate read every jump as
+        // 20-25 deg/s and restarted the hold (seeds 1-3: 363-495 frames instead of 265, 58-93 x headMoving instead
+        // of 28).
         func run(_ jitter: VisionJitter?) async -> (ScanPhase?, keyframes: Int, frames: Int, moving: Int) {
             var configuration = ScanConfiguration.testOffline
             configuration.angleTolerance = 12   // the jumps must not push the pose out of tolerance instead
@@ -167,6 +168,29 @@ import Testing
         }
         #expect(controller.keyframeCount == 0)
         #expect(updates.contains { $0.rejection == .headMoving })
+    }
+
+    @Test func rejectsAShakeThatVisionReadsAsSteps() async {
+        // The 2.5 Hz +-6 degree shake as Vision reads it on the synthetic head: a square wave between about -6.5 and -1
+        // degrees of yaw, switching every 6 frames, from before the front pose starts (frame 15). Every single step
+        // looks like one of Vision's jumps on a still head; removing them all accepted the front keyframes during the
+        // shake. (The first step is a jump until the second one arrives.)
+        let (controller, tracker) = makeController()
+        let factory = GuidanceFrameFactory()
+        var noise = VisionJitter(seed: 11)
+        noise.stepDeg = 0; noise.spikeProbability = 0; noise.noiseDeg = 0.3
+        var updates: [ScanUpdate] = []
+        for i in 0 ..< 150 {
+            let t = Double(i) / 30
+            let e = noise.next()
+            let yaw: Float = i < 12 ? 0 : (((i - 12) / 6) % 2 == 0 ? -6.5 : -1) + e.x
+            let obs = HeadObservation(pose: HeadPose(yaw: yaw, pitch: i < 12 ? 0 : -2 + e.y, roll: 0, confidence: 0.9),
+                                      faceRect: factory.faceRect, landmarks: [], personMask: nil)
+            tracker.setScript { _ in obs }
+            updates.append(await controller.process(factory.frame(sequence: UInt64(i), timestampMs: 5000 + t * 1000)))
+        }
+        #expect(controller.keyframeCount == 0)
+        #expect(updates.filter { $0.rejection == .headMoving }.count > 40)
     }
 
     @Test func rejectsCameraMotion() async {

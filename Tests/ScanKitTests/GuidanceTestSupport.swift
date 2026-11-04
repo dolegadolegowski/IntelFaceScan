@@ -196,13 +196,16 @@ struct SimulatedUser {
 }
 
 /// Vision-like reading errors of a held head, deterministic per seed: Gaussian jitter, steps that switch the reading
-/// by several degrees and keep it there for a few frames (as Vision does on the held synthetic head: 3-6 degrees in
+/// by several degrees and keep it there for a while (as Vision does on the held synthetic head: 3-6 degrees in
 /// pitch on "down"), and single-frame outliers.
 struct VisionJitter {
     var noiseDeg: Float = 0.5
     var stepDeg: Float = 4
-    /// Frames between two steps of one axis.
-    var stepInterval: ClosedRange<Int> = 6 ... 14
+    /// Frames between two steps of one axis. Vision's jumps on the held synthetic head come in bursts between quiet
+    /// spells of 1-2 s (GuidanceSyntheticVisionStudy); steps every 6-14 frames would be a 1-2.5 Hz square wave, which
+    /// is what Vision reads for a real shake of the head (a 2.5 Hz +-6 degree yaw shake: steps of ~5.5 degrees every
+    /// 6 frames), and PoseHistory must count that as motion.
+    var stepInterval: ClosedRange<Int> = 15 ... 45
     var spikeProbability: Float = 0.02
     var spikeDeg: Float = 5
     private var state: UInt64
