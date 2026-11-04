@@ -127,7 +127,7 @@ mask/000000.png    8-bit head mask (optional)
 Swift package (`swift build -c release`) → `build/IntelFaceScan.app` (`scripts/bundle-app.sh`: helper in
 `Contents/Helpers`, `librealsense2.X.Y.dylib` in `Contents/Frameworks`, `ifscan` in `Contents/MacOS`, ad-hoc
 signature). It prints the time of each step: from a fresh clone on an M3 Ultra (28 cores, Command Line Tools only)
-2¼–2½ min in three runs – submodules 19 s, librealsense 45–63 s, helper 3–5 s, Swift release build 62–63 s,
+133–152 s in three fresh-clone builds – submodules 19 s, librealsense 45–63 s, helper 3–5 s, Swift release build 62–63 s,
 bundle 2–3 s; a second run without changes takes 3 s.
 
 Requirements: an Apple Silicon Mac, the Command Line Tools (`xcode-select --install`) or Xcode 27 with the macOS
