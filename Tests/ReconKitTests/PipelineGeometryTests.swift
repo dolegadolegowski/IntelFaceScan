@@ -5,6 +5,7 @@ import Foundation
 @testable import ReconKit
 import ScanKit
 import simd
+import SyntheticData
 import Testing
 
 @Suite("Pipeline geometry")
@@ -65,6 +66,31 @@ struct PipelineGeometryTests {
         #expect(abs(roll - angle) < 0.5 * .pi / 180)
         let (fallback, used) = HeadSegmentation.estimateImageRoll(landmarks: Array(rotated.prefix(5)), fallbackDegrees: 3)
         #expect(!used && abs(fallback - 3 * .pi / 180) < 1e-6)
+    }
+
+    @Test func imageRollOfVisionLikeConstellations() {
+        // SyntheticScan's 76 Vision-like landmarks of a near-frontal head (yaw and pitch +-3 deg, roll +-10 deg) with
+        // 1 px noise at 1280x800. With hard limits for the upper-left / upper-right sets, the jaw contour points at
+        // eye height switched sets: mean 1.38 deg, p95 3.47 deg error (the export frame of `ifscan synth`'s default
+        // scan was rolled by 3.1 deg); with ramped weights 0.47 / 1.08 deg.
+        var o = SyntheticScan.Options()
+        o.width = 1280
+        o.height = 800
+        o.meshResolution = 48
+        let scene = SyntheticScene(options: o)
+        var rng = Rng(s: 7)
+        var errors: [Float] = []
+        for _ in 0 ..< 200 {
+            let truth = HeadPose(yaw: Float(6 * (rng.uniform() - 0.5)), pitch: Float(6 * (rng.uniform() - 0.5)),
+                                 roll: Float(20 * (rng.uniform() - 0.5)))
+            let landmarks = scene.landmarks(cameraFromWorld: scene.cameraFromWorld(headPose: truth))
+                .map { $0 + SIMD2(Float(rng.gaussian()), Float(rng.gaussian())) }
+            let (roll, _) = HeadSegmentation.estimateImageRoll(landmarks: landmarks, fallbackDegrees: truth.roll + Float(2 * rng.gaussian()))
+            errors.append(abs(roll * 180 / .pi - truth.roll))
+        }
+        errors.sort()
+        let mean = errors.reduce(0, +) / Float(errors.count), p95 = errors[Int(0.95 * Float(errors.count - 1))]
+        #expect(mean < 0.7 && p95 < 1.4, "roll error mean \(mean), p95 \(p95) deg")
     }
 
     @Test func robustMeanIgnoresOutlyingRotations() throws {

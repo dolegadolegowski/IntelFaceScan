@@ -217,15 +217,19 @@ enum HeadSegmentation {
         for _ in 0 ..< 3 {
             let c = cos(-roll), s = sin(-roll)
             var left = SIMD2<Float>.zero, right = SIMD2<Float>.zero
-            var nl = 0, nr = 0
+            var wl: Float = 0, wr: Float = 0
             for p in pts {
                 let d = p - center
                 let q = SIMD2(c * d.x - s * d.y, s * d.x + c * d.y)   // leveled
-                guard q.y < -0.05 * size.y, abs(q.x) > 0.1 * size.x else { continue }
-                if q.x < 0 { left += p; nl += 1 } else { right += p; nr += 1 }
+                // Weights ramp up over 10 % of the face size past each limit. With hard limits, a landmark at a
+                // limit (on Vision-like constellations the jaw contour at eye height) joined one side and not the
+                // other with a pixel of noise or a few degrees of yaw: 1.4 deg mean, 3.5 deg p95 error at 1 px.
+                let w = min(1, max(0, (-q.y / size.y - 0.05) / 0.1)) * min(1, max(0, (abs(q.x) / size.x - 0.1) / 0.1))
+                guard w > 0 else { continue }
+                if q.x < 0 { left += w * p; wl += w } else { right += w * p; wr += w }
             }
-            guard nl >= 2, nr >= 2 else { return fallback }
-            let d = right / Float(nr) - left / Float(nl)
+            guard wl >= 2, wr >= 2 else { return fallback }
+            let d = right / wr - left / wl
             roll = atan2(d.y, d.x)
         }
         // A wildly different estimate means an unusual constellation; trust Vision then.
