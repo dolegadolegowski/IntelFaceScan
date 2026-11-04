@@ -145,13 +145,19 @@ final class AppModel {
     @ObservationIgnored private var writeTasks: [Int: Task<Void, Never>] = [:]
     @ObservationIgnored private var nextTaskID = 0
     @ObservationIgnored private let log = Logger(subsystem: "IntelFaceScan", category: "App")
+    /// Plays the scan sounds; nil (tests, snapshots) plays none.
+    @ObservationIgnored private let soundPlayer: ScanSoundPlaying?
+    @ObservationIgnored private var cues = ScanCueTracker()
 
     /// - Parameters:
     ///   - defaults: where the settings persist; nil keeps them in memory (tests, snapshots).
     ///   - sourceFactory: makes the camera source for a request.
-    init(defaults: UserDefaults? = .standard, sourceFactory: @escaping SourceFactory = AppModel.makeSource) {
+    ///   - soundPlayer: plays the scan sounds (the app passes SystemScanSoundPlayer; tests none or a recorder).
+    init(defaults: UserDefaults? = .standard, sourceFactory: @escaping SourceFactory = AppModel.makeSource,
+         soundPlayer: ScanSoundPlaying? = nil) {
         self.defaults = defaults
         self.sourceFactory = sourceFactory
+        self.soundPlayer = soundPlayer
         settings = defaults.map { AppSettings.load(from: $0) } ?? AppSettings()
         do {
             renderer = try PreviewRenderer(device: nil)
@@ -410,6 +416,7 @@ final class AppModel {
         guard screen == .scanning, let controller = scanController,
               result.controllerID == ObjectIdentifier(controller) else { return }
         scanUpdate = update
+        handleScanCue(update)
         switch update.phase {
         case .finished:
             completeScan()
@@ -419,6 +426,11 @@ final class AppModel {
         default:
             break
         }
+    }
+
+    /// The scan sound for an update, if any (internal for the tests).
+    func handleScanCue(_ update: ScanUpdate) {
+        if let sound = cues.cue(for: update), settings.scanSounds { soundPlayer?.play(sound) }
     }
 
     private func updateExposureROI() {
@@ -455,6 +467,7 @@ final class AppModel {
         scanConfiguration = configuration
         scanController = controller
         scanUpdate = nil
+        cues.reset()
         capture = nil
         captureKeptShoulders = nil
         result = nil
@@ -476,6 +489,7 @@ final class AppModel {
         scanController?.cancel()
         scanController = nil
         scanUpdate = nil
+        cues.reset()
         if let previewController { pipeline?.setController(previewController) }
         if screen == .scanning { screen = pipeline != nil ? .preview : .welcome }
     }

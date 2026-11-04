@@ -31,7 +31,7 @@ private struct InstructionBanner: View {
 
     var body: some View {
         let update = model.scanUpdate
-        let text = update.map { S.instruction($0.instructionKind) } ?? ""
+        let text = update.map { S.instruction(for: $0) } ?? ""
         VStack(spacing: 4) {
             if !text.isEmpty {
                 Text(text)

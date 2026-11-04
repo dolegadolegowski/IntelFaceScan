@@ -22,7 +22,7 @@ struct IntelFaceScanApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    let model = AppModel()
+    let model = AppModel(soundPlayer: SystemScanSoundPlayer())
     private var terminationPending = false
     private let log = Logger(subsystem: "IntelFaceScan", category: "App")
 

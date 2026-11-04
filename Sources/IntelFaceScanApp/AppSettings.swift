@@ -60,6 +60,8 @@ struct AppSettings: Codable, Equatable {
     var mirrored = true
     var previewMode: PreviewMode = .color
     var showLandmarks = true
+    /// A sound when a pose is recognized and when the scan is complete (ScanSounds.swift).
+    var scanSounds = true
 
     static let defaultsKey = "IntelFaceScan.settings.v1"
 

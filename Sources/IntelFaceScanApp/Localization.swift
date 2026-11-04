@@ -114,6 +114,11 @@ enum S {
     }
     static var diagonalPoses: String { tr("Diagonal poses (optional)", "Pozy ukośne (opcjonalne)") }
     static var framesPerPose: String { tr("Frames per pose", "Klatki na pozę") }
+    static var scanSounds: String { tr("Scan sounds", "Dźwięki skanu") }
+    static var scanSoundsHelp: String {
+        tr("A tick when the head reaches a pose (hold still), a chime when the pose is captured, a fanfare when the scan is complete",
+           "Krótki dźwięk po osiągnięciu pozy (nie ruszaj się), inny po jej zaliczeniu i fanfara po zakończeniu skanu")
+    }
     static var reconstructionSection: String { tr("Reconstruction", "Rekonstrukcja") }
     static var voxelSize: String { tr("Voxel size", "Rozmiar woksela") }
     static var surfaceMethod: String { tr("Surface", "Powierzchnia") }
@@ -231,6 +236,23 @@ enum S {
         case .upRight: return tr("Look up and to your right", "Spójrz w górę i w prawo")
         case .downLeft: return tr("Look down and to your left", "Spójrz w dół i w lewo")
         case .downRight: return tr("Look down and to your right", "Spójrz w dół i w prawo")
+        }
+    }
+
+    /// The banner text: a turn that is not within the tolerance says which way to correct it.
+    static func instruction(for update: ScanUpdate) -> String {
+        if case .turn = update.instructionKind, let hint = update.turnHint, hint != .further { return turnHint(hint) }
+        return instruction(update.instructionKind)
+    }
+
+    static func turnHint(_ hint: TurnHint) -> String {
+        switch hint {
+        case .further: return tr("Turn further", "Obróć dalej")
+        case .back: return tr("Too far — turn back a little", "Za daleko — cofnij głowę trochę")
+        case .chinUp: return tr("Raise your chin a little", "Unieś lekko brodę")
+        case .chinDown: return tr("Lower your chin a little", "Opuść lekko brodę")
+        case .faceLeft: return tr("Turn your face a little to your left", "Obróć twarz lekko w swoją lewą stronę")
+        case .faceRight: return tr("Turn your face a little to your right", "Obróć twarz lekko w swoją prawą stronę")
         }
     }
 

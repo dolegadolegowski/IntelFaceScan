@@ -95,14 +95,19 @@ notarized): on another Mac, open it the first time with right-click → **Open**
 3. Choose **Live camera**, enter the administrator password and wait for the preview. Move until the distance
    indicator is green: about **0.56–0.71 m** with the default configuration, **0.41–0.56 m** with *Close-range mode* on
    (the exact range for your camera is shown under the preview).
-4. Press **Start scan** and follow the animated head: front, up, down, left, right (and the diagonals if enabled).
-   Each pose captures 3 sharp, still frames (configurable). The whole scan takes about a minute.
+4. Press **Start scan**, look at the camera, then turn up, down, left and right (and the diagonals if enabled). The
+   animated head suggests the next pose, but after the front one every pose counts in whatever order you make it,
+   and a turn further than the animation is fine. When you reach a pose you hear a short tick: **hold still** until
+   the chime, which means its 3 sharp, still frames (configurable) are captured; then move on. A turn that stops a
+   little short of the suggested pose also counts when you hold it for about 2 s. A fanfare ends the scan, which
+   takes about a minute.
 5. Check the summary, then press **Reconstruct 3D model**. On an M3 Ultra, reconstructing a 15-keyframe scan takes
    about 20–40 s.
 6. Look at the model in the 3D preview and export **OBJ** (and optionally PLY and the raw session).
 
 Tips: if a pose does not complete, read the instruction at the bottom of the preview and the reason below it (most
-often *Move closer* / *Move back*, *Hold still…* or the turn instruction, such as *Turn your head to your left*).
+often *Move closer* / *Move back*, *Hold still…*, the turn instruction, such as *Turn your head to your left*, or a
+correction such as *Too far — turn back a little* or *Raise your chin a little*).
 *Skip pose* moves on. *Finish* ends the scan with the frames captured so far; then press *Reconstruct 3D model* on the
 summary to build the model from them.
 
@@ -126,6 +131,7 @@ summary to build the model from them.
 | Close the back of the head | on | closes the unscanned back of the head and the neck with a smooth synthesized surface colored from the neighboring hair and skin, so the model is watertight (Preview does not draw the inside of an open model); the closed part is a guess, not a measurement |
 | Mirror the preview | on | the preview behaves like a mirror |
 | Show face landmarks | on | draws the face landmarks found by Apple Vision on the live preview |
+| Scan sounds | on | a tick when the head reaches a pose (hold still), a chime when the pose is captured, a fanfare when the scan is complete |
 
 ## Output files
 
@@ -158,6 +164,7 @@ ifscan reconstruct synthetic-camera -o demo.obj      # the animated synthetic he
 ifscan synth -o test.ifsdataset                      # synthetic dataset with ground truth
 ifscan reconstruct test.ifsdataset -o test.obj --report report.json
 ifscan eval test.obj --gt test.ifsdataset/ground_truth.obj --report report.json   # surface distance in mm
+ifscan reconstruct recording.db3 -o head.obj --trace scan.csv   # one CSV row per frame: pose, distance, gates, rejection
 ifscan info recording.db3
 ```
 
@@ -348,14 +355,19 @@ Uruchom aplikację przez `open build/IntelFaceScan.app` albo skopiuj ją do `/Ap
 3. Wybierz **Kamera na żywo**, wpisz hasło administratora i poczekaj na podgląd. Ustaw się tak, aby wskaźnik
    odległości był zielony: ok. **0,56–0,71 m** w konfiguracji domyślnej, **0,41–0,56 m** z włączonym *Trybem bliskiego
    zasięgu* (dokładny zakres dla Twojej kamery jest widoczny pod podglądem).
-4. Naciśnij **Rozpocznij skan** i podążaj za animowaną głową: prosto, góra, dół, lewo, prawo (i pozy ukośne, jeśli są
-   włączone). Każda poza zbiera 3 ostre, nieruchome klatki (do ustawienia). Cały skan trwa około minuty.
+4. Naciśnij **Rozpocznij skan**, spójrz w kamerę, potem obróć głowę w górę, w dół, w lewo i w prawo (i ukośnie, jeśli
+   pozy ukośne są włączone). Animowana głowa podpowiada następną pozę, ale po pozie prosto każda poza liczy się w
+   dowolnej kolejności, a obrót dalszy niż na animacji też jest dobry. Po osiągnięciu pozy słychać krótki dźwięk:
+   **nie ruszaj się** do drugiego dźwięku, który oznacza, że 3 ostre, nieruchome klatki (do ustawienia) są zebrane;
+   wtedy przejdź dalej. Obrót, który zatrzymał się trochę przed podpowiadaną pozą, też się liczy, gdy przytrzymasz go
+   ok. 2 s. Fanfara kończy skan, który trwa około minuty.
 5. Sprawdź podsumowanie i naciśnij **Rekonstruuj model 3D**. Na M3 Ultra rekonstrukcja skanu z 15 klatek kluczowych
    trwa ok. 20–40 s.
 6. Obejrzyj model w podglądzie 3D i wyeksportuj **OBJ** (opcjonalnie PLY i surową sesję).
 
 Wskazówki: jeśli poza nie zostaje zaliczona, przeczytaj polecenie u dołu podglądu i powód podany pod nim (najczęściej
-*Podejdź bliżej* / *Odsuń się*, *Nie ruszaj się…* albo polecenie obrotu, np. *Obróć głowę w swoją lewą stronę*).
+*Podejdź bliżej* / *Odsuń się*, *Nie ruszaj się…*, polecenie obrotu, np. *Obróć głowę w swoją lewą stronę*, albo
+poprawka, np. *Za daleko — cofnij głowę trochę* lub *Unieś lekko brodę*).
 *Pomiń pozę* przechodzi dalej. *Zakończ* kończy skan z dotychczasowymi klatkami; potem naciśnij *Rekonstruuj model 3D*
 w podsumowaniu, aby zbudować z nich model.
 
@@ -379,6 +391,7 @@ w podsumowaniu, aby zbudować z nich model.
 | Domknij tył głowy | włączone | domyka nieskanowany tył głowy i szyję gładką, wygenerowaną powierzchnią w kolorach sąsiednich włosów i skóry, więc model jest szczelny (Podgląd nie rysuje wnętrza otwartego modelu); domknięta część jest przybliżeniem, nie pomiarem |
 | Lustrzany podgląd | włączony | podgląd działa jak lustro |
 | Pokaż punkty twarzy | włączone | rysuje na podglądzie na żywo punkty twarzy wykryte przez Apple Vision |
+| Dźwięki skanu | włączone | krótki dźwięk po osiągnięciu pozy (nie ruszaj się), inny po jej zaliczeniu i fanfara po zakończeniu skanu |
 
 ## Pliki wynikowe
 
@@ -410,6 +423,7 @@ ifscan reconstruct synthetic-camera -o demo.obj      # animowana syntetyczna gł
 ifscan synth -o test.ifsdataset                      # syntetyczny zestaw danych ze wzorcem
 ifscan reconstruct test.ifsdataset -o test.obj --report raport.json
 ifscan eval test.obj --gt test.ifsdataset/ground_truth.obj --report raport.json   # odległość powierzchni w mm
+ifscan reconstruct nagranie.db3 -o glowa.obj --trace skan.csv   # jeden wiersz CSV na klatkę: poza, odległość, bramki, powód odrzucenia
 ifscan info nagranie.db3
 ```
 

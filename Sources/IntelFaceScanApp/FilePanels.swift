@@ -19,7 +19,21 @@ enum FilePanels {
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         if !contentTypes.isEmpty { panel.allowedContentTypes = contentTypes }
-        return await run(panel)
+        return await run(panel).map { normalizedSaveURL($0, contentTypes: contentTypes) }
+    }
+
+    /// The chosen URL with its extension once: the panel appends the extension of a type the system does not declare
+    /// (a dynamic one, such as .db3) to a name that already ends with it, which saved "head-....db3.db3". The doubled
+    /// name stays when the single one already exists (the panel asked about replacing the other name only).
+    nonisolated static func normalizedSaveURL(_ url: URL, contentTypes: [UTType],
+                                              exists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) -> URL {
+        var name = url.lastPathComponent
+        for ext in Set(contentTypes.compactMap { $0.preferredFilenameExtension?.lowercased() }) {
+            let doubled = ".\(ext).\(ext)"
+            while name.lowercased().hasSuffix(doubled) { name.removeLast(ext.count + 1) }
+        }
+        let single = url.deletingLastPathComponent().appendingPathComponent(name)
+        return single == url || exists(single) ? url : single
     }
 
     /// Asks for an existing file of one of the types.

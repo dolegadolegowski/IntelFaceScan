@@ -195,6 +195,8 @@ private struct SettingsSections: View {
             Toggle(S.mirrored, isOn: $model.settings.mirrored)
             Toggle(S.landmarks, isOn: $model.settings.showLandmarks)
             Toggle(S.autoExposureFace, isOn: $model.settings.autoExposureOnFace)
+            Toggle(S.scanSounds, isOn: $model.settings.scanSounds)
+                .help(S.scanSoundsHelp)
             Button(S.resetSettings, role: .destructive) { model.resetSettings() }
                 .disabled(model.depthSettingsLocked)
         }
