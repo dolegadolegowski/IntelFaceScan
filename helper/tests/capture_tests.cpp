@@ -1349,6 +1349,19 @@ TEST_CASE( live_device_events_and_shutdown )
     CHECK( col.event_count( "device_connected" ) == 1 );
     CHECK( engine->device_info()["serial"] == k_synthetic_serial );
 
+    // A hardware reset re-enumerates the camera (played here by the test): it waits for the new instance and
+    // adopts it, and the intentional re-enumeration is not reported as a disconnect.
+    std::thread reenumerate( [&] {
+        std::this_thread::sleep_for( 200ms );
+        ctx.unload_device( o.path );
+        ctx.load_device( o.path );
+    } );
+    engine->hardware_reset();
+    reenumerate.join();
+    CHECK( col.event_count( "device_disconnected" ) == 1 );
+    CHECK( col.event_count( "device_connected" ) == 1 );
+    CHECK( engine->device_info()["serial"] == k_synthetic_serial );
+
     // Unplugged while shutting down: shutdown() waits for the event being emitted and no callback runs after it
     // returned (the callbacks capture objects the caller destroys after shutdown(), e.g. the IPC service).
     std::thread unplug( [&] { ctx.unload_device( o.path ); } );

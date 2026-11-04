@@ -365,6 +365,7 @@ private:
     void release_device_locked();
     void expect_reenumeration_locked();
     rs2::device wait_for_reenumeration_locked( const char * what );
+    void reenumerate_locked( const char * what );
     void install_device_callback_locked();
 
     rs2::sensor find_sensor_locked( const std::string & kind ) const;
@@ -663,6 +664,25 @@ rs2::device RealSenseEngine::wait_for_reenumeration_locked( const char * what )
         throw std::runtime_error( std::string( "The camera did not come back within 20 s after " ) + what
                                   + ". Unplug it, plug it in again and reconnect." );
     return arrived;
+}
+
+void RealSenseEngine::reenumerate_locked( const char * what )
+{
+    release_device_locked();
+    try
+    {
+        adopt_device_locked( wait_for_reenumeration_locked( what ) );
+    }
+    catch( ... )
+    {
+        // The old instance is released and the new one did not show up: the camera counts as disconnected, so a late
+        // return or a replug reports device_connected and the next command adopts it (expected=true would hide both
+        // events, and 'lost' was never set because 'current' had been released before the removal was seen).
+        std::lock_guard< std::mutex > lock( m_watch->mutex );
+        m_watch->expected = false;
+        m_watch->lost = true;
+        throw;
+    }
 }
 
 void RealSenseEngine::ensure_device_locked()
@@ -995,9 +1015,17 @@ void RealSenseEngine::enable_advanced_mode_locked()
         return;
     log( "info", "Enabling the camera's advanced mode; the camera restarts (a few seconds, only needed once)" );
     expect_reenumeration_locked();
-    adv.toggle_advanced_mode( true );
-    release_device_locked();
-    adopt_device_locked( wait_for_reenumeration_locked( "enabling advanced mode" ) );
+    try
+    {
+        adv.toggle_advanced_mode( true );
+    }
+    catch( ... )
+    {
+        std::lock_guard< std::mutex > lock( m_watch->mutex );
+        m_watch->expected = false;
+        throw;
+    }
+    reenumerate_locked( "enabling advanced mode" );
     rs400::advanced_mode again( m_device );
     if( ! again || ! again.is_enabled() )
         throw std::runtime_error( "The camera did not enable advanced mode" );
@@ -1594,8 +1622,7 @@ void RealSenseEngine::hardware_reset()
     try
     {
         m_device.hardware_reset();
-        release_device_locked();
-        adopt_device_locked( wait_for_reenumeration_locked( "the hardware reset" ) );
+        reenumerate_locked( "the hardware reset" );
         if( m_configured )
             apply_configuration_locked( m_config );
         if( was_streaming )

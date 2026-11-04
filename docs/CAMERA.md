@@ -141,7 +141,8 @@ helper enables it on the first `configure`: the camera restarts (3–8 s) and ke
   stream when RGB is toggled. A depth (or color) frame counter that goes backwards anyway is reported as
   `stream_restarted` (`{"stream", "previous_frame", "frame"}`) and resets the temporal filter.
 * **Disconnects.** The devices-changed callback reports `device_disconnected` / `device_connected` (not for the
-  intentional re-enumerations of advanced mode and hardware reset). The next command after a reconnect adopts the
+  intentional re-enumerations of advanced mode and hardware reset; when the camera does not come back from one of
+  these within 20 s it counts as disconnected, so its later return is reported as `device_connected`). The next command after a reconnect adopts the
   new device instance and re-applies the configuration (advanced mode persists, options do not). Streaming does not
   resume by itself.
 * **Auto-exposure ROI.** RGB: the rectangle clamped to the image. Depth: the rectangle's outline deprojected at
