@@ -299,29 +299,40 @@ fr_status fr_mesh_remove_small_components( fr_mesh * mesh, float min_relative_si
         const uint32_t n = mesh->vertex_count, t = mesh->triangle_count;
         if( t == 0 )
             return FR_OK;
-        union_find uf( n );
-        for( uint32_t f = 0; f < t; ++f )
-        {
-            const uint32_t * tri = mesh->indices + size_t( f ) * 3;
-            uf.unite( tri[0], tri[1] );
-            uf.unite( tri[0], tri[2] );
-        }
-        // UV charts of one surface are joined through their split seam vertices.
+        // Triangles are connected through shared edges. Pieces that touch the rest of the surface only at a vertex
+        // (single triangles and small flaps that meshing and cropping leave along ragged borders) are components of
+        // their own: kept, hole filling would close their boundary loop with a reversed copy of the flap (duplicate
+        // faces, non-manifold edges). UV charts of one surface are joined through their split seam vertices.
+        std::vector< uint32_t > welded;
+        const uint32_t * idx = mesh->indices;
         if( mesh->uvs )
         {
-            const std::vector< uint32_t > rep = coincident_representatives( mesh->positions, n );
-            for( uint32_t v = 0; v < n; ++v )
-                uf.unite( v, rep[v] );
+            welded = remap_indices( mesh->indices, size_t( t ) * 3, coincident_representatives( mesh->positions, n ) );
+            idx = welded.data();
         }
-        std::vector< uint32_t > triangles_of( n, 0 );
+        const csr vf = vertex_faces( n, idx, t );
+        union_find uf( t );
         for( uint32_t f = 0; f < t; ++f )
-            ++triangles_of[uf.find( mesh->indices[size_t( f ) * 3] )];
-        uint32_t largest_root = 0, largest = 0;
-        for( uint32_t v = 0; v < n; ++v )
-            if( triangles_of[v] > largest )
+            for( int k = 0; k < 3; ++k )
             {
-                largest = triangles_of[v];
-                largest_root = v;
+                const uint32_t a = idx[size_t( f ) * 3 + k], c = idx[size_t( f ) * 3 + ( k + 1 ) % 3];
+                for( uint32_t i = vf.begin( a ); i < vf.end( a ); ++i )
+                {
+                    const uint32_t g = vf.data[i];
+                    const uint32_t * other = idx + size_t( g ) * 3;
+                    if( g != f && ( other[0] == c || other[1] == c || other[2] == c ) )
+                        uf.unite( f, g );
+                }
+            }
+        std::vector< uint32_t > triangles_of( t, 0 );
+        for( uint32_t f = 0; f < t; ++f )
+            ++triangles_of[uf.find( f )];
+        uint32_t largest_root = 0, largest = 0;
+        for( uint32_t f = 0; f < t; ++f )
+            if( triangles_of[f] > largest )
+            {
+                largest = triangles_of[f];
+                largest_root = f;
             }
         const double threshold = double( std::max( min_relative_size, 0.f ) ) * largest;
 
@@ -331,7 +342,7 @@ fr_status fr_mesh_remove_small_components( fr_mesh * mesh, float min_relative_si
         uint32_t removed = 0;
         for( uint32_t f = 0; f < t; ++f )
         {
-            const uint32_t root = uf.find( b.indices[size_t( f ) * 3] );
+            const uint32_t root = uf.find( f );
             const bool keep = keep_largest_only ? root == largest_root : double( triangles_of[root] ) >= threshold;
             if( keep )
                 indices.insert( indices.end(), &b.indices[size_t( f ) * 3], &b.indices[size_t( f ) * 3] + 3 );

@@ -192,6 +192,79 @@ struct MeshOperationTests {
         #expect(filled < 3)
     }
 
+    /// A sphere cut open below y = -0.06 (the "neck"), with one small hole and two flaps that touch the surface only at
+    /// a vertex (a lone triangle and a fan of three), as meshing and cropping leave them along ragged borders.
+    static func sphereWithFlaps() -> (mesh: ReconMesh, flapTriangles: Int) {
+        var mesh = MeshFactory.icosphere(level: 4)
+        let hole = simd_normalize(SIMD3<Float>(1, 0.4, 0.3)) * 0.1
+        mesh.indices = stride(from: 0, to: mesh.indices.count, by: 3).flatMap { t -> [UInt32] in
+            let c = (mesh.positions[Int(mesh.indices[t])] + mesh.positions[Int(mesh.indices[t + 1])] + mesh.positions[Int(mesh.indices[t + 2])]) / 3
+            return c.y < -0.06 || simd_distance(c, hole) < 0.012 ? [] : Array(mesh.indices[t ..< t + 3])
+        }
+        // Anchor vertices on the surface, far from the hole and the cut.
+        func nearest(_ d: SIMD3<Float>) -> UInt32 {
+            let target = simd_normalize(d) * 0.1
+            return UInt32(mesh.positions.indices.min { simd_distance(mesh.positions[$0], target) < simd_distance(mesh.positions[$1], target) }!)
+        }
+        let a = nearest([-1, 0.5, 0]), b = nearest([0, 0.5, -1])
+        func add(_ p: SIMD3<Float>) -> UInt32 { mesh.positions.append(p); return UInt32(mesh.positions.count - 1) }
+        let pa = mesh.positions[Int(a)], pb = mesh.positions[Int(b)]
+        // Lone triangle sticking out of the surface at vertex a.
+        let a1 = add(pa * 1.08 + SIMD3(0, 0.004, 0)), a2 = add(pa * 1.08 + SIMD3(0, -0.004, 0.004))
+        mesh.indices += [a, a1, a2]
+        // Fan of three triangles at vertex b.
+        let b1 = add(pb * 1.1 + SIMD3(0.004, 0, 0)), b2 = add(pb * 1.12), b3 = add(pb * 1.1 + SIMD3(-0.004, 0.002, 0))
+        let b4 = add(pb * 1.08 + SIMD3(-0.002, -0.004, 0))
+        mesh.indices += [b, b1, b2, b, b2, b3, b, b3, b4]
+        return (mesh, 4)
+    }
+
+    static func duplicateFaces(_ mesh: ReconMesh) -> Int {
+        var seen = Set<SIMD3<UInt32>>(), duplicates = 0
+        for t in 0 ..< mesh.triangleCount {
+            let s = [mesh.indices[3 * t], mesh.indices[3 * t + 1], mesh.indices[3 * t + 2]].sorted()
+            if !seen.insert(SIMD3(s[0], s[1], s[2])).inserted { duplicates += 1 }
+        }
+        return duplicates
+    }
+
+    /// Filling the boundary loop of a flap would close it with a reversed copy (duplicate faces, edges with four
+    /// triangles). Measured on a synthetic head reconstruction before the fix: 19 duplicate faces, 24 extra
+    /// non-manifold directed edges.
+    @Test func fillingHolesNeverDuplicatesFacesOrEdges() throws {
+        var (mesh, _) = Self.sphereWithFlaps()
+        let before = mesh.triangleCount
+        let unreferenced = mesh.vertexCount - Set(mesh.indices).count  // the cut-away part of the sphere
+        #expect(MeshMeasure.directedEdges(mesh).values.allSatisfy { $0 == 1 })
+        var filled: UInt32 = 0
+        try mesh.withCoreMesh { try check(fr_mesh_fill_holes($0, 200, &filled)) }
+        #expect(mesh.triangleCount > before)
+        #expect(Self.duplicateFaces(mesh) == 0)
+        #expect(MeshMeasure.directedEdges(mesh).values.allSatisfy { $0 == 1 })
+        // The hole is closed: the remaining loops are the neck and at most the flaps' own borders.
+        let loops = MeshMeasure.boundaryLoops(mesh)
+        #expect(!loops.contains { loop in loop.allSatisfy { simd_distance(mesh.positions[Int($0)], simd_normalize(SIMD3<Float>(1, 0.4, 0.3)) * 0.1) < 0.02 } })
+        #expect(filled >= 1)
+        // No unreferenced vertices from patches that were discarded.
+        #expect(mesh.vertexCount - Set(mesh.indices).count == unreferenced)
+    }
+
+    /// Pieces attached to the surface only at a vertex are separate components (connectivity through edges).
+    @Test func flapsTouchingAtAVertexAreSmallComponents() throws {
+        var (mesh, flaps) = Self.sphereWithFlaps()
+        let before = mesh.triangleCount
+        var removed: UInt32 = 0
+        try mesh.withCoreMesh { try check(fr_mesh_remove_small_components($0, 0.05, 0, &removed)) }
+        #expect(removed == UInt32(flaps))
+        #expect(mesh.triangleCount == before - flaps)
+        #expect(mesh.positions.allSatisfy { simd_length($0) < 0.1001 })
+        // The cleaned mesh fills to a surface with only the neck open.
+        var filled: UInt32 = 0
+        try mesh.withCoreMesh { try check(fr_mesh_fill_holes($0, 200, &filled)) }
+        #expect(filled == 1 && MeshMeasure.boundaryLoops(mesh).count == 1)
+        #expect(MeshMeasure.topology(mesh).consistent)
+    }
+
     @Test func decimationReachesTheTarget() throws {
         var mesh = MeshFactory.icosphere(level: 5)  // 20480 triangles
         mesh.colors = mesh.positions.map { p in SIMD3(UInt8(128 + 1000 * p.x), 90, 60) }

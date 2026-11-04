@@ -123,8 +123,12 @@ vec3 edge_triangle_normal( const mesh_buffers & b, const csr & vf, size_t triang
 }
 
 // Liepa's dynamic programming over the loop polygon: minimizes (largest dihedral angle, total area)
-// lexicographically. Returns triangles of loop-local indices, oriented to continue the mesh.
-std::vector< tri3 > triangulate_loop( const std::vector< vec3 > & P, const std::vector< vec3 > & edge_normal )
+// lexicographically. Returns triangles of loop-local indices, oriented to continue the mesh, or nothing when every
+// triangulation needs a forbidden diagonal (forbidden(i, k): an edge between loop vertices i and k already exists, and
+// a second pair of triangles on it would make the edge non-manifold).
+template< typename Forbidden >
+std::vector< tri3 > triangulate_loop( const std::vector< vec3 > & P, const std::vector< vec3 > & edge_normal,
+                                      Forbidden && forbidden )
 {
     const uint32_t n = uint32_t( P.size() );
     std::vector< float > angle( size_t( n ) * n, 0.f ), area( size_t( n ) * n, 0.f );
@@ -139,8 +143,17 @@ std::vector< tri3 > triangulate_loop( const std::vector< vec3 > & P, const std::
             float best_angle = FLT_MAX, best_area = FLT_MAX;
             uint32_t best_m = i + 1;
             vec3 best_normal;
+            // (0, n - 1) is the loop's closing edge; every other (i, k) here is a diagonal.
+            if( ! ( i == 0 && k == n - 1 ) && forbidden( i, k ) )
+            {
+                angle[at( i, k )] = FLT_MAX;
+                area[at( i, k )] = FLT_MAX;
+                continue;
+            }
             for( uint32_t m = i + 1; m < k; ++m )
             {
+                if( angle[at( i, m )] == FLT_MAX || angle[at( m, k )] == FLT_MAX )
+                    continue;
                 // The fill triangle (i, k, m) contains the reversed boundary edges, which keeps the orientation.
                 const vec3 c = cross( P[k] - P[i], P[m] - P[i] );
                 const float l = length( c );
@@ -164,6 +177,8 @@ std::vector< tri3 > triangulate_loop( const std::vector< vec3 > & P, const std::
             best[at( i, k )] = uint16_t( best_m );
             top_normal[at( i, k )] = best_normal;
         }
+    if( angle[at( 0, n - 1 )] == FLT_MAX )
+        return {};
     std::vector< tri3 > tris;
     tris.reserve( n - 2 );
     std::vector< std::pair< uint32_t, uint32_t > > stack{ { 0, n - 1 } };
@@ -227,11 +242,14 @@ public:
                 P[i] = b_.position( loop.v[i] );
                 edge_normal[i] = edge_triangle_normal( b_, vf_, t0_, loop.v[i], loop.v[( i + 1 ) % n] );
             }
-            for( const tri3 & t : triangulate_loop( P, edge_normal ) )
+            const auto forbidden = [&]( uint32_t i, uint32_t k ) { return edge_exists( loop.v[i], loop.v[k] ); };
+            for( const tri3 & t : triangulate_loop( P, edge_normal, forbidden ) )
                 patch.push_back( { loop.v[t[0]], loop.v[t[1]], loop.v[t[2]] } );
         }
-        else
+        if( patch.empty() )
         {
+            // Large loops, and loops whose every triangulation would reuse an existing edge: a fan around a new
+            // center vertex.
             std::vector< float > w( n, 1.f / float( n ) );
             const uint32_t c = b_.add_blend( loop.v.data(), w.data(), int( n ) );
             sigma_[c] = float( loop.length / n );
@@ -241,15 +259,98 @@ public:
 
         refine( patch );
         fair( patch, first_new );
+        if( ! keeps_manifold( patch, first_new ) )
+        {
+            truncate_vertices( first_new );
+            return false;
+        }
         for( const tri3 & t : patch )
+        {
             b_.indices.insert( b_.indices.end(), t.begin(), t.end() );
+            for( int e = 0; e < 3; ++e )
+            {
+                patch_directed_.insert( directed_key( t[e], t[( e + 1 ) % 3] ) );
+                patch_undirected_.insert( edge_key( t[e], t[( e + 1 ) % 3] ) );
+            }
+            patch_faces_.insert( sorted( t ) );
+        }
         return true;
     }
 
 private:
+    static uint64_t directed_key( uint32_t a, uint32_t c ) { return uint64_t( a ) << 32 | c; }
+    static tri3 sorted( tri3 t )
+    {
+        std::sort( t.begin(), t.end() );
+        return t;
+    }
+    struct tri_hash
+    {
+        size_t operator()( const tri3 & t ) const
+        {
+            return size_t( ( uint64_t( t[0] ) * 0x9E3779B97F4A7C15ull ) ^ ( uint64_t( t[1] ) * 0xC2B2AE3D27D4EB4Full )
+                           ^ ( uint64_t( t[2] ) * 0x165667B19E3779F9ull ) );
+        }
+    };
+
     bool original_edge( uint32_t a, uint32_t c ) const
     {
         return a < n0_ && c < n0_ && ( has_edge( out_, a, c ) || has_edge( out_, c, a ) );
+    }
+    // Undirected edge of the mesh as filled so far.
+    bool edge_exists( uint32_t a, uint32_t c ) const
+    {
+        return original_edge( a, c ) || patch_undirected_.count( edge_key( a, c ) );
+    }
+    bool directed_edge_exists( uint32_t a, uint32_t c ) const
+    {
+        return ( a < n0_ && c < n0_ && has_edge( out_, a, c ) ) || patch_directed_.count( directed_key( a, c ) );
+    }
+    bool face_exists( const tri3 & t ) const
+    {
+        if( t[0] < n0_ && t[1] < n0_ && t[2] < n0_ )
+            for( uint32_t k = vf_.begin( t[0] ); k < vf_.end( t[0] ); ++k )
+            {
+                const uint32_t * other = &b_.indices[size_t( vf_.data[k] ) * 3];
+                if( sorted( { other[0], other[1], other[2] } ) == sorted( t ) )
+                    return true;
+            }
+        return patch_faces_.count( sorted( t ) ) > 0;
+    }
+
+    // A patch may only add directed edges the mesh does not have yet (each once) and no second copy of an existing
+    // triangle. A loop that bounds a piece of surface instead of a hole (a flap attached at a vertex, a lone
+    // triangle) would otherwise be closed with a reversed copy of that piece: duplicate faces and edges with four
+    // triangles.
+    bool keeps_manifold( const std::vector< tri3 > & patch, uint32_t first_new ) const
+    {
+        std::unordered_set< uint64_t > added;
+        added.reserve( patch.size() * 3 );
+        for( const tri3 & t : patch )
+        {
+            if( t[0] == t[1] || t[1] == t[2] || t[0] == t[2] )
+                return false;
+            for( int e = 0; e < 3; ++e )
+            {
+                const uint32_t a = t[e], c = t[( e + 1 ) % 3];
+                if( ( a < first_new && c < first_new && directed_edge_exists( a, c ) ) || ! added.insert( directed_key( a, c ) ).second )
+                    return false;
+            }
+            if( t[0] < first_new && t[1] < first_new && t[2] < first_new && face_exists( t ) )
+                return false;
+        }
+        return true;
+    }
+
+    void truncate_vertices( uint32_t count )
+    {
+        b_.positions.resize( size_t( count ) * 3 );
+        if( b_.has_normals )
+            b_.normals.resize( size_t( count ) * 3 );
+        if( b_.has_colors )
+            b_.colors.resize( size_t( count ) * 3 );
+        if( b_.has_uvs )
+            b_.uvs.resize( size_t( count ) * 2 );
     }
 
     // Liepa's refinement: split triangles whose centroid is far from its corners relative to the local edge length
@@ -442,6 +543,9 @@ private:
     const csr out_, vf_, nb_;
     std::unordered_map< uint32_t, float > sigma_;
     std::unordered_map< uint32_t, std::vector< uint32_t > > full_ring_;
+    // Edges and faces of the patches added so far.
+    std::unordered_set< uint64_t > patch_directed_, patch_undirected_;
+    std::unordered_set< tri3, tri_hash > patch_faces_;
 };
 
 }  // namespace
