@@ -41,6 +41,39 @@ public enum ScanRejection: String, Sendable, CaseIterable, Codable, Hashable {
 }
 
 /// What the user should do now.
+/// Which way to correct a turn that is not within a pose's tolerance (ScanUpdate.turnHint): further toward the target,
+/// back toward the front (turned too far), or across the pose direction. Person-relative, like the poses: faceLeft is
+/// the person's left (HeadPose yaw > 0).
+public enum TurnHint: String, Sendable, CaseIterable, Codable {
+    case further, back, chinUp, chinDown, faceLeft, faceRight
+
+    public var englishText: String {
+        switch self {
+        case .further: return "Turn further"
+        case .back: return "Too far: turn back a little"
+        case .chinUp: return "Raise your chin a little"
+        case .chinDown: return "Lower your chin a little"
+        case .faceLeft: return "Turn your face a little to your left"
+        case .faceRight: return "Turn your face a little to your right"
+        }
+    }
+
+    /// The hint for a remaining turn `delta` (target - current, yaw/pitch degrees) toward `pose`: the component along
+    /// the pose direction against the one across it (scaled by along / across, like the tolerance ellipse). The front
+    /// pose and an along component that dominates give further (or back when negative).
+    public static func hint(pose: ScanPose, delta: SIMD2<Float>, along: Float, across: Float) -> TurnHint {
+        let target = SIMD2(pose.target.yaw, pose.target.pitch)
+        let magnitude = simd_length(target)
+        guard magnitude > 0, along > 0, across > 0 else { return .further }
+        let direction = target / magnitude
+        let a = simd_dot(delta, direction)
+        let p = delta - a * direction
+        if abs(a) >= simd_length(p) * along / across { return a >= 0 ? .further : .back }
+        if abs(p.y) >= abs(p.x) { return p.y > 0 ? .chinUp : .chinDown }
+        return p.x > 0 ? .faceLeft : .faceRight
+    }
+}
+
 public enum ScanInstruction: Sendable, Equatable {
     case idle
     case showFace

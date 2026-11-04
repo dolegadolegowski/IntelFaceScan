@@ -1,12 +1,14 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
-// The guided scan state machine: positioning -> for each pose: instruct, wait until the head is within tolerance
-// of the target and held still, accept spaced keyframes that pass the quality gates. Usable without UI: the CLI
-// runs it over a recording with ScanConfiguration.offline (frame timestamps only, no wall clock).
+// The guided scan state machine: positioning -> the front pose -> the other poses in whatever order the person turns
+// (the scan suggests the next one): wait until the head is within tolerance of a pose's target (or a shorter turn is
+// held) and held still, accept spaced keyframes that pass the quality gates. Usable without UI: the CLI runs it over
+// a recording with ScanConfiguration.offline (frame timestamps only, no wall clock).
 
 import CameraKit
 import CoreGraphics
 import Foundation
+import os
 import simd
 
 public struct ScanConfiguration: Sendable, Hashable {
@@ -19,22 +21,43 @@ public struct ScanConfiguration: Sendable, Hashable {
     /// Maximum deviation (degrees) across the direction of a pose's target: pitch on the side poses, yaw on up and
     /// down. A side pose a little up or down still shows that side of the head (the keyframe keeps its measured
     /// pose), and Vision reads large yaw partly as pitch: the synthetic head at yaw +44..+52 reads pitch +4..+10 at
-    /// 640x400 (mean ~+8), which an 8-degree circle rarely accepted. The tolerance is the ellipse of both semi-axes.
-    public var perpendicularToleranceDeg: Float = 12
+    /// 640x400 (mean ~+8), which an 8-degree circle rarely accepted; a real D455 session read +10..+15 at yaw -74.
+    /// The tolerance is the ellipse of both semi-axes.
+    public var perpendicularToleranceDeg: Float = 15
+    /// Beyond a pose's target the perpendicular tolerance grows by this much per degree of further turn: the real
+    /// session read pitch 12-18 degrees off the front at yaw -60..-80.
+    public var perpendicularGrowthPerDeg: Float = 0.3
     /// Targets of the other poses are relative to the person's own frontal pose (mean of the front keyframes):
     /// Vision's yaw/pitch of a face looking straight at the camera is biased per person by a few degrees.
     public var targetsRelativeToFront: Bool = true
     /// Largest frontal offset (degrees) that is applied to the other targets.
     public var maxFrontOffsetDeg: Float = 10
     /// Turning further than a pose's target (away from the front) is accepted up to this many degrees beyond it:
-    /// more rotation only adds coverage.
-    public var overshootToleranceDeg: Float = 15
-    /// The pose must be held (within tolerance, slow motion) this long before frames are accepted.
-    public var holdSeconds: Double = 0.4
+    /// more rotation only adds coverage. People turn much further than the target: a real D455 session read yaw -74
+    /// (76 from the front) on a right turn and +70 on a left one, which a 15-degree window refused, so that scan never
+    /// got past the right pose.
+    public var overshootToleranceDeg: Float = 40
+    /// After the front pose, a pose the head reaches is captured even when the scan suggests another one: the person
+    /// may turn in any order (the front pose comes first: the other targets are relative to it).
+    public var posesInAnyOrder: Bool = true
+    /// A turn that stops short of the suggested pose's target is accepted once it reaches this fraction of the
+    /// target (from the front pose, within the perpendicular tolerance) and stays there, slowly, for
+    /// shortTurnHoldSeconds: the person cannot turn further, or Vision reads less than the true angle (0 = off).
+    /// Only the suggested pose: a chin raised 15 degrees while the scan asks for another pose is not the up pose.
+    public var shortTurnFraction: Float = 0.6
+    public var shortTurnHoldSeconds: Double = 1.5
+    /// The pose must be held (within tolerance, slow motion) this long before frames are accepted. With the
+    /// keyframe interval below, a pose takes about 0.6 s of holding still: a real session's holds at a pose were
+    /// often under a second.
+    public var holdSeconds: Double = 0.3
     /// Absolute minimum variance of Laplacian of the face (0 = off; the relative gate below adapts to the scene).
     public var minSharpness: Float = 0
+    /// Head rotation speed (deg/s, smoothed Vision pose) above which the head counts as moving: no keyframe, and
+    /// the hold restarts.
     public var maxAngularSpeedDegPerSec: Float = 20
-    public var minValidDepthRatio: Float = 0.6
+    /// Valid depth in the face rectangle. A face turned down shows the hair, which a D455 measures poorly: 0.57 on a
+    /// real session; minValidDepthPoints below is what guarantees the geometry.
+    public var minValidDepthRatio: Float = 0.5
     /// Valid depth points required inside the head mask, for a 1280x800 color image; scaled with the image area.
     public var minValidDepthPoints: Int = 12_000
     /// Recommended face distance for the current camera configuration.
@@ -54,7 +77,7 @@ public struct ScanConfiguration: Sendable, Hashable {
     /// Maximum camera rotation speed from the IMU gyro (deg/s); the camera has to stand still.
     public var maxCameraMotionDegPerSec: Float = 4
     /// Minimum time between two keyframes of a pose (independent depth noise, slight pose variation).
-    public var minKeyframeInterval: Double = 0.2
+    public var minKeyframeInterval: Double = 0.15
     /// Larger head tilt (roll) makes the user straighten the head first.
     public var maxRollDegrees: Float = 25
     /// Face found at a good distance for this long before the first pose starts.
@@ -139,6 +162,8 @@ public struct ScanUpdate: Sendable {
     /// scaled by angleTolerance / perpendicularToleranceDeg: the pose is within tolerance when this is at most
     /// angleTolerance (what the UI compares).
     public var angularErrorDeg: Float?
+    /// With a .turn instruction: which way to correct it (turned too far, off the pose direction, ...).
+    public var turnHint: TurnHint?
     /// Target - current (yaw, pitch) in degrees.
     public var targetDelta: SIMD2<Float>?
     /// Fraction of holdSeconds the pose has been held.
@@ -154,6 +179,8 @@ public struct ScanUpdate: Sendable {
     public var poseIndex: Int?
     /// The keyframe accepted with this frame.
     public var keyframeID: Int?
+    /// The pose whose last keyframe was accepted with this frame (the app plays a sound).
+    public var completedPose: ScanPose?
 
     public init() {}
 }
@@ -161,6 +188,7 @@ public struct ScanUpdate: Sendable {
 public final class ScanController: @unchecked Sendable {
     public let configuration: ScanConfiguration
     private let tracker: HeadTracking
+    private static let log = Logger(subsystem: "IntelFaceScan", category: "Guidance")
 
     // Serializes process(): the per-frame working state below is only touched while it is held.
     private let processingLock = NSLock()
@@ -250,6 +278,9 @@ public final class ScanController: @unchecked Sendable {
             default: break
             }
             var notes: [String: String] = [:]
+            for pose in configuration.poses where shared.accepted[pose, default: 0] < configuration.framesPerPose {
+                if let stats = shared.poseStats[pose] { Self.log.notice("pose \(pose.rawValue, privacy: .public) open: \(stats.summary, privacy: .public)") }
+            }
             if !shared.skipped.isEmpty {
                 notes["skipped_poses"] = configuration.poses.filter { shared.skipped.contains($0) }
                     .map(\.rawValue).joined(separator: ",")
@@ -284,6 +315,50 @@ public final class ScanController: @unchecked Sendable {
         var captureConfiguration: CaptureConfiguration?
         var distanceRange: ClosedRange<Float> = 0.55 ... 0.75
         var trackerErrors = 0
+        /// What held each pose back (logged when it completes, or open at finish()).
+        var poseStats: [ScanPose: PoseStats] = [:]
+    }
+
+    /// Per pose: the outcome of every frame worked on it, the time span and the furthest turn toward it.
+    struct PoseStats {
+        var frames = 0
+        var first: Double = 0
+        var last: Double = 0
+        var outcomes: [String: Int] = [:]
+        var furthestDeg: Float = -.infinity
+
+        mutating func add(_ outcome: String, t: Double, turnDeg: Float?) {
+            if frames == 0 { first = t }
+            frames += 1
+            last = t
+            outcomes[outcome, default: 0] += 1
+            if let turnDeg { furthestDeg = max(furthestDeg, turnDeg) }
+        }
+
+        /// "4.2 s, 126 frames: turnedTooFar 61%, holding 20%, ...; furthest turn 75.6 deg"
+        var summary: String {
+            let shares = outcomes.sorted { $0.value > $1.value }
+                .map { "\($0.key) \(Int((100 * Double($0.value) / Double(max(1, frames))).rounded()))%" }
+            let furthest = furthestDeg.isFinite ? String(format: "; furthest turn %.1f deg", furthestDeg) : ""
+            return String(format: "%.1f s, %d frames: ", last - first, frames) + shares.joined(separator: ", ") + furthest
+        }
+    }
+
+    /// The outcome of a capture frame for the diagnostics: accepted, a rejection, the reason a turn is not within
+    /// tolerance, holding, or waiting between keyframes.
+    static func outcome(_ update: ScanUpdate) -> String {
+        if update.acceptedKeyframe { return "accepted" }
+        if let rejection = update.rejection { return rejection.rawValue }
+        switch update.instructionKind {
+        case .turn:
+            switch update.turnHint {
+            case .back: return "turnedTooFar"
+            case .further, nil: return "notTurnedEnough"
+            default: return "offAxis"
+            }
+        case .holdStill: return "holding"
+        default: return "spacing"
+        }
     }
 
     private struct WorkState {
@@ -297,9 +372,14 @@ public final class ScanController: @unchecked Sendable {
         var lastAccepted: Double?
         var lastTime: Double?
         var poseInProgress: ScanPose?
+        /// The pose holdSince and the sharpness reference belong to (another pose than the suggested one when the
+        /// person turns elsewhere).
+        var holdPose: ScanPose?
+        /// A turn short of its target, held since (see ScanConfiguration.shortTurnFraction).
+        var shortTurn: (pose: ScanPose, since: Double)?
 
         mutating func resetPose() {
-            holdSince = nil; positioningSince = nil; lastAccepted = nil
+            holdSince = nil; positioningSince = nil; lastAccepted = nil; holdPose = nil; shortTurn = nil
             sharpness.reset()
         }
 
@@ -398,7 +478,19 @@ public final class ScanController: @unchecked Sendable {
             }
         }
 
-        commit(decision, update: &update, generation: snapshot.generation, t: t)
+        var worked: (pose: ScanPose, turnDeg: Float?)?
+        if case .capturing(let suggested) = snapshot.phase {
+            var pose = suggested
+            switch update.instructionKind {
+            case .turn(let p, _, _), .holdStill(let p), .capturing(let p): pose = p
+            default: break
+            }
+            let turn = update.smoothedPose.flatMap {
+                Self.turnFraction(pose: pose, current: SIMD2($0.yaw, $0.pitch), frontOffset: frontOffset(snapshot), across: .infinity)
+            }.map { $0 * simd_length(SIMD2(pose.target.yaw, pose.target.pitch)) }
+            worked = (pose, turn)
+        }
+        commit(decision, update: &update, generation: snapshot.generation, t: t, worked: worked)
         update.instruction = update.instructionKind.englishText
         update.rejectionReason = update.rejection?.englishText
         return update
@@ -443,20 +535,29 @@ public final class ScanController: @unchecked Sendable {
         }
     }
 
-    private func capture(_ update: inout ScanUpdate, pose: ScanPose, frame: CameraFrame, observation: HeadObservation?,
-                         lowConfidence: Bool, distance: Float?, t: Double, snapshot: SharedState) -> Decision {
+    private func capture(_ update: inout ScanUpdate, pose suggested: ScanPose, frame: CameraFrame,
+                         observation: HeadObservation?, lowConfidence: Bool, distance: Float?, t: Double,
+                         snapshot: SharedState) -> Decision {
         let c = configuration
         guard let face = observation, let smoothed = work.poseHistory.smoothed else {
             work.holdSince = nil
+            work.shortTurn = nil
             update.instructionKind = .showFace
             update.rejection = lowConfidence ? .lowConfidence : .noFace
             return .none
         }
-        let delta = Self.poseDelta(pose: pose, current: SIMD2(smoothed.yaw, smoothed.pitch),
-                                   frontOffset: frontOffset(snapshot), overshootDeg: c.overshootToleranceDeg)
-        let error = Self.toleranceError(delta, pose: pose, along: c.angleTolerance, across: c.perpendicularToleranceDeg)
+        let speed = work.poseHistory.angularSpeed()
+        let goal = chooseGoal(suggested: suggested, current: SIMD2(smoothed.yaw, smoothed.pitch), speed: speed,
+                              frontOffset: frontOffset(snapshot), snapshot: snapshot, t: t)
+        let pose = goal.pose, delta = goal.delta, error = goal.error
+        if work.holdPose != pose {
+            work.holdPose = pose
+            work.holdSince = nil
+            work.sharpness.reset()
+        }
         update.targetDelta = delta
-        update.angularErrorDeg = error
+        // A short turn held long enough counts as reached (the UI compares the error with angleTolerance).
+        update.angularErrorDeg = goal.shortTurnHeld ? min(error, c.angleTolerance) : error
 
         // Distance (with slack, so turning the head does not break a pose).
         let range = snapshot.distanceRange
@@ -468,6 +569,7 @@ public final class ScanController: @unchecked Sendable {
                 update.instructionKind = .moveCloser; update.rejection = .tooFar
             } else {
                 update.instructionKind = .turn(pose, yawDelta: delta.x, pitchDelta: delta.y); update.rejection = .noDepth
+                update.turnHint = TurnHint.hint(pose: pose, delta: delta, along: c.angleTolerance, across: goal.across)
             }
             return .none
         }
@@ -481,9 +583,10 @@ public final class ScanController: @unchecked Sendable {
             update.instructionKind = .moveCloser; update.rejection = .tooFar
             return .none
         }
-        if error > c.angleTolerance {
+        if error > c.angleTolerance && !goal.shortTurnHeld {
             work.holdSince = nil
             update.instructionKind = .turn(pose, yawDelta: delta.x, pitchDelta: delta.y)
+            update.turnHint = TurnHint.hint(pose: pose, delta: delta, along: c.angleTolerance, across: goal.across)
             return .none
         }
         if abs(smoothed.roll) > c.maxRollDegrees {
@@ -491,7 +594,6 @@ public final class ScanController: @unchecked Sendable {
             update.instructionKind = .straightenHead; update.rejection = .rollTooLarge
             return .none
         }
-        let speed = work.poseHistory.angularSpeed()
         if let speed, speed > c.maxAngularSpeedDegPerSec {
             work.holdSince = nil
             update.instructionKind = .holdStill(pose); update.rejection = .headMoving
@@ -556,6 +658,90 @@ public final class ScanController: @unchecked Sendable {
         return .accept(keyframe)
     }
 
+    private struct PoseGoal {
+        var pose: ScanPose
+        var delta: SIMD2<Float>
+        var error: Float
+        /// The perpendicular tolerance used (grown beyond the target).
+        var across: Float
+        /// A turn short of the target, held for shortTurnHoldSeconds: accepted as if within tolerance.
+        var shortTurnHeld = false
+    }
+
+    /// The pose this frame works toward: the suggested pose when the head is within its tolerance; else (after the
+    /// front pose, with posesInAnyOrder) the unfinished pose the head is closest to within tolerance; else the pose
+    /// of a short turn (held long enough: accepted); else the suggested pose, whose remaining turn the instruction
+    /// shows.
+    private func chooseGoal(suggested: ScanPose, current: SIMD2<Float>, speed: Float?, frontOffset: SIMD2<Float>,
+                            snapshot: SharedState, t: Double) -> PoseGoal {
+        let c = configuration
+        func goal(_ pose: ScanPose) -> PoseGoal {
+            let delta = Self.poseDelta(pose: pose, current: current, frontOffset: frontOffset,
+                                       overshootDeg: c.overshootToleranceDeg)
+            let across = Self.acrossTolerance(pose: pose, current: current, frontOffset: frontOffset,
+                                              base: c.perpendicularToleranceDeg, growth: c.perpendicularGrowthPerDeg)
+            return PoseGoal(pose: pose, delta: delta,
+                            error: Self.toleranceError(delta, pose: pose, along: c.angleTolerance, across: across),
+                            across: across)
+        }
+        var poses = [suggested]
+        if c.posesInAnyOrder && suggested != .front {
+            poses += c.poses.filter {
+                $0 != suggested && $0 != .front && !snapshot.skipped.contains($0)
+                    && snapshot.accepted[$0, default: 0] < c.framesPerPose
+            }
+        }
+        let goals = poses.map(goal)
+        let reached = goals.first { $0.error <= c.angleTolerance && $0.pose == suggested }
+            ?? goals.filter { $0.error <= c.angleTolerance }.min { $0.error < $1.error }
+        if let reached {
+            work.shortTurn = nil
+            return reached
+        }
+
+        // A short turn toward the suggested pose, while the head moves slowly.
+        var short: (goal: PoseGoal, fraction: Float)?
+        if c.shortTurnFraction > 0, let speed, speed <= c.maxAngularSpeedDegPerSec {
+            for g in goals.prefix(1) {
+                // Short of the target only: a turn beyond the overshoot window is asked to turn back instead.
+                guard let f = Self.turnFraction(pose: g.pose, current: current, frontOffset: frontOffset,
+                                                across: c.perpendicularToleranceDeg),
+                      f >= c.shortTurnFraction, (f < 1), f > (short?.fraction ?? 0) else { continue }
+                short = (g, f)
+            }
+        }
+        guard var pick = short?.goal else {
+            work.shortTurn = nil
+            return goals[0]
+        }
+        if work.shortTurn?.pose != pick.pose { work.shortTurn = (pick.pose, t) }
+        pick.shortTurnHeld = t - (work.shortTurn?.since ?? t) >= c.shortTurnHoldSeconds
+        return pick
+    }
+
+    /// The perpendicular tolerance for `pose`: `base`, plus `growth` per degree the head turned beyond the target.
+    static func acrossTolerance(pose: ScanPose, current: SIMD2<Float>, frontOffset: SIMD2<Float>, base: Float,
+                                growth: Float) -> Float {
+        let target = SIMD2(pose.target.yaw, pose.target.pitch)
+        let magnitude = simd_length(target)
+        guard magnitude > 0, growth > 0 else { return base }
+        let along = simd_dot(current - frontOffset, target / magnitude)
+        return base + growth * max(0, along - magnitude)
+    }
+
+    /// How far the head turned toward `pose` from the front offset, as a fraction of the target (along its
+    /// direction); nil for the front pose or a head beyond the perpendicular tolerance (turned some other way).
+    static func turnFraction(pose: ScanPose, current: SIMD2<Float>, frontOffset: SIMD2<Float>, across: Float) -> Float? {
+        let target = SIMD2(pose.target.yaw, pose.target.pitch)
+        let magnitude = simd_length(target)
+        guard magnitude > 0 else { return nil }
+        let direction = target / magnitude
+        let relative = current - frontOffset
+        let along = simd_dot(relative, direction)
+        guard simd_length(relative - along * direction) <= across else { return nil }
+        return along / magnitude
+    }
+
     /// Mean yaw/pitch of the accepted front keyframes (clamped), or zero.
     private func frontOffset(_ state: SharedState) -> SIMD2<Float> {
         guard configuration.targetsRelativeToFront else { return .zero }
@@ -606,9 +792,16 @@ public final class ScanController: @unchecked Sendable {
         toleranceError(delta, pose: pose, along: along, across: across) <= along
     }
 
-    private func commit(_ decision: Decision, update: inout ScanUpdate, generation: UInt64, t: Double) {
+    private func commit(_ decision: Decision, update: inout ScanUpdate, generation: UInt64, t: Double,
+                        worked: (pose: ScanPose, turnDeg: Float?)? = nil) {
+        var logLine: String?
         stateLock.withLock {
             if shared.generation == generation {
+                if let worked {
+                    var accepted = update
+                    if case .accept = decision { accepted.acceptedKeyframe = true }
+                    shared.poseStats[worked.pose, default: PoseStats()].add(Self.outcome(accepted), t: t, turnDeg: worked.turnDeg)
+                }
                 switch decision {
                 case .none:
                     shared.trackerErrors = 0
@@ -631,12 +824,22 @@ public final class ScanController: @unchecked Sendable {
                     update.keyframeID = keyframe.id
                     work.lastAccepted = t
                     if shared.accepted[keyframe.scanPose, default: 0] >= configuration.framesPerPose {
+                        update.completedPose = keyframe.scanPose
+                        if let stats = shared.poseStats[keyframe.scanPose] {
+                            logLine = "pose \(keyframe.scanPose.rawValue) complete: \(stats.summary)"
+                        }
                         shared.phase = nextPhase(after: shared)
+                    } else if shared.phase != .capturing(keyframe.scanPose) {
+                        // The person turned to another pose than the suggested one: suggest it until it is done
+                        // (and keep its hold, which a change of the suggested pose would reset).
+                        shared.phase = .capturing(keyframe.scanPose)
+                        work.poseInProgress = keyframe.scanPose
                     }
                 }
             }
             fillProgress(&update, from: shared)
         }
+        if let logLine { Self.log.notice("\(logLine, privacy: .public)") }
         if case .finished = update.phase, update.instructionKind != .idle { update.instructionKind = .finished }
     }
 

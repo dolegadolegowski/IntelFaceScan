@@ -30,7 +30,7 @@ import Testing
             #expect(frames.count == 3, "pose \(pose)")
             // Keyframes of a pose are spaced in time and taken at the target.
             for (a, b) in zip(frames, frames.dropFirst()) {
-                #expect(b.frame.timestampMs - a.frame.timestampMs >= 200 - 1e-6)
+                #expect(b.frame.timestampMs - a.frame.timestampMs >= controller.configuration.minKeyframeInterval * 1000 - 1e-6)
             }
             for kf in frames {
                 #expect(abs(kf.headPose.yaw - pose.target.yaw) <= 8)
@@ -497,9 +497,10 @@ import Testing
     @Test func biasedVisionAndShortTurnsStillCompleteTheScan() async {
         // Vision reads 6 degrees to the right, and the user turns only 90% of each target: the left pose is 34.5
         // degrees by Vision, 10.5 from the absolute target but 4.5 from the front-relative one.
-        func run(relative: Bool) async -> (ScanPhase?, Int) {
+        func run(relative: Bool, shortTurns: Bool = true) async -> (ScanPhase?, Int) {
             var configuration = ScanConfiguration.testOffline
             configuration.targetsRelativeToFront = relative
+            if !shortTurns { configuration.shortTurnFraction = 0 }
             let (controller, tracker) = makeController(configuration)
             var sim = ScanSimulation()
             sim.user.reach = 0.9
@@ -509,8 +510,11 @@ import Testing
         }
         let relative = await run(relative: true)
         #expect(relative.0 == .finished && relative.1 == 15)
-        let absolute = await run(relative: false)
+        let absolute = await run(relative: false, shortTurns: false)
         #expect(absolute.0 == .capturing(.left), "the absolute target is out of reach")
+        // Held long enough, the short turn (77% of the absolute target) is accepted all the same.
+        let held = await run(relative: false)
+        #expect(held.0 == .finished && held.1 == 15)
     }
 
     @Test func toleranceIsWiderAcrossThePoseDirection() {

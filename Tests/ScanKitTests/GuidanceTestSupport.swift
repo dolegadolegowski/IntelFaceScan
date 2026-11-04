@@ -108,7 +108,7 @@ struct GuidanceFrameFactory {
                 if inHead(x, y) {
                     let nearCenter = abs(Float(x) - center.x) < Float(faceRect.width) * 0.2
                         && abs(Float(y) - center.y) < Float(faceRect.height) * 0.25
-                    values[i] = options.headDepthHoles && !nearCenter && (x + y) % 3 != 0 ? 0 : head
+                    values[i] = options.headDepthHoles && !nearCenter && (x + y) % 8 != 0 ? 0 : head
                 } else if options.body && inNeck(x, y) {
                     let below = max(0, Float(y) - Float(faceRect.maxY))
                     values[i] = UInt16((options.distance + 0.002 * below) / depthScale)

@@ -66,10 +66,16 @@ Each work stream owns its tests under `Tests/<Module>Tests/` (file names prefixe
    0.1 mm units, intrinsics, depth→color extrinsics, IMU). The UI renders color and a depth colormap with Metal,
    and the face distance with the recommended range for the current configuration.
 2. **Guided scan** – `HeadTracker` (Vision: face rectangle + yaw/pitch/roll, 76 landmarks, person segmentation)
-   feeds `ScanController`: poses front → up → down → left → right (+ optional diagonals); a frame is accepted only
-   when the pose is within tolerance and held still, sharp (variance of Laplacian), with enough valid depth
-   points and a static camera (IMU). Accepted frames become `Keyframe`s (frame + head pose + landmarks + head mask);
-   the coverage map shows which head areas are covered.
+   feeds `ScanController`: the front pose first, then up, down, left, right (+ optional diagonals) in whatever order
+   the person turns (the scan suggests them in that order; targets are relative to the front pose; turns up to 40°
+   beyond a target count, and a turn short of the suggested target, at 60 % or more and held 1.5 s); a frame is
+   accepted only when the pose is within tolerance and held still, sharp (variance of Laplacian), with enough valid
+   depth points and a static camera (IMU). Accepted frames become `Keyframe`s (frame + head pose + landmarks + head
+   mask); the coverage map shows which head areas are covered. A turn that misses its pose gets a hint (further,
+   back, chin up/down, face left/right) for the banner, the app plays a sound when a pose is reached, captured and
+   when the scan is complete, and `ScanController` logs what held each pose back (`IntelFaceScan`/`Guidance`, at
+   `notice`: outcome shares and the furthest turn) when it completes or is still open at the end;
+   `ifscan reconstruct <recording> --trace scan.csv` writes every frame's measurements.
 3. **Reconstruction** (`ReconstructionPipeline`):
    0. lens undistortion: keyframes whose color carries a distortion model (the D455's inverse Brown-Conrady) are
       remapped once to a pinhole – color, mask, landmarks, face rectangle, and the depth only when it follows the
