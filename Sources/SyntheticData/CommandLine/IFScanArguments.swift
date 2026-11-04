@@ -5,12 +5,13 @@
 // cannot depend on an executable target, can test it.
 //
 //   ifscan synth -o out.ifsdataset [--width 1280] [--height 800] [--frames-per-pose 2] [--noise 2] [--seed 1]
-//                [--distance 0.6] [--poses front,up,down,left,right] [--no-background] [--gt-mesh gt.obj]
+//                [--distance 0.6] [--poses front,up,down,left,right] [--no-background] [--lighting 0.25]
+//                [--mesh-resolution 128] [--gt-mesh gt.obj]
 //   ifscan reconstruct <input.ifsdataset | recording.db3 | recording.bag> -o head.obj [--ply head.ply]
 //                [--voxel-mm 0.75] [--method tsdf|poisson] [--keep-shoulders] [--save-dataset out.ifsdataset]
 //                [--triangles N] [--texture-size 4096] [--helper <IntelFaceScanHelper>] [--report report.json] [--quiet]
 //   ifscan eval <mesh.obj> --gt <gt.obj> [--samples 200000] [--report report.json] [--symmetric] [--json]
-//   ifscan info <file> [--json]
+//   ifscan info <file> [--json] [--helper <IntelFaceScanHelper>]
 
 import Foundation
 import ReconKit
