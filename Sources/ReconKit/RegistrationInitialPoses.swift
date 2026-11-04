@@ -22,6 +22,8 @@ enum InitialPoseEstimator {
         var kabschFrames: Int
         /// Frames with the Vision rotation and a landmark translation.
         var landmarkTranslationFrames: Int
+        /// Camera-frame 3D landmarks per frame (nil where a landmark has no depth on the head).
+        var landmarks: [[SIMD3<Float>?]] = []
     }
 
     /// Apple Vision measures the head pose relative to the line of sight through the face, not the optical axis: a
@@ -83,7 +85,7 @@ enum InitialPoseEstimator {
                 poses.append(simd_float4x4(rotation: r, translation: centers[reference] - r * centers[i]))
             }
         }
-        return Result(worldFromCamera: poses, kabschFrames: kabsch, landmarkTranslationFrames: translated)
+        return Result(worldFromCamera: poses, kabschFrames: kabsch, landmarkTranslationFrames: translated, landmarks: landmarks)
     }
 
     /// Approximate head center in the camera frame: centroid of the head-mask points pushed back along the ray.
@@ -334,6 +336,21 @@ enum RegistrationCheck {
     /// Views farther apart than this overlap too little to be compared.
     static let maxPairAngle: Float = 60 * .pi / 180
     static let minFitness: Float = 0.25
+    /// Landmark term: a frame fails when its landmark residual exceeds max(minLandmarkLimit, landmarkLimitFactor x
+    /// the median frame's). The residual is the landmarkQuantile of its landmarks' distances to the reference's.
+    static let minLandmarkLimit: Float = 0.004
+    static let landmarkLimitFactor: Float = 2.5
+    static let landmarkQuantile: Float = 0.25
+
+    struct Outcome {
+        var passed: [Bool]
+        /// Best surface pair per frame.
+        var scores: [FrameScore]
+        /// Landmark residual per frame (meters; nil for frame 0 and without enough landmarks).
+        var landmarkResiduals: [Float?]
+        /// Frames that fail the landmark term (whatever their surface fit).
+        var landmarkFailed: [Bool]
+    }
 
     /// Scores every frame's registered cloud against the most similar view of its own pose group and of every other
     /// pose group within maxPairAngle. A pair fits when the surfaces overlap (fitness) with an RMSE close to the
@@ -342,9 +359,17 @@ enum RegistrationCheck {
     /// group fits itself (its frames are each other's most similar views) and passed, while a correct frame whose
     /// most similar view was the misregistered one was dropped. The comparisons across pose groups are what link a
     /// group to the reference.
-    static func verify(frames: RGBDFrameSet, poses: [simd_float4x4]) throws -> (passed: [Bool], scores: [FrameScore]) {
+    ///
+    /// The surface cannot see a rotation about the head center: the near-spherical skull slides along itself (4 deg
+    /// of yaw: RMSE 1.0 mm against a limit of ~1.4 mm). With `landmarks` (camera-frame 3D landmarks per frame), a
+    /// face-feature term catches it: the face is 8-10 cm in front of the head center, so its landmarks move 5-7 mm.
+    /// Frames whose landmarks, carried into the world, disagree with the reference's neither pass nor link others.
+    static func verify(frames: RGBDFrameSet, poses: [simd_float4x4], landmarks: [[SIMD3<Float>?]]? = nil) throws -> Outcome {
         let n = frames.count
-        guard n > 1 else { return (Array(repeating: true, count: n), Array(repeating: FrameScore(fitness: 1, rmse: 0), count: n)) }
+        guard n > 1 else {
+            return Outcome(passed: Array(repeating: true, count: n), scores: Array(repeating: FrameScore(fitness: 1, rmse: 0), count: n),
+                           landmarkResiduals: Array(repeating: nil, count: n), landmarkFailed: Array(repeating: false, count: n))
+        }
         var cloudParams = fr_cloud_params()
         fr_cloud_params_default(&cloudParams)
         cloudParams.stride = 2
@@ -418,16 +443,38 @@ enum RegistrationCheck {
                 scores[k] = s
             }
         }
+        // Face features (relative limit: real Vision landmarks may be noisier than the synthetic ones).
+        let residuals = landmarks.map { landmarkResiduals($0, poses: poses) } ?? Array(repeating: nil, count: n)
+        let typical = residuals.dropFirst().compactMap { $0 }.sorted()
+        let landmarkLimit = max(minLandmarkLimit, typical.isEmpty ? 0 : landmarkLimitFactor * typical[typical.count / 2])
+        let landmarkFail = residuals.enumerated().map { $0.offset != 0 && ($0.element ?? 0) > landmarkLimit }
         var passed = [Bool](repeating: false, count: n)
         passed[0] = true
         var stack = [0]
         while let k = stack.popLast() {
-            for j in links[k] where !passed[j] {
+            for j in links[k] where !passed[j] && !landmarkFail[j] {
                 passed[j] = true
                 stack.append(j)
             }
         }
-        return (passed, scores)
+        return Outcome(passed: passed, scores: scores, landmarkResiduals: residuals, landmarkFailed: landmarkFail)
+    }
+
+    /// Per frame, a low quantile of the distances between its world-frame landmarks and the reference's (frame 0),
+    /// over landmarks with depth in both; nil with fewer than 8. A low quantile: Vision places the landmarks of
+    /// occluded face parts on other surfaces in turned views.
+    static func landmarkResiduals(_ landmarks: [[SIMD3<Float>?]], poses: [simd_float4x4]) -> [Float?] {
+        guard let reference = landmarks.first else { return [] }
+        return landmarks.indices.map { i -> Float? in
+            guard i > 0, i < poses.count, landmarks[i].count == reference.count else { return nil }
+            var d: [Float] = []
+            for (a, b) in zip(reference, landmarks[i]) {
+                if let a, let b { d.append(simd_length(InitialPoseEstimator.transform(poses[0], a) - InitialPoseEstimator.transform(poses[i], b))) }
+            }
+            guard d.count >= 8 else { return nil }
+            d.sort()
+            return d[Int(Float(d.count - 1) * landmarkQuantile)]
+        }
     }
 
     /// Axis-aligned bounds of the registered frames (robust percentiles) plus a margin, in the world frame.

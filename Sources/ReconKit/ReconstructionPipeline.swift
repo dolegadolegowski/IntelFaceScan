@@ -227,11 +227,15 @@ final class PipelineRun: @unchecked Sendable {
 
         // Frames whose registered surface does not fit their neighbors would smear the fusion.
         emit(.globalOptimization, 0.38, "checking registration")
-        let check = try timed("registration check") { try RegistrationCheck.verify(frames: regFrames, poses: poses) }
+        let check = try timed("registration check") {
+            try RegistrationCheck.verify(frames: regFrames, poses: poses, landmarks: initial.landmarks)
+        }
         let used = (0 ..< usable.count).filter { check.passed[$0] }
-        if used.count < usable.count {
-            let dropped = (0 ..< usable.count).filter { !check.passed[$0] }.map { "#\(keyframes[usable[$0]].id)" }
-            report.notes.append("keyframes excluded after registration (surface does not fit): \(dropped.joined(separator: ", "))")
+        let landmarkDropped = (0 ..< usable.count).filter { !check.passed[$0] && check.landmarkFailed[$0] }
+        let surfaceDropped = (0 ..< usable.count).filter { !check.passed[$0] && !check.landmarkFailed[$0] }
+        for (frames, reason) in [(surfaceDropped, "surface does not fit"), (landmarkDropped, "face landmarks do not fit")] where !frames.isEmpty {
+            let names = frames.map { "#\(keyframes[usable[$0]].id)" }
+            report.notes.append("keyframes excluded after registration (\(reason)): \(names.joined(separator: ", "))")
         }
         guard used.count >= 5 else { throw ReconstructionError.notEnoughKeyframes(used.count) }
         report.usedFrames = used.count
