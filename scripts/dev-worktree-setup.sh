@@ -1,6 +1,7 @@
 #!/bin/bash
 # Prepares a linked git worktree for development: initializes the third_party submodules by cloning them from the
-# main checkout (no network), and points the helper build at the main checkout's librealsense build.
+# main checkout (no network; falls back to the network when the main checkout lacks the pinned commit), and prints
+# how to build the helper against the main checkout's librealsense build.
 #
 #   scripts/dev-worktree-setup.sh
 set -euo pipefail
@@ -13,8 +14,12 @@ for path in $(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | a
     if [ -f "$ROOT/$path/.git" ] || [ -d "$ROOT/$path/.git" ]; then
         continue
     fi
-    if [ "$MAIN" != "$ROOT" ] && [ -e "$MAIN/$path/.git" ]; then
-        git -c protocol.file.allow=always -c "submodule.$path.url=$MAIN/$path" submodule update --init -- "$path" >/dev/null
+    # submodule.<name>.url: the names in .gitmodules equal the paths. "shallow = true" makes git warn that --depth
+    # is ignored for local clones; that warning is noise here.
+    if [ "$MAIN" != "$ROOT" ] && [ -e "$MAIN/$path/.git" ] \
+       && git -c protocol.file.allow=always -c "submodule.$path.url=$MAIN/$path" submodule update --init -- "$path" \
+              >/dev/null 2>&1; then
+        :
     else
         git submodule update --init --depth 1 -- "$path" >/dev/null
     fi
@@ -22,5 +27,8 @@ for path in $(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | a
 done
 
 if [ "$MAIN" != "$ROOT" ] && [ -f "$MAIN/build/sdk/install/lib/librealsense2.dylib" ]; then
-    echo "librealsense SDK: $MAIN/build/sdk/install (cmake -DIFS_SDK_DIR=$MAIN/build/sdk/install)"
+    SDK="$MAIN/build/sdk/install"
+    echo "librealsense SDK: $SDK"
+    echo "  helper: cmake -S helper -B build/helper -DIFS_SDK_DIR=$SDK -DIFS_HELPER_TESTS=ON && cmake --build build/helper -j"
+    echo "  (scripts/build.sh builds its own SDK in this worktree's build/sdk; do not point IFS_SDK_DIR at the main checkout)"
 fi
