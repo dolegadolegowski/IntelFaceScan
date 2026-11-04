@@ -109,6 +109,8 @@ HelperService::HelperService( Connection & connection, HelperMode mode, EngineFa
     , factory_( std::move( factory ) )
     , playback_real_time_( playback_real_time )
 {
+    // Offline processing of a recording needs every frame: the processing thread waits for the app instead.
+    connection_.set_lossless_framesets( mode_ == HelperMode::playback && ! playback_real_time_ );
 }
 
 HelperService::~HelperService()
@@ -128,6 +130,7 @@ void HelperService::send_hello()
 
 void HelperService::create_engine()
 {
+    Connection::EngineCall call( connection_ );
     try
     {
         engine();
@@ -267,6 +270,8 @@ void HelperService::handle( InMessage & msg )
     bool ok = false;
     try
     {
+        // Every engine method may wait for the engine's own threads, which may be waiting in send_frameset().
+        Connection::EngineCall call( connection_ );
         data = dispatch( msg );
         ok = true;
     }
@@ -362,8 +367,9 @@ json HelperService::dispatch( InMessage & msg )
             real_time = it->get< bool >();
         }
         engine().playback_control( action == "pause", real_time );
-        if( action == "resume" )
-            playback_real_time_ = real_time;
+        // The engine applies 'real_time' with either action.
+        playback_real_time_ = real_time;
+        connection_.set_lossless_framesets( ! real_time );
         return json::object();
     }
 
@@ -446,6 +452,7 @@ json HelperService::record_stop()
 
 void HelperService::shutdown_engine()
 {
+    Connection::EngineCall call( connection_ );
     if( recording_ )
     {
         try

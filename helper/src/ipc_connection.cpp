@@ -3,15 +3,30 @@
 #include "ipc_connection.h"
 
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/uio.h>
+
+#include <algorithm>
+#include <cerrno>
+#include <climits>
+#include <vector>
 
 
 namespace ifs
 {
 
+namespace
+{
+// How often a writer waiting for an app that does not read checks whether finish() gave up on it.
+constexpr timeval kSendTimeout{ 0, 100 * 1000 };
+}  // namespace
+
 Connection::Connection( UniqueFd sock, std::function< void() > wake )
     : sock_( std::move( sock ) )
     , wake_( std::move( wake ) )
 {
+    if( sock_.valid() )
+        ::setsockopt( sock_.get(), SOL_SOCKET, SO_SNDTIMEO, &kSendTimeout, sizeof( kSendTimeout ) );
 }
 
 Connection::~Connection()
@@ -39,16 +54,58 @@ void Connection::send_frameset( OutMessage && msg )
     push( std::move( msg ) );
 }
 
+void Connection::set_lossless_framesets( bool lossless )
+{
+    {
+        std::lock_guard< std::mutex > lock( mutex_ );
+        lossless_ = lossless;
+    }
+    room_cv_.notify_all();
+}
+
+bool Connection::lossless_framesets() const
+{
+    std::lock_guard< std::mutex > lock( mutex_ );
+    return lossless_;
+}
+
+Connection::EngineCall::EngineCall( Connection & connection )
+    : connection_( connection )
+{
+    {
+        std::lock_guard< std::mutex > lock( connection_.mutex_ );
+        ++connection_.engine_calls_;
+    }
+    connection_.room_cv_.notify_all();
+}
+
+Connection::EngineCall::~EngineCall()
+{
+    std::lock_guard< std::mutex > lock( connection_.mutex_ );
+    --connection_.engine_calls_;
+}
+
 bool Connection::push( OutMessage && msg )
 {
     OutMessage dropped;  // released outside the lock: it may hold the last reference to a camera frame
     {
-        std::lock_guard< std::mutex > lock( mutex_ );
+        std::unique_lock< std::mutex > lock( mutex_ );
+        if( msg.frameset && lossless_ )
+            room_cv_.wait( lock, [this] {
+                return closing_ || broken_ || ! lossless_ || engine_calls_ > 0
+                    || pending_framesets_ < kMaxPendingFramesets;
+            } );
         if( closing_ || broken_ )
+        {
+            lock.unlock();
+            msg = OutMessage();
             return false;
+        }
         if( msg.frameset )
         {
-            if( pending_framesets_ >= kMaxPendingFramesets )
+            const size_t limit = lossless_ && engine_calls_ > 0 ? kMaxPendingFramesetsInEngineCall
+                                                                : kMaxPendingFramesets;
+            if( pending_framesets_ >= limit )
             {
                 for( auto it = out_.begin(); it != out_.end(); ++it )
                 {
@@ -123,6 +180,7 @@ void Connection::drop_pending_framesets()
         }
         pending_framesets_ = 0;
     }
+    room_cv_.notify_all();
 }
 
 void Connection::mark_broken( const std::string & reason )
@@ -136,6 +194,7 @@ void Connection::mark_broken( const std::string & reason )
         }
     }
     out_cv_.notify_all();
+    room_cv_.notify_all();
     if( wake_ )
         wake_();
 }
@@ -207,7 +266,9 @@ void Connection::writer_loop()
             --pending_framesets_;
         writing_ = true;
         lock.unlock();
-        const bool ok = write_message( sock_.get(), msg );
+        if( frameset )
+            room_cv_.notify_all();
+        const bool ok = write( msg );
         msg = OutMessage();
         lock.lock();
         writing_ = false;
@@ -233,9 +294,54 @@ void Connection::writer_loop()
     const bool notify = broken_ && ! closing_;
     lock.unlock();
     drained_cv_.notify_all();
+    room_cv_.notify_all();
     rest.clear();
     if( notify && wake_ )
         wake_();
+}
+
+// write_message() that can be abandoned: shutdown() does not wake a thread blocked in a send on a macOS AF_UNIX socket
+// whose peer has already shut its end down (e.g. the app half-closed the connection while it was not reading), and
+// MSG_DONTWAIT is ignored there, so a blocking write could keep finish() - and the helper's exit - waiting forever.
+// The socket has a short send timeout (constructor); a send that timed out is retried until finish() gives up.
+bool Connection::write( const OutMessage & msg )
+{
+    const int sock = sock_.get();
+    std::vector< iovec > iov;
+    iov.reserve( 2 + msg.payload.size() );
+    iov.push_back( { const_cast< ifs_wire_header * >( &msg.header ), sizeof( msg.header ) } );
+    if( ! msg.json.empty() )
+        iov.push_back( { const_cast< char * >( msg.json.data() ), msg.json.size() } );
+    for( const iovec & v : msg.payload )
+        if( v.iov_len )
+            iov.push_back( v );
+
+    size_t index = 0;
+    while( index < iov.size() )
+    {
+        const int count = int( std::min< size_t >( iov.size() - index, IOV_MAX ) );
+        const ssize_t n = ::writev( sock, &iov[index], count );
+        if( n < 0 )
+        {
+            if( errno == EINTR )
+                continue;
+            if( ( errno == EAGAIN || errno == EWOULDBLOCK ) && ! abort_writes_.load() )
+                continue;  // the send timeout passed without room: the app is slow, not gone
+            return false;
+        }
+        size_t left = size_t( n );
+        while( index < iov.size() && left >= iov[index].iov_len )
+        {
+            left -= iov[index].iov_len;
+            ++index;
+        }
+        if( left )
+        {
+            iov[index].iov_base = static_cast< char * >( iov[index].iov_base ) + left;
+            iov[index].iov_len -= left;
+        }
+    }
+    return true;
 }
 
 void Connection::finish( std::chrono::milliseconds timeout )
@@ -247,10 +353,12 @@ void Connection::finish( std::chrono::milliseconds timeout )
         finished_ = true;
         closing_ = true;
         out_cv_.notify_all();
+        room_cv_.notify_all();
         if( writer_.joinable() )
             drained_cv_.wait_for( lock, timeout, [this] { return writer_done_; } );
     }
-    // Wakes a reader blocked in recvmsg() and a writer blocked on an app that stopped reading.
+    // A writer waiting for an app that stopped reading gives up; shutdown() wakes a reader blocked in recvmsg().
+    abort_writes_ = true;
     if( sock_.valid() )
         ::shutdown( sock_.get(), SHUT_RDWR );
     if( reader_.joinable() )
