@@ -186,6 +186,8 @@ private struct SettingsSections: View {
                 Text(S.methodTSDF).tag(SurfaceMethod.tsdf)
                 Text(S.methodPoisson).tag(SurfaceMethod.poisson)
             }
+            Toggle(S.closeHead, isOn: $model.settings.closeHead)
+                .help(S.closeHeadHelp)
         }
         .disabled(model.screen == .reconstructing)
 

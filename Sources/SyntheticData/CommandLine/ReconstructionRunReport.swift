@@ -47,8 +47,13 @@ public struct GroundTruthEvaluation: Codable, Sendable {
     public var maxTranslationMm: Float
     public var meanHeadMisalignmentMm: Float
     public var maxHeadMisalignmentMm: Float
-    /// Reconstructed surface -> ground-truth surface (in the ground truth's world frame).
+    /// Measured reconstructed surface -> ground-truth surface (in the ground truth's world frame). Synthesized surface
+    /// (filled holes and, with `ReconstructionOptions.closeHead`, the closed back of the head) is left out: it is a
+    /// guess, not a measurement.
     public var surfaceToGroundTruth: SurfaceDistance?
+    /// The whole mesh, synthesized surface included, -> ground-truth surface: what `ifscan eval` measures on the
+    /// exported OBJ. nil when nothing was synthesized (then it equals `surfaceToGroundTruth`).
+    public var wholeMeshToGroundTruth: SurfaceDistance?
     /// The reconstruction's world frame (camera frame of its first frontal keyframe) -> the ground truth's world
     /// frame (camera frame of keyframe 0), column-major, meters: G0 * E0^-1 through keyframe 0's estimated pose E0.
     /// The two differ when the dataset does not start with a frontal keyframe. nil = identity assumed.
@@ -76,7 +81,7 @@ public struct GroundTruthEvaluation: Codable, Sendable {
             notes.append("pose errors skipped: \(result.cameraPoses.count) poses for \(truth.count) ground-truth frames")
             notes.append("surface distance assumes that the reconstruction's world frame is keyframe 0's camera frame")
         }
-        var surface: SurfaceDistance?
+        var surface: SurfaceDistance?, wholeMesh: SurfaceDistance?
         if let mesh, result.mesh.triangleCount > 0 {
             do {
                 var reconstructed = result.mesh
@@ -86,7 +91,11 @@ public struct GroundTruthEvaluation: Codable, Sendable {
                         return SIMD3(q.x, q.y, q.z)
                     }
                 }
-                surface = try MeshEvaluation.distance(from: reconstructed, to: mesh, samples: samples)
+                let measured = reconstructed.measuredSurface
+                surface = try MeshEvaluation.distance(from: measured, to: mesh, samples: samples)
+                if measured.triangleCount != reconstructed.triangleCount {
+                    wholeMesh = try MeshEvaluation.distance(from: reconstructed, to: mesh, samples: samples)
+                }
             } catch {
                 notes.append("surface distance failed: \(error.localizedDescription)")
             }
@@ -103,7 +112,8 @@ public struct GroundTruthEvaluation: Codable, Sendable {
             maxTranslationMm: translations.max() ?? 0,
             meanHeadMisalignmentMm: misalignments.isEmpty ? 0 : misalignments.reduce(0, +) / Float(misalignments.count),
             maxHeadMisalignmentMm: misalignments.max() ?? 0,
-            surfaceToGroundTruth: surface, groundTruthFromWorld: groundTruthFromWorld?.columnMajor, notes: notes)
+            surfaceToGroundTruth: surface, wholeMeshToGroundTruth: wholeMesh,
+            groundTruthFromWorld: groundTruthFromWorld?.columnMajor, notes: notes)
     }
 }
 

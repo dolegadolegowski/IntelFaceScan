@@ -313,6 +313,7 @@ public enum IFScanTool {
         options.voxelSizeMM = c.voxelMM
         options.method = c.method
         options.keepShoulders = c.keepShoulders
+        options.closeHead = !c.openBack
         options.useColoredICP = c.coloredICP
         options.targetTriangles = c.targetTriangles
         options.textureSize = c.textureSize
@@ -379,7 +380,12 @@ public enum IFScanTool {
                     + "camera center max \(format(gt.maxTranslationMm, 2)) mm")
             }
             if let s = gt.surfaceToGroundTruth {
-                io.out("Surface distance to ground truth: mean \(format(s.meanMm, 3)) mm, median \(format(s.medianMm, 3)), "
+                io.out("Surface distance to ground truth\(gt.wholeMeshToGroundTruth == nil ? "" : " (measured part)"): "
+                    + "mean \(format(s.meanMm, 3)) mm, median \(format(s.medianMm, 3)), "
+                    + "p95 \(format(s.p95Mm, 3)), max \(format(s.maxMm, 3)) mm")
+            }
+            if let s = gt.wholeMeshToGroundTruth {
+                io.out("Whole mesh, synthesized surface included: mean \(format(s.meanMm, 3)) mm, "
                     + "p95 \(format(s.p95Mm, 3)), max \(format(s.maxMm, 3)) mm")
             }
         }

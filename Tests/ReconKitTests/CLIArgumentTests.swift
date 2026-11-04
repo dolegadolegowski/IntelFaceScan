@@ -49,6 +49,7 @@ private func parseError(_ line: String) -> String? {
     expected.voxelMM = 0.5
     expected.method = .poisson
     expected.keepShoulders = true
+    expected.openBack = true
     expected.targetTriangles = 250_000
     expected.textureSize = 2048
     expected.saveDataset = "keys.ifsdataset"
@@ -56,7 +57,7 @@ private func parseError(_ line: String) -> String? {
     expected.report = "report.json"
     expected.quiet = true
     #expect(try parse("reconstruct -o out/head.OBJ --ply head.ply --voxel-mm 0.5 --method Poisson --keep-shoulders "
-        + "--triangles 250000 --texture-size 2048 --save-dataset keys.ifsdataset --helper /opt/IntelFaceScanHelper --report report.json -q rec.db3") == .reconstruct(expected))
+        + "--open-back --triangles 250000 --texture-size 2048 --save-dataset keys.ifsdataset --helper /opt/IntelFaceScanHelper --report report.json -q rec.db3") == .reconstruct(expected))
     var limited = ReconstructCommand(input: "synthetic-camera", output: "h.obj")
     limited.timeLimitSeconds = 120
     #expect(try parse("reconstruct synthetic-camera -o h.obj --time-limit 120") == .reconstruct(limited))

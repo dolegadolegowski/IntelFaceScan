@@ -8,7 +8,7 @@
 //                [--distance 0.6] [--poses front,up,down,left,right] [--no-background] [--lighting 0.25]
 //                [--mesh-resolution 128] [--gt-mesh gt.obj]
 //   ifscan reconstruct <input.ifsdataset | recording.db3 | recording.bag | synthetic-camera> -o head.obj
-//                [--ply head.ply] [--voxel-mm 0.75] [--method tsdf|poisson] [--keep-shoulders] [--icp colored|geometric]
+//                [--ply head.ply] [--voxel-mm 0.75] [--method tsdf|poisson] [--keep-shoulders] [--open-back] [--icp colored|geometric]
 //                [--save-dataset out.ifsdataset] [--triangles N] [--texture-size 4096] [--helper <IntelFaceScanHelper>]
 //                [--report report.json] [--time-limit 600] [--quiet]
 //   ifscan eval <mesh.obj> --gt <gt.obj> [--samples 200000] [--report report.json] [--symmetric] [--json]
@@ -60,6 +60,8 @@ public struct ReconstructCommand: Equatable, Sendable {
     public var voxelMM: Float = 0.75
     public var method: SurfaceMethod = .tsdf
     public var keepShoulders = false
+    /// Leave the unscanned back of the head and the neck open instead of closing them with a synthesized surface.
+    public var openBack = false
     /// Colored ICP (geometry + photometric term) or point-to-plane only.
     public var coloredICP = false
     /// Decimate to this many triangles before texturing (nil = full resolution).
@@ -149,6 +151,8 @@ public enum IFScanArguments {
               --voxel-mm <mm>            TSDF voxel size (default 0.75)
               --method <tsdf|poisson>    Surface reconstruction (default tsdf)
               --keep-shoulders           Keep neck and shoulders instead of cutting below the chin
+              --open-back                Leave the unscanned back of the head and the neck open (default:
+                                         closed with a smooth synthesized surface, so the mesh is watertight)
               --icp <colored|geometric>  Registration: colored ICP or point-to-plane only (default
                                          geometric)
               --triangles <n>            Decimate to n triangles before texturing (default: full resolution)
@@ -261,6 +265,7 @@ public enum IFScanArguments {
         let specs = [Spec(name: "output", short: "o", takesValue: true), Spec(name: "ply", short: nil, takesValue: true),
                      Spec(name: "voxel-mm", short: nil, takesValue: true), Spec(name: "method", short: nil, takesValue: true),
                      Spec(name: "keep-shoulders", short: nil, takesValue: false), Spec(name: "icp", short: nil, takesValue: true),
+                     Spec(name: "open-back", short: nil, takesValue: false),
                      Spec(name: "triangles", short: nil, takesValue: true), Spec(name: "texture-size", short: nil, takesValue: true),
                      Spec(name: "save-dataset", short: nil, takesValue: true), Spec(name: "helper", short: nil, takesValue: true),
                      Spec(name: "report", short: nil, takesValue: true), Spec(name: "quiet", short: "q", takesValue: false),
@@ -283,6 +288,7 @@ public enum IFScanArguments {
             c.method = value
         }
         c.keepShoulders = p.flags.contains("keep-shoulders")
+        c.openBack = p.flags.contains("open-back")
         if let icp = p.values["icp"] {
             switch icp.lowercased() {
             case "colored": c.coloredICP = true

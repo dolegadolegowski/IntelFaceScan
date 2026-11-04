@@ -239,8 +239,9 @@ enum RobustnessStudy {
         let c = truth[anchor].inverse * SIMD4(scan.headCenter, 1)
         let misalignment = MeshEvaluation.relativeHeadMisalignment(estimated: estimated, groundTruth: groundTruth,
                                                                    center: SIMD3(c.x, c.y, c.z)).dropFirst()
-        // Surface: the mesh lives in the reference camera frame; map it into the ground truth's world.
-        var mesh = result.mesh
+        // Surface: the measured part (not the synthesized closing of the back of the head) lives in the reference
+        // camera frame; map it into the ground truth's world.
+        var mesh = result.mesh.measuredSurface
         let toTruth = truth[anchor] * result.cameraPoses[anchor].inverse
         mesh.positions = mesh.positions.map { let q = toTruth * SIMD4($0, 1); return SIMD3(q.x, q.y, q.z) }
         let distance = try MeshEvaluation.distance(from: mesh, to: scan.groundTruthMesh, samples: 100_000)

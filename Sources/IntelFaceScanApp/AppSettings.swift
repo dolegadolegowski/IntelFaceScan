@@ -55,6 +55,7 @@ struct AppSettings: Codable, Equatable {
     // Reconstruction
     var voxelSizeMM: Float = 0.75
     var method: SurfaceMethod = .tsdf
+    var closeHead = true
     // Display
     var mirrored = true
     var previewMode: PreviewMode = .color
@@ -130,6 +131,7 @@ struct AppSettings: Codable, Equatable {
         o.voxelSizeMM = voxelSizeMM
         o.method = method
         o.keepShoulders = keepShoulders
+        o.closeHead = closeHead
         return o
     }
 

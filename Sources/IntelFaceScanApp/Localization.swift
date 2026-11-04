@@ -119,6 +119,13 @@ enum S {
     static var surfaceMethod: String { tr("Surface", "Powierzchnia") }
     static var methodTSDF: String { tr("TSDF (GPU)", "TSDF (GPU)") }
     static var methodPoisson: String { tr("Screened Poisson", "Screened Poisson") }
+    static var closeHead: String { tr("Close the back of the head", "Domknij tył głowy") }
+    static var closeHeadHelp: String {
+        tr("Closes the unscanned back of the head and the neck with a smooth synthesized surface, so the model is "
+           + "watertight. The closed part is a guess, not a measurement.",
+           "Domyka nieskanowany tył głowy i szyję gładką, wygenerowaną powierzchnią, aby model był szczelny. "
+           + "Domknięta część jest przybliżeniem, nie pomiarem.")
+    }
     static var displaySection: String { tr("Display", "Wyświetlanie") }
     static var mirrored: String { tr("Mirror the preview", "Lustrzany podgląd") }
     static var landmarks: String { tr("Show face landmarks", "Pokaż punkty twarzy") }

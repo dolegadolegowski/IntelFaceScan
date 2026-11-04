@@ -76,9 +76,10 @@ struct EndToEndSyntheticTests {
         #expect((rotations.max() ?? .infinity) < Self.maxRotationDeg)
         #expect((misalignment.max() ?? .infinity) * 1000 < Self.maxHeadMisalignmentMm)
 
-        // Surface: the reconstruction lies on the true surface (one-sided: unseen parts are not penalized).
+        // Surface: the measured part of the reconstruction lies on the true surface (one-sided: unseen parts are not
+        // penalized). The closing of the back of the head (closeHead) is synthesized, so it is left out.
         #expect(result.mesh.triangleCount > 20_000)   // 60k after decimation
-        let distance = try MeshEvaluation.distance(from: result.mesh, to: scan.groundTruthMesh)
+        let distance = try MeshEvaluation.distance(from: result.mesh.measuredSurface, to: scan.groundTruthMesh)
         print("e2e surface distance (mm): mean \(distance.meanMm), median \(distance.medianMm), p95 \(distance.p95Mm), max \(distance.maxMm)")
         #expect(distance.meanMm < Self.maxMeanSurfaceMm)
         #expect(distance.p95Mm < Self.maxP95SurfaceMm)
@@ -122,14 +123,16 @@ struct EndToEndSyntheticTests {
         #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("head.ply").path))
 
         // The exported OBJ (millimeters, export frame) evaluated against the ground truth through the report gives
-        // the distance the report measured in the world frame.
+        // the distance the report measured in the world frame for the whole mesh: the OBJ carries the synthesized
+        // closing of the back of the head too.
         let evalOut = Lines()
         let eval = await IFScanTool.run(["e" + "val", head, "--gt", dataset + "/ground_truth.obj", "--report", report, "--json"],
                                         output: IFScanOutput(out: { evalOut.append($0) }, err: { err.append($0) }))
         #expect(eval == 0, "\(err.text)")
         let evalJSON = try #require(try JSONSerialization.jsonObject(with: Data(evalOut.text.utf8)) as? [String: Any])
         let exportedMean = try #require((evalJSON["mesh_to_ground_truth"] as? [String: Any])?["mean_mm"] as? Double)
-        let reportMean = try #require(surface["mean_mm"] as? Double)
+        let whole = truth["whole_mesh_to_ground_truth"] as? [String: Any] ?? surface
+        let reportMean = try #require(whole["mean_mm"] as? Double)
         #expect(abs(exportedMean - reportMean) < 0.05, "exported OBJ \(exportedMean) mm, report \(reportMean) mm")
     }
 }
