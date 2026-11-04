@@ -304,7 +304,8 @@ private func depthMesh(_ frame: CameraFrame, worldFromCamera: simd_float4x4) -> 
 @Test func syntheticEvaluationSeparatesRotationFromItsLeverArm() {
     let scene = SyntheticScene(options: noiseFree())
     let truth = [matrix_identity_float4x4, scene.cameraFromWorld(headPose: HeadPose(yaw: 45, pitch: 0, roll: 0)).inverse]
-    #expect(MeshEvaluation.relativeHeadMisalignment(estimated: truth, groundTruth: truth, center: scene.headCenter) == [0, 0])
+    let none = MeshEvaluation.relativeHeadMisalignment(estimated: truth, groundTruth: truth, center: scene.headCenter)
+    #expect(none.count == 2 && none.allSatisfy { $0 < 1e-6 })
 
     // Frame 1 off by 1 degree about the head center: the head surface (9 cm sphere) moves by r * angle = 1.57 mm,
     // while the camera center, 0.68 m away, moves by ~12 mm.
