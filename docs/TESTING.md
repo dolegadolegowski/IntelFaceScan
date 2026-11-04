@@ -33,7 +33,7 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
 | `ScanKitTests/DatasetRoundTripTests` | `ScanDataset`: bit-exact pixels (every 16-bit depth value), all metadata, documented snake_case layout, 16-bit grayscale depth PNGs, broken manifests, path traversal, refusing to replace foreign folders, `DatasetCameraSource` offline/real-time/loop replay |
 | `ScanKitTests/SyntheticCameraSourceTests` | `SyntheticCameraSource`: lifecycle and events, 30 fps pacing, configured resolution, threshold filter, the pose animation |
 | `ReconKitTests/SyntheticScanTests` | synthetic ground truth: depth equals an independent brute-force ray cast of the ground-truth mesh, back-projected depth lies on the surface, noise statistics, invalid pixels at silhouettes, `HeadPose` sign conventions, determinism, closed outward mesh |
-| `ReconKitTests/CLIArgumentTests`, `CLIToolTests` | `ifscan` parsing (30 invalid command lines), commands run in-process, exit codes, outputs checked before any work (unwritable paths, `--save-dataset` onto the input), ground-truth evaluation of a scan that does not start with the frontal pose (world frames aligned), OBJ dialects |
+| `ReconKitTests/CLIArgumentTests`, `CLIToolTests` | `ifscan` parsing (31 invalid command lines), commands run in-process, exit codes, outputs checked before any work (unwritable paths, `--save-dataset` onto the input), ground-truth evaluation of a scan that does not start with the frontal pose (world frames aligned), `synthetic-camera` stopping at `--time-limit`, OBJ dialects |
 | `ReconKitTests/EndToEndSyntheticTests` | synthetic 1280×800 scan → `ReconstructionPipeline` (decimated to 60k triangles before texturing) → rotation error mean < 1°, worst frame < 1.5°, head misalignment < 5 mm, surface distance mean < 1 mm and p95 < 2.5 mm, export frame upright; the same through `ifscan reconstruct`, and the exported OBJ measured through `--report` matches the report's distance. Enabled by `CoreAvailability` (the core is integrated); recordings from `IFS_TEST_RECORDINGS` |
 
 The other suites belong to the modules' work streams: `CameraKitTests` (wire format, JSON, the helper in fake-camera
@@ -120,7 +120,9 @@ $IFSCAN eval /tmp/head.obj --gt /tmp/head.ifsdataset/ground_truth.obj --report /
   animated `SyntheticCameraSource` head in real time through Vision and the guided scan instead. Options: `--ply`,
   `--voxel-mm`, `--method tsdf|poisson`, `--keep-shoulders`, `--icp colored|geometric` (default geometric =
   point-to-plane), `--triangles` (decimate before texturing; UV unwrapping a full-resolution 0.75 mm head mesh
-  takes minutes), `--texture-size`, `--save-dataset` (not onto the input), `--helper`, `--report`, `-q`. Every
+  takes minutes), `--texture-size`, `--save-dataset` (not onto the input), `--helper`, `--report`, `-q`,
+  `--time-limit` (synthetic-camera: stop the guided scan after this many seconds, default 600, and reconstruct
+  what it accepted; it would otherwise wait forever for a pose Vision never detects). Every
   output path is checked (folders created, writable) before the input is read, so a long scan is not lost at the
   export.
 * The helper is looked up as `--helper`, `$IFS_HELPER`, next to `ifscan`, `../Helpers/` (app bundle), then

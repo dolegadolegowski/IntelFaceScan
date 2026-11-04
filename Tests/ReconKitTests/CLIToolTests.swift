@@ -237,6 +237,31 @@ private let smallSynth = ["--width", "320", "--height", "200", "--frames-per-pos
     #expect(mean < 0.01, "mean \(mean) mm")
 }
 
+/// `ifscan info x | head`: writing to a pipe whose reader is gone must fail softly (ifscan then exits 0), not raise
+/// the NSException of FileHandle.write(_: Data) that aborted the tool.
+@Test func cliOutputSurvivesAClosedPipe() throws {
+    let pipe = Pipe()
+    // EPIPE instead of SIGPIPE for this descriptor only (ifscan ignores SIGPIPE process-wide).
+    #expect(fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0)
+    #expect(IFScanOutput.writeLine("first", to: pipe.fileHandleForWriting))
+    try pipe.fileHandleForReading.close()
+    #expect(!IFScanOutput.writeLine("after the reader left", to: pipe.fileHandleForWriting))
+}
+
+/// The animated synthetic head loops forever; the guided scan must not keep `reconstruct synthetic-camera` running
+/// when it cannot capture every pose (here: 5 s cover at most the first poses).
+@Test(.timeLimit(.minutes(3))) func cliSyntheticCameraScanStopsAtTheTimeLimit() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let start = Date()
+    let run = await ifscan(["reconstruct", "synthetic-camera", "-o", root.appendingPathComponent("head.obj").path,
+                            "--time-limit", "5", "--triangles", "20000", "--texture-size", "512"])
+    let elapsed = Date().timeIntervalSince(start)
+    #expect(run.err.contains("within the time limit of 5 s"), "\(run.err)")
+    #expect(run.status == 0 || run.status == 65, "\(run.err)")   // reconstructed what it had, or too few keyframes
+    #expect(elapsed < 90, "took \(elapsed) s")
+}
+
 @Test(.enabled(if: !CoreAvailability.reconstruction, "the reconstruction core is integrated"))
 func cliNamesPlaceholderStagesWhenReconstructing() async throws {
     let root = try temporaryDirectory()

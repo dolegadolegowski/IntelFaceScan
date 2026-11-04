@@ -57,6 +57,10 @@ private func parseError(_ line: String) -> String? {
     expected.quiet = true
     #expect(try parse("reconstruct -o out/head.OBJ --ply head.ply --voxel-mm 0.5 --method Poisson --keep-shoulders "
         + "--triangles 250000 --texture-size 2048 --save-dataset keys.ifsdataset --helper /opt/IntelFaceScanHelper --report report.json -q rec.db3") == .reconstruct(expected))
+    var limited = ReconstructCommand(input: "synthetic-camera", output: "h.obj")
+    limited.timeLimitSeconds = 120
+    #expect(try parse("reconstruct synthetic-camera -o h.obj --time-limit 120") == .reconstruct(limited))
+    #expect(ReconstructCommand(input: "a", output: "b.obj").timeLimitSeconds == 600)
     // "--" ends the options: inputs may start with a dash
     #expect(try parse("reconstruct -o h.obj -- -odd.bag") == .reconstruct(ReconstructCommand(input: "-odd.bag", output: "h.obj")))
 }
@@ -116,6 +120,7 @@ private func parseError(_ line: String) -> String? {
     ("reconstruct a.ifsdataset -o head.obj --voxel-mm 0", "not a number"),
     ("reconstruct a.ifsdataset -o head.obj --triangles 10", "not an integer in 1000...50000000"),
     ("reconstruct a.ifsdataset -o head.obj --texture-size 100000", "not an integer in 256...16384"),
+    ("reconstruct synthetic-camera -o head.obj --time-limit 1", "not a number in 5.0...86400.0"),
     ("eval head.obj", "missing --gt"),
     ("eval --gt gt.obj", "missing <mesh.obj>"),
     ("eval head.obj --gt gt.obj --samples 0", "not an integer"),

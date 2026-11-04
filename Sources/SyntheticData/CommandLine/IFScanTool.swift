@@ -21,9 +21,23 @@ public struct IFScanOutput: Sendable {
         self.err = err
     }
 
+    /// When standard output's reader has gone away (`ifscan info x | head`), the tool ends quietly with status 0, as
+    /// the comment in main.swift promises: ifscan ignores SIGPIPE (the helper socket must not kill it), and
+    /// FileHandle.write(_: Data) raised an uncaught NSException on EPIPE (abort, exit 134, stack trace).
     public static let standard = IFScanOutput(
-        out: { line in FileHandle.standardOutput.write(Data((line + "\n").utf8)) },
-        err: { line in FileHandle.standardError.write(Data((line + "\n").utf8)) })
+        out: { line in if !writeLine(line, to: .standardOutput) { exit(0) } },
+        err: { line in writeLine(line, to: .standardError) })
+
+    /// Writes one line; false when the write failed (EPIPE: the reader closed the pipe). Never raises.
+    @discardableResult
+    public static func writeLine(_ line: String, to handle: FileHandle) -> Bool {
+        do {
+            try handle.write(contentsOf: Data((line + "\n").utf8))
+            return true
+        } catch {
+            return false
+        }
+    }
 }
 
 public enum IFScanTool {
@@ -247,23 +261,41 @@ public enum IFScanTool {
             }
         case .syntheticCamera:
             // The app's live flow without the UI: 30 fps frames of the animated head -> Vision -> ScanController.
-            log("Scanning the animated synthetic head in real time (Vision head pose, guided scan)")
+            log("Scanning the animated synthetic head in real time (Vision head pose, guided scan, "
+                + "time limit \(format(c.timeLimitSeconds, 0)) s)")
             var configuration = ScanConfiguration.offline
             configuration.keepShoulders = c.keepShoulders
+            // The animated head loops forever and the guided scan waits for every pose: without a limit a pose that
+            // Vision never detects would keep the command running indefinitely. Shutting the source down ends the
+            // frame stream, and RecordingScan returns the keyframes accepted so far.
+            let source = SyntheticCameraSource(holdSeconds: 2.5)
+            let limit = c.timeLimitSeconds
+            let watchdog = Task {
+                try await Task.sleep(nanoseconds: UInt64(limit * 1e9))
+                await source.shutdown()
+            }
             let scan: RecordingScan.Result
             do {
-                scan = try await RecordingScan.run(source: SyntheticCameraSource(holdSeconds: 2.5), label: syntheticCameraInput,
+                scan = try await RecordingScan.run(source: source, label: syntheticCameraInput,
                                                    adoptRecordedProfiles: false, configuration: configuration, log: log)
+                watchdog.cancel()
             } catch {
+                watchdog.cancel()
                 throw Failure(code: .unavailable, message: "synthetic camera failed: \(error.localizedDescription)")
             }
             capture = scan.capture
             log("Guided scan: \(capture.keyframes.count) keyframes from \(scan.framesProcessed) frames"
                 + (scan.completed ? " (all poses captured)" : ""))
             if let reason = scan.failure { notes.append("guided scan failed: \(reason)") }
+            if !scan.completed && scan.failure == nil {
+                let note = "the guided scan did not capture every pose within the time limit of \(format(limit, 0)) s (--time-limit)"
+                notes.append(note)
+                io.err("warning: \(note)")
+            }
             logRejections(scan, log)
             guard !capture.keyframes.isEmpty else {
-                throw Failure(code: .dataError, message: "the guided scan accepted no keyframes from the synthetic camera")
+                throw Failure(code: .dataError, message: "the guided scan accepted no keyframes from the synthetic camera",
+                              notes: notes)
             }
         }
         timings["input"] = Date().timeIntervalSince(begin)
