@@ -160,6 +160,12 @@ struct DeviceWatch
     bool lost = false;     // 'current' is gone
     bool expected = false; // we asked the camera to re-enumerate (advanced mode, hardware reset)
     bool closed = false;
+    // librealsense calls a devices-changed callback without any lock it could share with us (rsutils::signal copies
+    // the subscribers and calls them unlocked), so replacing the callback does not wait for one in flight. Events are
+    // emitted under 'emit_mutex' and shutdown() sets 'emit_closed' under it: once shutdown() has returned, no event
+    // is being emitted and none will be.
+    std::mutex emit_mutex;
+    bool emit_closed = false;
 };
 
 struct StreamSelection
@@ -329,7 +335,7 @@ public:
     }
 
     void open_live();
-    void open_device( const rs2::device & device );
+    void open_device( const rs2::context & context, const rs2::device & device );
     void open_playback( const std::string & file, bool real_time );
 
     json device_info() override;
@@ -381,6 +387,7 @@ private:
     OptionPlan plan_options_locked( const CaptureConfig & config ) const;
     void apply_options_locked( const OptionPlan & plan );
     void apply_configuration_locked( const CaptureConfig & config );
+    void reapply_after_preset_locked();
     void apply_roi_locked();
     uint64_t finish_recording_locked();
 
@@ -466,10 +473,10 @@ void RealSenseEngine::open_live()
     open_device_locked( chosen );
 }
 
-void RealSenseEngine::open_device( const rs2::device & device )
+void RealSenseEngine::open_device( const rs2::context & context, const rs2::device & device )
 {
     std::lock_guard< std::mutex > lock( m_mutex );
-    m_ctx = std::make_unique< rs2::context >();
+    m_ctx = std::make_unique< rs2::context >( context );
     open_device_locked( device );
 }
 
@@ -608,6 +615,11 @@ void RealSenseEngine::install_device_callback_locked()
             }
             watch->cv.notify_all();
         }
+        if( ! disconnected && ! connected )
+            return;
+        std::lock_guard< std::mutex > emit_lock( watch->emit_mutex );
+        if( watch->emit_closed )
+            return;
         if( disconnected )
             emit_event( cb, "device_disconnected",
                         { { "serial", serial }, { "message", "The RealSense camera was disconnected" } } );
@@ -842,14 +854,19 @@ void RealSenseEngine::start_session_locked( bool emit )
     try
     {
         // A playback starts reading as soon as one sensor starts; pausing until all are started keeps the first
-        // frames of the later sensors (resume() rewinds to the last frame actually delivered).
-        if( m_playback && ! m_playback_paused )
+        // frames of the later sensors (resume() rewinds to the last frame actually delivered). The SDK forgets its
+        // pause when all sensors stop (playback_device::stop_internal), so a playback the app paused is paused here
+        // again and stays paused until PLAYBACK resume: otherwise it would play while m_playback_paused says
+        // paused, and the next pause request would be ignored.
+        if( m_playback )
             m_playback->pause();
 
         st.color_sensor.open( st.color_profile );
         session->color_open = true;
         st.depth_sensor.open( st.depth_profiles );
         session->depth_open = true;
+        if( ! m_playback_mode && m_configured )
+            reapply_after_preset_locked();
         if( st.motion_sensor )
         {
             st.motion_sensor.open( st.motion_profiles );
@@ -1113,6 +1130,24 @@ void RealSenseEngine::apply_configuration_locked( const CaptureConfig & config )
     apply_options_locked( plan_options_locked( config ) );
 }
 
+void RealSenseEngine::reapply_after_preset_locked()
+{
+    // librealsense re-applies the active visual preset whenever the depth sensor opens (advanced_mode_preset_option
+    // registers an on-open hook; the preset stays active until it is set to Custom, which set_depth_table() does).
+    // The "Default" preset rewrites the depth table (1 mm units, disparity shift 0), laser power, emitter and auto
+    // exposure, and the sensor read its depth units just before the hook ran, so its frames would carry 0.1 mm while
+    // the camera sends 1 mm. Everything the configuration sets after the preset is therefore set again here, between
+    // open and start (High Accuracy / High Density keep these values: setting them again changes nothing).
+    rs2::sensor depth = find_sensor_locked( "depth" );
+    if( ! depth || ! depth.supports( RS2_OPTION_VISUAL_PRESET ) )
+        return;
+    if( std::lround( depth.get_option( RS2_OPTION_VISUAL_PRESET ) ) == RS2_RS400_VISUAL_PRESET_CUSTOM )
+        return;
+    OptionPlan plan = plan_options_locked( m_config );
+    plan.preset.reset();
+    apply_options_locked( plan );
+}
+
 void RealSenseEngine::apply_roi_locked()
 {
     if( ! m_roi || ! session_active_locked() )
@@ -1139,11 +1174,12 @@ void RealSenseEngine::apply_roi_locked()
     };
 
     if( auto r = clamp_rect( *m_roi, color.width, color.height ) )
-        set_roi( st.color_sensor, *r, "RGB" );
+        set_roi( st.color_sensor, ensure_min_size( *r, k_min_roi_px, k_min_roi_px, color.width, color.height ), "RGB" );
     rs2_extrinsics color_to_depth = inverse( m_session->depth_to_color );
     float distance = m_roi_distance_m > 0 ? m_roi_distance_m : k_default_roi_distance_m;
     if( auto r = map_color_rect_to_depth( color, depth, color_to_depth, *m_roi, distance ) )
-        set_roi( st.depth_sensor, *r, "depth" );
+        set_roi( st.depth_sensor, ensure_min_size( *r, k_min_roi_px, k_min_roi_px, depth.width, depth.height ),
+                 "depth" );
 }
 
 uint64_t RealSenseEngine::finish_recording_locked()
@@ -1596,6 +1632,11 @@ void RealSenseEngine::shutdown()
     }
     old_current = rs2::device();
     old_arrived = rs2::device();
+    {
+        // Waits for a devices-changed callback that is emitting right now; later ones see emit_closed.
+        std::lock_guard< std::mutex > emit_lock( m_watch->emit_mutex );
+        m_watch->emit_closed = true;
+    }
     if( m_ctx )
     {
         try
@@ -1641,8 +1682,14 @@ std::unique_ptr< CaptureEngine > CaptureEngine::create_playback( const std::stri
 
 std::unique_ptr< CaptureEngine > create_live_engine_for_device( rs2::device device, CaptureCallbacks callbacks )
 {
+    return create_live_engine_for_device( rs2::context(), std::move( device ), std::move( callbacks ) );
+}
+
+std::unique_ptr< CaptureEngine > create_live_engine_for_device( rs2::context context, rs2::device device,
+                                                                CaptureCallbacks callbacks )
+{
     auto engine = std::make_unique< RealSenseEngine >( std::move( callbacks ), false );
-    engine->open_device( device );
+    engine->open_device( context, device );
     return engine;
 }
 
