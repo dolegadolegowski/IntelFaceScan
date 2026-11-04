@@ -11,9 +11,54 @@ import Foundation
 import os
 
 /// Fan-out of values to any number of AsyncStream consumers.
+///
+/// Lossy subscribers (`subscribe(bufferingNewest:)`) keep only their newest undelivered values and never slow the
+/// producer down. Lossless subscribers (`subscribeLossless(capacity:)`, non-real-time playback) get every value:
+/// `yield` waits until each of them has room, so the helper's reader stops reading and the helper waits in turn
+/// (docs/PROTOCOL.md, backpressure). The wait is skipped - the value is queued beyond the capacity, still not lost -
+/// while a bypass is held (a command waits for its reply, which arrives behind the frames the reader has not read
+/// yet) and after `release()` (shutdown, the helper exited). `finishAll()` ends every stream after its queued values.
 final class Broadcaster<Element: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuations: [UUID: AsyncStream<Element>.Continuation] = [:]
+
+    // Lossless subscriptions and the producer's wait, all guarded by `condition`.
+    private let condition = NSCondition()
+    private var queues: [UUID: LosslessQueue] = [:]
+    private var waits = true
+    private var bypasses = 0
+    private var released = false
+
+    private final class LosslessQueue: @unchecked Sendable {
+        let capacity: Int
+        var buffer: [Element] = []
+        var waiter: CheckedContinuation<Element?, Never>?
+        var ended = false
+
+        init(capacity: Int) { self.capacity = capacity }
+    }
+
+    /// The consumer's end of a lossless subscription. Dropping the stream (or cancelling the task that iterates it)
+    /// unsubscribes, so a consumer that went away never keeps the producer waiting.
+    private final class Subscription: @unchecked Sendable {
+        let broadcaster: Broadcaster
+        let id: UUID
+        let queue: LosslessQueue
+
+        init(broadcaster: Broadcaster, id: UUID, queue: LosslessQueue) {
+            self.broadcaster = broadcaster
+            self.id = id
+            self.queue = queue
+        }
+
+        deinit { broadcaster.unsubscribe(id, queue) }
+
+        func next() async -> Element? {
+            await withCheckedContinuation { continuation in broadcaster.take(from: queue, continuation) }
+        }
+
+        func cancel() { broadcaster.unsubscribe(id, queue) }
+    }
 
     func subscribe(bufferingNewest count: Int) -> AsyncStream<Element> {
         let (stream, continuation) = AsyncStream.makeStream(of: Element.self,
@@ -26,21 +71,122 @@ final class Broadcaster<Element: Sendable>: @unchecked Sendable {
         return stream
     }
 
+    /// A stream that receives every value in order: at most `capacity` wait for the consumer, then `yield` waits.
+    func subscribeLossless(capacity: Int) -> AsyncStream<Element> {
+        let id = UUID()
+        let queue = LosslessQueue(capacity: max(1, capacity))
+        condition.withLock { queues[id] = queue }
+        let subscription = Subscription(broadcaster: self, id: id, queue: queue)
+        return AsyncStream(unfolding: { await subscription.next() }, onCancel: { subscription.cancel() })
+    }
+
+    /// Delivers `value` to every subscriber; may wait for lossless ones (see the type).
     func yield(_ value: Element) {
         let targets = lock.withLock { Array(continuations.values) }
         for continuation in targets { continuation.yield(value) }
+
+        condition.lock()
+        defer { condition.unlock() }
+        for id in Array(queues.keys) {
+            while let queue = queues[id], !queue.ended, queue.waiter == nil, queue.buffer.count >= queue.capacity,
+                  waits, bypasses == 0, !released {
+                condition.wait()
+            }
+            guard let queue = queues[id], !queue.ended else { continue }
+            if let waiter = queue.waiter {
+                queue.waiter = nil
+                waiter.resume(returning: value)
+            } else {
+                // Lossy again (real-time playback): the oldest value makes room, as with .bufferingNewest.
+                if !waits && queue.buffer.count >= queue.capacity { queue.buffer.removeFirst() }
+                queue.buffer.append(value)
+            }
+        }
     }
 
-    /// Ends the current streams; later subscriptions get new ones.
+    private func take(from queue: LosslessQueue, _ continuation: CheckedContinuation<Element?, Never>) {
+        condition.lock()
+        if !queue.buffer.isEmpty {
+            let value = queue.buffer.removeFirst()
+            condition.broadcast()
+            condition.unlock()
+            continuation.resume(returning: value)
+        } else if queue.ended || queue.waiter != nil {
+            // Ended, or a second concurrent next() (not allowed on one stream): no value.
+            condition.unlock()
+            continuation.resume(returning: nil)
+        } else {
+            queue.waiter = continuation
+            condition.unlock()
+        }
+    }
+
+    private func unsubscribe(_ id: UUID, _ queue: LosslessQueue) {
+        condition.lock()
+        queues[id] = nil
+        queue.ended = true
+        queue.buffer.removeAll()
+        let waiter = queue.waiter
+        queue.waiter = nil
+        condition.broadcast()
+        condition.unlock()
+        waiter?.resume(returning: nil)
+    }
+
+    /// Lossless subscribers make the producer wait (true, the default) or lose their oldest values like lossy ones.
+    func setLossless(_ on: Bool) {
+        condition.withLock {
+            waits = on
+            condition.broadcast()
+        }
+    }
+
+    /// While held, `yield` never waits: values are queued beyond the capacity instead. Balance with `endBypass()`.
+    func beginBypass() {
+        condition.withLock {
+            bypasses += 1
+            condition.broadcast()
+        }
+    }
+
+    func endBypass() {
+        condition.withLock { bypasses = max(0, bypasses - 1) }
+    }
+
+    /// `yield` stops waiting until `resetRelease()`, so no consumer can hold up a shutdown.
+    func release() {
+        condition.withLock {
+            released = true
+            condition.broadcast()
+        }
+    }
+
+    func resetRelease() {
+        condition.withLock { released = false }
+    }
+
+    /// Ends the current streams (lossless ones after the values already queued); later subscriptions get new ones.
     func finishAll() {
         let targets: [AsyncStream<Element>.Continuation] = lock.withLock {
             defer { continuations.removeAll() }
             return Array(continuations.values)
         }
         for continuation in targets { continuation.finish() }
+
+        let waiters: [CheckedContinuation<Element?, Never>] = condition.withLock {
+            let all = Array(queues.values)
+            queues.removeAll()
+            condition.broadcast()
+            return all.compactMap { queue in
+                queue.ended = true
+                defer { queue.waiter = nil }
+                return queue.waiter
+            }
+        }
+        waiters.forEach { $0.resume(returning: nil) }
     }
 
-    var subscriberCount: Int { lock.withLock { continuations.count } }
+    var subscriberCount: Int { lock.withLock { continuations.count } + condition.withLock { queues.count } }
 }
 
 /// Per-command reply timeouts. Some commands legitimately take long: enabling advanced mode re-enumerates the
@@ -101,11 +247,33 @@ final class HelperCameraSession: @unchecked Sendable {
     private var connectTask: Task<DeviceInfo, Error>?
     private var shuttingDown = false
     private var invalidFrames = 0
+    /// A non-real-time playback delivers every frame: frame streams are lossless and the reader waits for them.
+    private var losslessFrames: Bool
 
     init(mode: Mode, helperURL: URL) {
         self.mode = mode
         self.helperURL = helperURL
         connectTimeout = mode == .live ? 600 : 20
+        losslessFrames = Self.startsLossless(mode)
+    }
+
+    private static func startsLossless(_ mode: Mode) -> Bool {
+        if case .playback(_, let realTime) = mode { return !realTime }
+        return false
+    }
+
+    /// A new frame stream: lossless (every frame, the reader waits while `bufferingNewest` frames are queued) during a
+    /// non-real-time playback, otherwise only the newest `bufferingNewest` undelivered frames. A stream keeps the kind
+    /// it was created with; a lossless one drops its oldest frames while the playback runs in real time.
+    func subscribeFrames(bufferingNewest count: Int) -> AsyncStream<CameraFrame> {
+        lock.withLock { losslessFrames }
+            ? frames.subscribeLossless(capacity: count)
+            : frames.subscribe(bufferingNewest: count)
+    }
+
+    private func setLosslessFrames(_ lossless: Bool) {
+        lock.withLock { losslessFrames = lossless }
+        frames.setLossless(lossless)
     }
 
     // MARK: Connecting
@@ -204,6 +372,9 @@ final class HelperCameraSession: @unchecked Sendable {
 
             let connection = HelperConnection(fd: fd, handlers: handlers(for: session))
             session.connection = connection
+            // A new helper plays at the speed it was started with, and its reader may wait for consumers again.
+            setLosslessFrames(Self.startsLossless(mode))
+            frames.resetRelease()
             connection.start()
             let hello = try await connection.waitForHello(timeout: HelperTimeouts.hello)
             guard hello.protocol == 1 else {
@@ -244,7 +415,7 @@ final class HelperCameraSession: @unchecked Sendable {
     }
 
     private func queryDevice(_ connection: HelperConnection) async throws -> DeviceInfo {
-        let json = try await connection.request(.queryDevice, EmptyBody(), timeout: HelperTimeouts.query)
+        let json = try await request(connection, .queryDevice, EmptyBody(), timeout: HelperTimeouts.query)
         let info = try Self.decodeData(DeviceInfo.self, from: json)
         events.yield(.connected(info))
         return info
@@ -350,11 +521,14 @@ final class HelperCameraSession: @unchecked Sendable {
     }
 
     private func helperExited(_ session: Active, status: Int32, error: CameraError?) {
-        let reported: Bool = lock.withLock {
-            if active === session { active = nil }
+        let (reported, current): (Bool, Bool) = lock.withLock {
+            let current = active === session
+            if current { active = nil }
             // A helper that never connected is reported by connect() throwing.
-            return session.hello != nil
+            return (session.hello != nil, current)
         }
+        // Nothing more will come: the reader must reach the end of the connection even if no consumer reads.
+        if current { frames.release() }
         logger.info("camera helper exited with status \(status)")
         if reported { events.yield(.helperExited(status: status)) }
     }
@@ -367,6 +541,17 @@ final class HelperCameraSession: @unchecked Sendable {
             if let descriptor { Darwin.close(descriptor) }
             throw CameraError.notConnected
         }
+        return try await request(connection, type, body, explicitNulls: explicitNulls, descriptor: descriptor,
+                                 timeout: timeout)
+    }
+
+    /// The reply arrives behind the frames the helper sent before it: while it is awaited, the reader queues frames
+    /// for lossless consumers instead of waiting for them (a consumer may itself be the one awaiting the reply).
+    private func request<Body: Encodable>(_ connection: HelperConnection, _ type: HelperMessageType, _ body: Body,
+                                          explicitNulls: [String] = [], descriptor: Int32? = nil,
+                                          timeout: TimeInterval) async throws -> Data {
+        frames.beginBypass()
+        defer { frames.endBypass() }
         return try await connection.request(type, body, explicitNulls: explicitNulls, descriptor: descriptor,
                                             timeout: timeout)
     }
@@ -435,6 +620,8 @@ final class HelperCameraSession: @unchecked Sendable {
     func playback(pause: Bool, realTime: Bool?) async throws {
         _ = try await command(.playback, PlaybackBody(action: pause ? "pause" : "resume", realTime: realTime),
                               timeout: HelperTimeouts.option)
+        // The helper applies real_time with either action and from then on drops frames (real time) or waits.
+        if let realTime { setLosslessFrames(!realTime) }
     }
 
     func hardwareReset() async throws {
@@ -470,6 +657,8 @@ final class HelperCameraSession: @unchecked Sendable {
             shuttingDown = true
             return (active, starting, connectTask)
         }
+        // A lossless consumer that stopped reading must not keep the reader from QUIT's reply and the helper's BYE.
+        frames.release()
         pending?.server.abort()
         if let task {
             let done = DispatchSemaphore(value: 0)
@@ -496,8 +685,10 @@ final class HelperCameraSession: @unchecked Sendable {
         session.server.abort()
         if let connection = session.connection {
             if !connection.closed {
+                frames.beginBypass()
                 _ = try? connection.requestBlocking(.quit, EmptyBody(), timeout: min(HelperTimeouts.quit, remaining()))
                 connection.waitUntilClosed(timeout: remaining())
+                frames.endBypass()
             }
             connection.close()
         }
