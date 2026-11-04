@@ -89,6 +89,12 @@ private func smallOptions() -> SyntheticScan.Options {
     await source.shutdown()
 }
 
+@Test func syntheticCameraDefaultsSuitVisionTracking() {
+    // Vision needs shading cues to find the face at +-45 degrees (see SyntheticCameraSource.defaultOptions).
+    #expect(SyntheticCameraSource().options.lighting == 0.6)
+    #expect(SyntheticCameraSource().options.width == SyntheticScan.Options().width)
+}
+
 @Test func syntheticCameraAnimationVisitsEveryScanPose() {
     var options = smallOptions()
     options.poses = ScanPose.required

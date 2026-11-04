@@ -29,7 +29,16 @@ public final class SyntheticCameraSource: CameraSource, @unchecked Sendable {
     private var sequence: UInt64 = 0
     private let clockOrigin = ProcessInfo.processInfo.systemUptime
 
-    public init(options: SyntheticScan.Options = SyntheticScan.Options(), transitionSeconds: Double = 1.2,
+    /// Defaults for UI work: stronger shading than the reconstruction datasets. Apple Vision needs the shading cues:
+    /// with lighting 0.25 it misses the face in the down and +-45 degree poses and person segmentation fails; at 0.6
+    /// every scan pose is detected with the right yaw sign and segmentation works (measured with ScanKit's HeadTracker).
+    public static var defaultOptions: SyntheticScan.Options {
+        var options = SyntheticScan.Options()
+        options.lighting = 0.6
+        return options
+    }
+
+    public init(options: SyntheticScan.Options = SyntheticCameraSource.defaultOptions, transitionSeconds: Double = 1.2,
                 holdSeconds: Double = 1.5) {
         self.options = options
         self.transitionSeconds = max(0.05, transitionSeconds)

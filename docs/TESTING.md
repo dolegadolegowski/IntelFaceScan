@@ -59,8 +59,12 @@ of another work stream: `@Test(.enabled(if: CoreAvailability.reconstruction, "..
 * **Determinism**: the same options give identical bytes (fixed-sequence RNG, counter-based per-pixel noise).
 * Measured: noise-free depth back-projected with the true poses lies 0.02 mm (mean) from the true surface; a
   640×400 render takes ~11 ms and a 1280×800 render ~33 ms in a debug build.
-* `lighting` (`ifscan synth --lighting`) controls the view-dependent shading. It matters for colored ICP: with the
-  first integrated pipeline the worst-frame rotation error was 1.40° with the default shading and 0.98° without.
+* `lighting` (`ifscan synth --lighting`) controls the view-dependent shading, and it pulls two ways. Colored ICP
+  prefers little shading: with the first integrated pipeline the worst-frame rotation error was 1.40° at the
+  default 0.25 and 0.98° at 0. Apple Vision needs shading cues: at 0.25 `HeadTracker` misses the face in the down
+  and ±45° poses and person segmentation fails; at 0.6 every scan pose is detected with the right yaw sign (yaw
+  estimates 33° and −50° for ±45°) and segmentation works. So reconstruction datasets default to 0.25,
+  `SyntheticCameraSource` (UI, guided scan) to 0.6; use `--lighting 0.6` for datasets that exercise `HeadTracker`.
 
 `SyntheticScene` renders arbitrary poses (`render(cameraFromWorld:frameIndex:)` also returns the noise-free depth);
 `SyntheticCameraSource` is a `CameraSource` ("Synthetic D455") that turns the head through the scan poses at the
