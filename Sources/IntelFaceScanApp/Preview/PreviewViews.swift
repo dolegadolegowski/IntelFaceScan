@@ -100,9 +100,11 @@ struct DistanceGauge: View {
             HStack {
                 Label(S.distance, systemImage: "ruler")
                     .font(.subheadline.weight(.semibold))
-                Spacer()
+                    .lineLimit(1)
+                Spacer(minLength: 8)
                 Text(adviceText)
                     .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
                     .foregroundStyle(adviceColor)
                     .contentTransition(.opacity)
             }
@@ -124,15 +126,31 @@ struct DistanceGauge: View {
                 }
             }
             .frame(height: 14)
-            HStack {
-                Text(distance.map { S.meters($0) + (isEstimate ? " (\(S.estimated))" : "") } ?? "–")
-                    .monospacedDigit()
-                Spacer()
-                Text(S.recommended(range)).foregroundStyle(.secondary)
+            // The measured distance and the recommended range side by side, or stacked when narrow.
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    measuredText
+                    Spacer()
+                    recommendedText
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    measuredText
+                    recommendedText
+                }
             }
             .font(.caption)
         }
         .accessibilityElement(children: .combine)
+    }
+
+    private var measuredText: some View {
+        Text(distance.map { S.meters($0) + (isEstimate ? " (\(S.estimated))" : "") } ?? "–")
+            .monospacedDigit()
+            .lineLimit(1)
+    }
+
+    private var recommendedText: some View {
+        Text(S.recommended(range)).foregroundStyle(.secondary).lineLimit(1)
     }
 
     private func x(_ d: Float, _ width: CGFloat) -> CGFloat {
