@@ -47,9 +47,9 @@ public struct LensDistortion: Sendable, Hashable {
         (c0, c1, c2, c3, c4) = (c[0], c[1], c[2], c[3], c[4])
     }
 
-    /// The model of a stream's intrinsics; nil when the model name is unknown.
+    /// The model of a stream's intrinsics (an empty name counts as none); nil when the model name is unknown.
     public init?(_ intrinsics: Intrinsics) {
-        guard let model = Model(rawValue: intrinsics.model) else { return nil }
+        guard let model = intrinsics.model.isEmpty ? Model.none : Model(rawValue: intrinsics.model) else { return nil }
         self.init(model: model, coeffs: intrinsics.coeffs)
     }
 
@@ -252,25 +252,28 @@ enum KeyframeUndistortion {
     static func undistort(_ keyframes: [Keyframe], indices: [Int], depthFollowsDistortion: Bool? = nil)
         -> (keyframes: [Keyframe], removed: [LensDistortion.Model], unknownModels: [String]) {
         var maps: [Intrinsics: Map] = [:]
-        var jobs: [(index: Int, lens: LensDistortion)] = []
+        var jobs: [(index: Int, lens: LensDistortion, camera: Intrinsics)] = []
         var removed = Set<LensDistortion.Model>(), unknown = Set<String>()
         for i in indices {
-            let k = keyframes[i].frame.color.intrinsics
-            guard let lens = LensDistortion(k) else { unknown.insert(k.model); continue }
+            let color = keyframes[i].frame.color
+            guard let lens = LensDistortion(color.intrinsics) else { unknown.insert(color.intrinsics.model); continue }
             guard !lens.isIdentity else { continue }
-            if maps[k] == nil { maps[k] = Map(intrinsics: k, lens: lens) }
-            jobs.append((i, lens))
+            // The map covers the image as stored, whatever size the intrinsics claim.
+            var camera = color.intrinsics
+            camera.width = color.width
+            camera.height = color.height
+            if maps[camera] == nil { maps[camera] = Map(intrinsics: camera, lens: lens) }
+            jobs.append((i, lens, camera))
             removed.insert(lens.model)
         }
         var out = keyframes
         if !jobs.isEmpty {
             let results = LockedArray<Keyframe?>(count: jobs.count, value: nil)
+            let frozen = maps
             DispatchQueue.concurrentPerform(iterations: jobs.count) { j in
-                let (i, lens) = jobs[j]
-                let kf = keyframes[i]
-                let map = maps[kf.frame.color.intrinsics]!
-                results.set(j, undistort(kf, map: map, lens: lens,
-                                         depthFollowsDistortion: depthFollowsDistortion ?? lens.alignedDepthFollowsDistortion))
+                let job = jobs[j]
+                results.set(j, undistort(keyframes[job.index], map: frozen[job.camera]!, lens: job.lens,
+                                         depthFollowsDistortion: depthFollowsDistortion ?? job.lens.alignedDepthFollowsDistortion))
             }
             for (j, kf) in results.values.enumerated() { out[jobs[j].index] = kf! }
         }
@@ -279,6 +282,8 @@ enum KeyframeUndistortion {
 
     /// One keyframe; its color and depth must have the map's size (PipelineRun.isStructurallyValid).
     static func undistort(_ kf: Keyframe, map: Map, lens: LensDistortion, depthFollowsDistortion: Bool) -> Keyframe {
+        precondition(kf.frame.color.width == map.width && kf.frame.color.height == map.height
+                     && kf.frame.alignedDepth.width == map.width && kf.frame.alignedDepth.height == map.height)
         var out = kf
         let k = kf.frame.color.intrinsics
         let pinhole = k.pinhole
@@ -352,8 +357,9 @@ enum KeyframeUndistortion {
     /// Z16 depth remap that never mixes depths of different surfaces: bilinear where the four source neighbors are
     /// valid and lie on one surface (spread within max(5 mm, 2 z / fx tan 75 deg), the silhouette test of
     /// fr_cloud_from_rgbd), the nearest pixel otherwise. Nearest everywhere would put up to half a pixel of lateral
-    /// jitter, the same for every keyframe, into sloped surfaces: on the off-center synthetic scan that cost 0.15 deg
-    /// mean rotation error instead of 0.04 deg. Outside the image: 0 (no data).
+    /// jitter, the same for every keyframe, into sloped surfaces: on the off-center synthetic scan (1280x800) that
+    /// gave 0.15 deg mean rotation error and 0.17 mm mean surface error, against 0.02 deg and 0.10 mm with this
+    /// remap. Outside the image: 0 (no data).
     static func remapDepth(_ pixels: Data, scale: Float, fx: Float, map: Map) -> Data {
         let w = map.width, h = map.height
         var out = Data(count: w * h * 2)

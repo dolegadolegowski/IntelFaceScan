@@ -34,6 +34,9 @@ struct ScanImperfections: Sendable {
     /// Vision head pose error (degrees, standard deviation per angle; SyntheticScan default 2).
     var visionErrorDeg: Float = 2
     var lighting: Float = 0.25
+    /// Color (= aligned depth) resolution.
+    var width = 1280
+    var height = 800
     /// Face distance and white depth noise (sigma at 1 m) of the renderer (SyntheticScan defaults 0.6 m, 2 mm).
     var distanceM: Float = 0.6
     var depthNoiseAt1m: Float = 0.002
@@ -183,8 +186,8 @@ enum RobustnessStudy {
 
     static func scan(_ p: ScanImperfections, seed: UInt64 = 1) -> SyntheticScanResult {
         var options = SyntheticScan.Options()
-        options.width = 1280
-        options.height = 800
+        options.width = p.width
+        options.height = p.height
         options.seed = seed
         options.headPoseErrorDeg = p.visionErrorDeg
         options.lighting = p.lighting
@@ -285,7 +288,11 @@ struct PipelineRobustnessTests {
         s = ScanImperfections(); s.name = "exposure ±20%"; s.gainJitter = 0.2; scenarios.append(s)
         s = ScanImperfections(); s.name = "frontal keyframes last"; s.frontalLast = true; scenarios.append(s)
         s = ScanImperfections(); s.name = "8% speckle holes"; s.speckleRate = 0.08; scenarios.append(s)
+        s = ScanImperfections(); s.name = "D455 color distortion, head 15 cm right, 6 cm down"; s.lensDistortion = .d455Color
+        s.headOffsetM = SIMD2(0.15, 0.06); scenarios.append(s)
         scenarios.append(.realistic)
+        s = .realistic; s.name = "all combined, D455 color distortion, head 8 cm right, 4 cm down"; s.lensDistortion = .d455Color
+        s.headOffsetM = SIMD2(0.08, 0.04); scenarios.append(s)
         if let only = ProcessInfo.processInfo.environment["IFS_RECON_STUDY_ONLY"] {
             scenarios = scenarios.filter { $0.name.contains(only) }
         }

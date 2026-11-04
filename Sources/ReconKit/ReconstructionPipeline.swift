@@ -147,11 +147,11 @@ final class PipelineRun: @unchecked Sendable {
         // Lens distortion: every later stage (core clouds, TSDF, texture projection, landmarks) assumes a pinhole.
         var keyframes = captured
         if undistortLens {
-            let undistorted = timed("undistortion") {
-                KeyframeUndistortion.undistort(captured, indices: valid, depthFollowsDistortion: depthFollowsDistortion)
-            }
+            let start = DispatchTime.now().uptimeNanoseconds
+            let undistorted = KeyframeUndistortion.undistort(captured, indices: valid, depthFollowsDistortion: depthFollowsDistortion)
             keyframes = undistorted.keyframes
             if !undistorted.removed.isEmpty {
+                report.durations["undistortion"] = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
                 report.notes.append("lens distortion removed: \(undistorted.removed.map(\.rawValue).joined(separator: ", "))")
             }
             if !undistorted.unknownModels.isEmpty {

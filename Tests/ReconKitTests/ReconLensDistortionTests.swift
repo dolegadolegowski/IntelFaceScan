@@ -153,7 +153,8 @@ struct ReconLensDistortionTests {
             return (Double(close) / Double(max(valid, 1)), sum / Double(max(valid, 1)))
         }
         let (closeBefore, meanBefore) = agreement(original), (closeAfter, meanAfter) = agreement(fixed)
-        print("lens: depth within 1 mm of the pinhole render before \(closeBefore) (mean \(meanBefore) mm), after \(closeAfter) (mean \(meanAfter) mm)")
+        print("lens: depth within 1 mm of the pinhole render before \(closeBefore) (mean \(meanBefore) mm), after \(closeAfter) "
+              + "(mean \(meanAfter) mm); \(silhouettes) silhouette pixels")
         #expect(closeAfter > 0.97)
         #expect(meanAfter < 0.5 * meanBefore)
     }
@@ -170,6 +171,51 @@ struct ReconLensDistortionPipelineTests {
         p.lensDistortion = lens
         p.headOffsetM = offset
         return p
+    }
+
+    /// A head 15 cm right and 6 cm below the optical axis whose aligned depth is distorted like the color image
+    /// (modified Brown-Conrady, which librealsense's align follows; same coefficients as the D455 inverse
+    /// Brown-Conrady): undistorted, the reconstruction is as accurate as from a pinhole camera; read as a pinhole, the
+    /// views are warped differently and do not fit together.
+    @Test func distortedScanOffCenterReconstructsLikeAPinholeScan() async throws {
+        var p = Self.scenario("depth distorted too, off-center", LensDistortion(model: .modifiedBrownConrady,
+                                                                                 coeffs: LensDistortion.d455Color.coeffs))
+        p.width = 640
+        p.height = 400
+        let undistorted = try await RobustnessStudy.run(p)
+        let ignored = ProcessInfo.processInfo.environment["IFS_RECON_STUDY"] == "1" ? try await RobustnessStudy.run(p, undistortLens: false) : nil
+        print("lens pipeline: undistorted " + RobustnessStudy.row(p, "point-to-plane", undistorted)
+              + (ignored.map { " ignored " + RobustnessStudy.row(p, "point-to-plane", $0) } ?? "") + " notes \(undistorted.notes)")
+        #expect(undistorted.notes.contains("lens distortion removed: modified_brown_conrady"))
+        #expect(undistorted.usedFrames == undistorted.keyframes)
+        // 640x400, seed 1: undistorted 0.08 / 0.20 deg, head misalignment 0.41 mm, surface 0.18 / 0.52 mm; ignored
+        // 0.19 / 0.54 deg, 1.81 mm, 0.54 / 1.66 mm.
+        #expect(undistorted.maxRotationDeg < 0.35)
+        #expect(undistorted.maxMisalignmentMm < 1)
+        #expect(undistorted.surfaceMeanMm < 0.3)
+    }
+
+    /// IFS_WRITE_LENS_DATASETS=<folder>: off-center synthetic datasets rendered through the lens, with ground truth, for
+    /// `ifscan reconstruct` (docs/RECONSTRUCTION.md, "Lens distortion": the end-to-end comparison).
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["IFS_WRITE_LENS_DATASETS"] != nil, "set IFS_WRITE_LENS_DATASETS"))
+    func writeLensDatasets() throws {
+        let folder = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["IFS_WRITE_LENS_DATASETS"]))
+        for (name, lens, offset, poses) in [
+            ("d455-offcenter", LensDistortion.d455Color, SIMD2<Float>(0.10, 0.05), ScanPose.allCases),
+            ("modified-offcenter", LensDistortion(model: .modifiedBrownConrady, coeffs: LensDistortion.d455Color.coeffs),
+             SIMD2<Float>(0.15, 0.06), ScanPose.required),
+        ] {
+            var o = SyntheticScan.Options()
+            o.width = 1280
+            o.height = 800
+            o.lensDistortion = lens
+            o.headOffsetM = offset
+            o.poses = poses
+            let result = SyntheticScan.make(o)
+            let url = folder.appendingPathComponent("\(name).ifsdataset")
+            try ScanDataset.write(result.capture, to: url)
+            try SyntheticGroundTruth(result: result, options: o).write(toDataset: url, mesh: result.groundTruthMesh)
+        }
     }
 
     /// IFS_RECON_STUDY=1: the D455 distortion with and without undistortion, centered and off-center.
