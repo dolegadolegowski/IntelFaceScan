@@ -69,6 +69,11 @@ step_done() {
 
 # --- 0. third-party sources ---------------------------------------------------------------------------------------
 if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    # After a pull that moves librealsense to another commit, the patched files would block its checkout: restore
+    # them first (scripts/build-sdk.sh applies the patches to the new commit and rebuilds the SDK).
+    if [ "$(git submodule status -- third_party/librealsense | cut -c 1)" = "+" ]; then
+        "$ROOT/scripts/apply-patches.sh" --revert
+    fi
     git submodule update --init --depth 1 --recursive \
         || die "fetching the git submodules failed (network?); retry, or: git submodule update --init --depth 1 --recursive"
 else
