@@ -9,16 +9,20 @@
 // 0.75 mm voxels) is a different problem: the patch is 40% of the head, a Cartesian thin plate flattens it, and the
 // ragged border folds against anything attached to it. So:
 //  * the fusion's fringe along the loop (teeth, folded-over triangles) is trimmed first, and the notches of the
-//    zigzag border get triangles of loop vertices only (fill_holes_ex, close, cut_notches);
-//  * the patch is built in the stereographic plane of the directions around the head center (a sphere fitted to the
-//    measured band along the loop): ear clipping, then Liepa refinement graded from the loop's edges up to a few
-//    millimeters, with Delaunay flips; a planar triangulation does not fold (planar_patch);
+//    zigzag border get triangles of loop vertices only (fill_holes_ex, close, cut_notches). Other loops beyond the
+//    perimeter limit (more openings of the same kind) are closed the same way when a watertight result is asked for;
+//  * the head center comes from a sphere fitted to the measured band along the loop, the chin crop's plane from the
+//    loop's planar run (find_center, find_cut_plane);
+//  * the patch is built in the stereographic plane of the directions around the head center: ear clipping (a fan for
+//    what a self-crossing loop leaves), then Liepa refinement graded from the loop's edges up to a few millimeters,
+//    with Delaunay flips; a planar triangulation does not fold (planar_patch);
 //  * the new vertices keep those directions; their distance from the center is a thin plate of the loop's distances
 //    (a head is star-shaped around its center and its distance function smooth, so the closing continues the head's
 //    roundness), bounded around the membrane solution, and capped where the ray leaves through the planar chin crop
 //    (an obstacle problem with an active set): that part becomes a flat cap (fair_radial);
 //  * remaining folds are smoothed locally, and measured triangles the closing still folds are trimmed and the
-//    closing redone (up to three attempts).
+//    closing redone (up to five attempts: on the synthetic heads 48 and 141 folded triangles after three, 37 and 110
+//    after five, ~0.7 s each).
 
 #include "fr_mesh.h"
 #include "mesh_internal.h"
@@ -1725,8 +1729,6 @@ uint32_t face_with_edge( const mesh_buffers & b, const csr & vf, uint32_t a, uin
     return ~0u;
 }
 
-using face_set = std::unordered_set< tri3, tri_hash >;
-
 // Per triangle: folded against the surrounding surface (the summed area-weighted normals of its corners), the
 // criterion of count_folds and fold_guard.
 std::vector< uint8_t > fold_flags( const mesh_buffers & b )
@@ -1750,29 +1752,14 @@ std::vector< uint8_t > fold_flags( const mesh_buffers & b )
     return folded;
 }
 
-// Fringe of the longest boundary loop before it is closed: teeth (triangles with two border edges) and triangles
-// folded over against a neighbor (more than 75 degrees across an inner edge). The low-weight fringe of a fusion is
-// ragged like that, and a closing surface attached to it would fold against it. `extra` lists triangles (sorted
-// vertex triples) to remove as well; pieces that the removal cuts off the surface (below 1% of the largest piece) go
-// too. Returns the triangles removed. Vertices are not renumbered (unreferenced ones stay until the end).
-uint32_t trim_fringe( mesh_buffers & b, const face_set & extra )
+// Fringe of the loops that are closed (the longest, and every loop at least min_length long): teeth (triangles with
+// two border edges) and triangles folded over against a neighbor (more than 75 degrees across an inner edge). The
+// low-weight fringe of a fusion is ragged like that, and a closing surface attached to it would fold against it.
+// Pieces that the removal cuts off the surface (below 1% of the largest piece) go too. Returns the triangles removed.
+// Vertices are not renumbered (unreferenced ones stay until the end).
+uint32_t trim_fringe( mesh_buffers & b, double min_length )
 {
     uint32_t removed_total = 0;
-    if( ! extra.empty() )
-    {
-        std::vector< uint32_t > kept;
-        kept.reserve( b.indices.size() );
-        for( uint32_t f = 0; f < b.triangle_count(); ++f )
-        {
-            tri3 t = { b.indices[size_t( f ) * 3], b.indices[size_t( f ) * 3 + 1], b.indices[size_t( f ) * 3 + 2] };
-            std::sort( t.begin(), t.end() );
-            if( extra.count( t ) )
-                ++removed_total;
-            else
-                kept.insert( kept.end(), &b.indices[size_t( f ) * 3], &b.indices[size_t( f ) * 3] + 3 );
-        }
-        b.indices.swap( kept );
-    }
     const float cos_limit = std::cos( 75.f * 3.14159265f / 180.f );
     for( int pass = 0; pass < 4; ++pass )
     {
@@ -1782,11 +1769,9 @@ uint32_t trim_fringe( mesh_buffers & b, const face_set & extra )
         const std::vector< boundary_loop > loops = find_boundary_loops( b, out );
         if( loops.empty() )
             break;
-        size_t largest = 0;
-        for( size_t i = 1; i < loops.size(); ++i )
-            if( loops[i].length > loops[largest].length )
-                largest = i;
-        const std::vector< uint32_t > & v = loops[largest].v;
+        double longest = 0;
+        for( const boundary_loop & loop : loops )
+            longest = std::max( longest, loop.length );
         auto normal = [&]( uint32_t f ) {
             const uint32_t * tri = &b.indices[size_t( f ) * 3];
             const vec3 p0 = b.position( tri[0] );
@@ -1794,26 +1779,32 @@ uint32_t trim_fringe( mesh_buffers & b, const face_set & extra )
         };
         std::vector< uint8_t > remove( t, 0 );
         uint32_t removed = 0;
-        for( size_t i = 0; i < v.size(); ++i )
+        for( const boundary_loop & loop : loops )
         {
-            const uint32_t f = face_with_edge( b, vf, v[i], v[( i + 1 ) % v.size()] );
-            if( f == ~0u || remove[f] )
+            if( loop.length < longest && loop.length < min_length )
                 continue;
-            const uint32_t * tri = &b.indices[size_t( f ) * 3];
-            int border = 0;
-            bool folded = false;
-            for( int e = 0; e < 3; ++e )
+            const std::vector< uint32_t > & v = loop.v;
+            for( size_t i = 0; i < v.size(); ++i )
             {
-                const uint32_t g = face_with_edge( b, vf, tri[( e + 1 ) % 3], tri[e] );
-                if( g == ~0u )
-                    ++border;
-                else if( dot( normal( f ), normal( g ) ) < cos_limit )
-                    folded = true;
-            }
-            if( border >= 2 || folded )
-            {
-                remove[f] = 1;
-                ++removed;
+                const uint32_t f = face_with_edge( b, vf, v[i], v[( i + 1 ) % v.size()] );
+                if( f == ~0u || remove[f] )
+                    continue;
+                const uint32_t * tri = &b.indices[size_t( f ) * 3];
+                int border = 0;
+                bool folded = false;
+                for( int e = 0; e < 3; ++e )
+                {
+                    const uint32_t g = face_with_edge( b, vf, tri[( e + 1 ) % 3], tri[e] );
+                    if( g == ~0u )
+                        ++border;
+                    else if( dot( normal( f ), normal( g ) ) < cos_limit )
+                        folded = true;
+                }
+                if( border >= 2 || folded )
+                {
+                    remove[f] = 1;
+                    ++removed;
+                }
             }
         }
         if( removed == 0 )
@@ -1925,50 +1916,46 @@ fr_status fr_mesh_fill_holes_ex( fr_mesh * mesh, const fr_fill_params * params, 
         if( mesh->triangle_count == 0 )
             return finish( FR_OK );
         const uint32_t max_edges = std::max< uint32_t >( params->max_hole_edges, 3 );
-        face_set extra;
-        mesh_buffers b;
+        mesh_buffers b = load( *mesh );
+        // With UVs, chart borders are boundaries of the split mesh but not holes: loops are found on the topology
+        // with coincident vertices merged, and the original (seam-split) triangles are restored afterwards.
         std::vector< uint32_t > original;
-        for( int attempt = 0;; ++attempt )
+        if( b.has_uvs )
         {
-            r = {};
-            r.first_new_vertex = mesh->vertex_count;
-            b = load( *mesh );
-            // With UVs, chart borders are boundaries of the split mesh but not holes: loops are found on the topology
-            // with coincident vertices merged, and the original (seam-split) triangles are restored afterwards.
-            original.clear();
-            if( b.has_uvs )
-            {
-                original = b.indices;
-                b.indices = remap_indices( original.data(), original.size(), coincident_representatives( b.positions.data(), b.vertex_count() ) );
-            }
-            const bool closing = params->close_largest && original.empty();
-            if( closing )
-                r.trimmed_triangles = trim_fringe( b, extra );
-            const uint32_t measured_triangles = b.triangle_count();
-            const std::vector< uint8_t > folded_before = closing ? fold_flags( b ) : std::vector< uint8_t >();
-            const double mean_edge = mean_edge_length( b.positions.data(), b.indices.data(), b.triangle_count() );
+            original = b.indices;
+            b.indices = remap_indices( original.data(), original.size(), coincident_representatives( b.positions.data(), b.vertex_count() ) );
+        }
+        // Loops beyond the perimeter limit are only filled when closing (a watertight result), the way the longest one
+        // is closed: openings like the back of the head.
+        const double long_loop = params->max_hole_perimeter_m > 0 ? params->max_hole_perimeter_m : DBL_MAX;
+        const bool closing = params->close_largest && original.empty();
+        if( closing )
+            r.trimmed_triangles = trim_fringe( b, long_loop );
+        const double mean_edge = mean_edge_length( b.positions.data(), b.indices.data(), b.triangle_count() );
+        float h = params->closing_edge_m;
+        if( ! ( h > 0 ) )
+            h = float( std::clamp( 4.0 * mean_edge, 0.001, 0.005 ) );
+        // Holes: every loop but the longest, within the limits.
+        {
             hole_filler filler( b );
-            std::vector< boundary_loop > loops = filler.loops();
+            const std::vector< boundary_loop > loops = filler.loops();
             if( loops.empty() )
-                break;
-            // The longest boundary is the open cut of the scan (neck, open back of the head): left open, or closed last.
+                return finish( FR_OK );
             size_t largest = 0;
             for( size_t i = 1; i < loops.size(); ++i )
                 if( loops[i].length > loops[largest].length )
                     largest = i;
             for( size_t i = 0; i < loops.size(); ++i )
             {
-                // Closing asks for a watertight result: every other loop is filled then, whatever its length.
                 const boundary_loop & loop = loops[i];
-                if( i == largest || loop.v.size() > max_edges
-                    || ( ! params->close_largest && params->max_hole_perimeter_m > 0 && loop.length > params->max_hole_perimeter_m ) )
+                if( i == largest || loop.length > long_loop )
                 {
-                    if( i != largest )
+                    if( ! params->close_largest )
                         ++r.open_loops;
                     continue;
                 }
                 patch_stats stats;
-                if( filler.fill( loop, stats, params->close_largest != 0 ) )
+                if( loop.v.size() <= max_edges && filler.fill( loop, stats, params->close_largest != 0 ) )
                 {
                     ++r.filled_holes;
                     r.filled_area_m2 += float( stats.area );
@@ -1976,57 +1963,94 @@ fr_status fr_mesh_fill_holes_ex( fr_mesh * mesh, const fr_fill_params * params, 
                 }
                 else
                 {
-                    ++r.rejected_holes;
+                    r.rejected_holes += loop.v.size() <= max_edges;
                     ++r.open_loops;
                 }
             }
-            if( ! params->close_largest )
+        }
+        // The longest loop and the other long ones are closed. Measured triangles at their borders that the closings
+        // fold (a tooth the trimming kept), and those across the loop edges of folded closing triangles, are removed
+        // and the loops closed again (at most five attempts). The holes filled above stay.
+        for( int attempt = 0; params->close_largest && attempt < 5; ++attempt )
+        {
+            const uint32_t before_vertices = b.vertex_count(), before_triangles = b.triangle_count();
+            const std::vector< uint8_t > folded_before = closing ? fold_flags( b ) : std::vector< uint8_t >();
+            hole_filler filler( b );
+            const std::vector< boundary_loop > loops = filler.loops();
+            if( loops.empty() )
+                break;
+            double longest = 0;
+            for( const boundary_loop & loop : loops )
+                longest = std::max( longest, loop.length );
+            uint32_t closed = 0, open = 0, folded_now = 0;
+            double area = 0;
+            for( const boundary_loop & loop : loops )
             {
-                ++r.open_loops;
-                break;
+                patch_stats stats;
+                // The longest and the long loops are closed; loops a retry's trimming cut off are filled like holes.
+                const bool ok = loop.length >= longest || loop.length > long_loop
+                                    ? filler.close( loop, h, stats ) || ( loop.length < longest && filler.fill( loop, stats, true ) )
+                                    : loop.v.size() <= max_edges && filler.fill( loop, stats, true );
+                if( ok )
+                {
+                    closed += loop.length >= longest;
+                    area += stats.area;
+                    folded_now += stats.folded;
+                }
+                else
+                    ++open;
             }
-            float h = params->closing_edge_m;
-            if( ! ( h > 0 ) )
-                h = float( std::clamp( 4.0 * mean_edge, 0.001, 0.005 ) );
-            patch_stats stats;
-            if( ! filler.close( loops[largest], h, stats ) )
+            const bool last = ! closing || attempt == 4 || closed == 0;
+            std::vector< uint8_t > remove( before_triangles, 0 );
+            size_t removed = 0;
+            if( ! last )
             {
-                ++r.open_loops;
-                break;
-            }
-            r.closed_largest = 1;
-            r.closing_area_m2 = float( stats.area );
-            r.filled_area_m2 += float( stats.area );
-            r.folded_triangles += stats.folded;
-            if( ! closing || attempt == 2 )
-                break;
-            // Measured triangles at the closing's border that it folds (a tooth the trimming kept), and those across
-            // the loop edges of folded closing triangles: removed, and the closing done again.
-            const std::vector< uint8_t > folded = fold_flags( b );
-            const uint32_t t = b.triangle_count();
-            size_t added = 0;
-            std::unordered_map< uint64_t, uint32_t > measured_edge;
-            for( uint32_t f = 0; f < measured_triangles; ++f )
-                for( int e = 0; e < 3; ++e )
-                    measured_edge[uint64_t( b.indices[size_t( f ) * 3 + e] ) << 32 | b.indices[size_t( f ) * 3 + ( e + 1 ) % 3]] = f;
-            auto add = [&]( uint32_t f ) {
-                tri3 tri = { b.indices[size_t( f ) * 3], b.indices[size_t( f ) * 3 + 1], b.indices[size_t( f ) * 3 + 2] };
-                std::sort( tri.begin(), tri.end() );
-                added += extra.insert( tri ).second;
-            };
-            for( uint32_t f = 0; f < measured_triangles; ++f )
-                if( folded[f] && ! folded_before[f] )
-                    add( f );
-            for( uint32_t f = measured_triangles; f < t; ++f )
-                if( folded[f] )
+                const std::vector< uint8_t > folded = fold_flags( b );
+                std::unordered_map< uint64_t, uint32_t > measured_edge;
+                for( uint32_t f = 0; f < before_triangles; ++f )
                     for( int e = 0; e < 3; ++e )
+                        measured_edge[uint64_t( b.indices[size_t( f ) * 3 + e] ) << 32 | b.indices[size_t( f ) * 3 + ( e + 1 ) % 3]] = f;
+                for( uint32_t f = 0; f < before_triangles; ++f )
+                    if( folded[f] && ! folded_before[f] && ! remove[f] )
                     {
-                        auto it = measured_edge.find( uint64_t( b.indices[size_t( f ) * 3 + ( e + 1 ) % 3] ) << 32 | b.indices[size_t( f ) * 3 + e] );
-                        if( it != measured_edge.end() )
-                            add( it->second );
+                        remove[f] = 1;
+                        ++removed;
                     }
-            if( added == 0 )
+                for( uint32_t f = before_triangles; f < b.triangle_count(); ++f )
+                    if( folded[f] )
+                        for( int e = 0; e < 3; ++e )
+                        {
+                            auto it = measured_edge.find( uint64_t( b.indices[size_t( f ) * 3 + ( e + 1 ) % 3] ) << 32 | b.indices[size_t( f ) * 3 + e] );
+                            if( it != measured_edge.end() && ! remove[it->second] )
+                            {
+                                remove[it->second] = 1;
+                                ++removed;
+                            }
+                        }
+            }
+            if( removed == 0 )
+            {
+                r.closed_largest = closed > 0;
+                r.closing_area_m2 = float( area );
+                r.filled_area_m2 += float( area );
+                r.folded_triangles += folded_now;
+                r.open_loops += open;
                 break;
+            }
+            // Undo the closings, drop those triangles (and the fringe they expose), and close again.
+            b.indices.resize( size_t( before_triangles ) * 3 );
+            b.positions.resize( size_t( before_vertices ) * 3 );
+            if( b.has_normals )
+                b.normals.resize( size_t( before_vertices ) * 3 );
+            if( b.has_colors )
+                b.colors.resize( size_t( before_vertices ) * 3 );
+            std::vector< uint32_t > kept;
+            kept.reserve( b.indices.size() );
+            for( uint32_t f = 0; f < before_triangles; ++f )
+                if( ! remove[f] )
+                    kept.insert( kept.end(), &b.indices[size_t( f ) * 3], &b.indices[size_t( f ) * 3] + 3 );
+            b.indices.swap( kept );
+            r.trimmed_triangles += uint32_t( removed ) + trim_fringe( b, long_loop );
         }
         if( r.filled_holes == 0 && ! r.closed_largest && r.trimmed_triangles == 0 )
             return finish( FR_OK );
