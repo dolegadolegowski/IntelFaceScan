@@ -294,7 +294,7 @@ enum DeveloperChecks {
         try expect(model.alert == nil, "recording failed: \(model.alert?.message ?? "")")
         let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int) ?? 0
         try expect(size > 0, "the recording is empty")
-        try expect(model.lastSavedURL == file, "Show in Finder does not point at the recording")
+        try expect(model.revealableURL == file, "Show in Finder does not point at the recording")
         try expect(log.sources[0].shutdownFinished != nil, "the helper was not shut down")
         print("  recording: \(size) bytes, status: \(model.statusMessage ?? "")")
     }

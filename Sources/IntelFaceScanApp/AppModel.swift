@@ -102,7 +102,8 @@ final class AppModel {
     private(set) var recordingStartedAt: Date?
     private(set) var isRecordingBusy = false
     private(set) var statusMessage: String?
-    private(set) var lastSavedURL: URL?
+    /// The file the status message reports (Show in Finder); nil for messages about something else.
+    private(set) var revealableURL: URL?
     private(set) var playbackEnded = false
     private(set) var capture: ScanCapture?
     /// The keyframes of an opened dataset: they were accepted by a scan already and can be reconstructed as is.
@@ -617,8 +618,7 @@ final class AppModel {
         writeTasks[id] = nil
         switch outcome {
         case .success(let files):
-            lastSavedURL = files.first
-            showStatus(S.saved(files.map(\.lastPathComponent).joined(separator: ", ")))
+            showStatus(S.saved(files.map(\.lastPathComponent).joined(separator: ", ")), reveal: files.first)
         case .failure(let error):
             present(S.saveFailed, error)
         }
@@ -626,8 +626,8 @@ final class AppModel {
 
     var isWriting: Bool { !writeTasks.isEmpty }
 
-    func revealLastSaved() {
-        guard let url = lastSavedURL else { return }
+    func revealSavedFile() {
+        guard let url = revealableURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
@@ -683,8 +683,7 @@ final class AppModel {
     private func recordingStopped(_ outcome: Result<Int64, Error>, url: URL?) {
         switch outcome {
         case .success(let bytes):
-            lastSavedURL = url
-            showStatus(S.recordingSaved(bytes, url?.lastPathComponent ?? ""))
+            showStatus(S.recordingSaved(bytes, url?.lastPathComponent ?? ""), reveal: url)
         case .failure(let error):
             present(S.recordingFailed, error)
         }
@@ -772,13 +771,17 @@ final class AppModel {
         }
     }
 
-    func showStatus(_ message: String) {
+    /// Shows a message for a few seconds; `reveal` is the saved file it reports, offered by Show in Finder. A message
+    /// about something else must not offer the file of an earlier one.
+    func showStatus(_ message: String, reveal: URL? = nil) {
         statusMessage = message
+        revealableURL = reveal
         statusTask?.cancel()
         statusTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(6))
             guard !Task.isCancelled else { return }
             self?.statusMessage = nil
+            self?.revealableURL = nil
         }
     }
 

@@ -20,7 +20,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .disabled(model.isQuitting)
                 if let message = model.statusMessage {
-                    StatusBanner(message: message, canReveal: model.lastSavedURL != nil) { model.revealLastSaved() }
+                    StatusBanner(message: message, canReveal: model.revealableURL != nil) { model.revealSavedFile() }
                         .padding(.bottom, 20)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -71,7 +71,9 @@ private struct StatusBanner: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            // A saved file gets the check mark; other notices (the recording ended) are information only.
+            Image(systemName: canReveal ? "checkmark.circle.fill" : "info.circle.fill")
+                .foregroundStyle(canReveal ? Color.green : Color.secondary)
             Text(message).lineLimit(2)
             if canReveal {
                 Button(S.showInFinder, action: reveal).buttonStyle(.link)
