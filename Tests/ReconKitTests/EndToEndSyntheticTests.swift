@@ -121,10 +121,16 @@ struct EndToEndSyntheticTests {
         #expect((surface["mean_mm"] as? Double ?? 99) < Self.maxMeanSurfaceMm)
         #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("head.ply").path))
 
-        // The exported OBJ (millimeters, export frame) evaluated against the ground truth through the report.
+        // The exported OBJ (millimeters, export frame) evaluated against the ground truth through the report gives
+        // the distance the report measured in the world frame.
+        let evalOut = Lines()
         let eval = await IFScanTool.run(["e" + "val", head, "--gt", dataset + "/ground_truth.obj", "--report", report, "--json"],
-                                        output: io)
+                                        output: IFScanOutput(out: { evalOut.append($0) }, err: { err.append($0) }))
         #expect(eval == 0, "\(err.text)")
+        let evalJSON = try #require(try JSONSerialization.jsonObject(with: Data(evalOut.text.utf8)) as? [String: Any])
+        let exportedMean = try #require((evalJSON["mesh_to_ground_truth"] as? [String: Any])?["mean_mm"] as? Double)
+        let reportMean = try #require(surface["mean_mm"] as? Double)
+        #expect(abs(exportedMean - reportMean) < 0.05, "exported OBJ \(exportedMean) mm, report \(reportMean) mm")
     }
 }
 

@@ -4,6 +4,8 @@
 # Environment:
 #   IFS_TEST_RECORDINGS   folder of .db3/.bag recordings to reconstruct end to end (outside git)
 #   IFS_HELPER            IntelFaceScanHelper used for recordings (default: build/helper/IntelFaceScanHelper)
+#   IFS_HELPER_PATH       IntelFaceScanHelper for the CameraKit integration tests (same default; skipped without one)
+#   DEVELOPER_DIR         e.g. /Library/Developer/CommandLineTools when the selected Xcode's license is not accepted
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

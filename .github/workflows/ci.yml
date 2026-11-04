@@ -1,7 +1,8 @@
 # License: Apache 2.0. See LICENSE file in root directory.
 #
 # Builds the patched librealsense SDK (cached), the camera helper and the Swift package, runs the test suites
-# (no camera: synthetic data and generated datasets), smoke-tests ifscan and bundles the app.
+# (no camera: synthetic data and generated datasets), smoke-tests ifscan, builds the app with scripts/build.sh and
+# smoke-tests the bundle (signature, bundled helper and librealsense, no absolute build paths).
 # Read-only token, no secrets: safe for pull requests from forks.
 
 name: CI
@@ -113,14 +114,33 @@ jobs:
           "$ifscan" info build/ci/synthetic.ifsdataset
           "$ifscan" info build/ci/ground_truth.obj
 
-      - name: Build the release configuration and bundle the app
+      # The documented one-command build (docs/ARCHITECTURE.md, "Build"): its tool checks, the SDK (restored above),
+      # the helper, the release Swift build and the app bundle.
+      - name: Build the app with scripts/build.sh
+        run: scripts/build.sh
+
+      - name: Smoke-test the app bundle (bundled helper, librealsense and ifscan)
         run: |
           set -euo pipefail
-          swift build -c release
-          SWIFT_CONFIG=release scripts/bundle-app.sh
-          if [ -d build/IntelFaceScan.app ]; then
-            ditto -c -k --keepParent build/IntelFaceScan.app build/IntelFaceScan.zip
+          app="$PWD/build/IntelFaceScan.app"
+          mkdir -p build/ci/bundle
+          codesign --verify --strict --deep "$app"
+          otool -L "$app/Contents/Helpers/IntelFaceScanHelper" > build/ci/helper-libs.txt
+          grep -q '@rpath/librealsense2' build/ci/helper-libs.txt
+          "$app/Contents/Helpers/IntelFaceScanHelper" --version
+          # Shipped binaries must not contain absolute build paths (they carry the builder's user name): __FILE__ in
+          # C/C++ code, the linker's debug map. -a: macOS grep skips binary files otherwise.
+          if grep -rlaF "$HOME/" "$app/Contents"; then
+            echo "::error::absolute build paths in the app bundle (files above)"
+            exit 1
           fi
+          build/helper/tests/make-test-recording -o build/ci/bundle/rec.db3 --frames 10 --fast
+          # From a folder without build/helper: ifscan must find the helper inside the bundle.
+          cd build/ci/bundle
+          "$app/Contents/MacOS/ifscan" synth -o bundle.ifsdataset --width 320 --height 200 --frames-per-pose 1
+          "$app/Contents/MacOS/ifscan" info rec.db3 | tee rec.txt
+          grep -q 'depth 0: z16 1280x720' rec.txt
+          ditto -c -k --keepParent "$app" ../../IntelFaceScan.zip
 
       - name: Upload the app bundle
         if: hashFiles('build/IntelFaceScan.zip') != ''

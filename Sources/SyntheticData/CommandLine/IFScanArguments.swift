@@ -7,10 +7,10 @@
 //   ifscan synth -o out.ifsdataset [--width 1280] [--height 800] [--frames-per-pose 2] [--noise 2] [--seed 1]
 //                [--distance 0.6] [--poses front,up,down,left,right] [--no-background] [--lighting 0.25]
 //                [--mesh-resolution 128] [--gt-mesh gt.obj]
-//   ifscan reconstruct <input.ifsdataset | recording.db3 | recording.bag> -o head.obj [--ply head.ply]
-//                [--voxel-mm 0.75] [--method tsdf|poisson] [--keep-shoulders] [--icp colored|geometric]
-//                [--save-dataset out.ifsdataset]
-//                [--triangles N] [--texture-size 4096] [--helper <IntelFaceScanHelper>] [--report report.json] [--quiet]
+//   ifscan reconstruct <input.ifsdataset | recording.db3 | recording.bag | synthetic-camera> -o head.obj
+//                [--ply head.ply] [--voxel-mm 0.75] [--method tsdf|poisson] [--keep-shoulders] [--icp colored|geometric]
+//                [--save-dataset out.ifsdataset] [--triangles N] [--texture-size 4096] [--helper <IntelFaceScanHelper>]
+//                [--report report.json] [--time-limit 600] [--quiet]
 //   ifscan eval <mesh.obj> --gt <gt.obj> [--samples 200000] [--report report.json] [--symmetric] [--json]
 //   ifscan info <file> [--json] [--helper <IntelFaceScanHelper>]
 
@@ -69,6 +69,9 @@ public struct ReconstructCommand: Equatable, Sendable {
     public var helper: String?
     public var report: String?
     public var quiet = false
+    /// synthetic-camera input: seconds the guided scan may take before it is stopped (it would wait forever for a
+    /// pose Vision never detects); the keyframes accepted until then are reconstructed.
+    public var timeLimitSeconds: Double = 600
 
     public init(input: String, output: String) { self.input = input; self.output = output }
 }
@@ -155,6 +158,8 @@ public enum IFScanArguments {
                                          ifscan, build/helper/, the app bundle)
               --report <file.json>       Write a JSON report (stages, timings, export transform, ground-truth
                                          errors for synthetic datasets)
+              --time-limit <s>           synthetic-camera: stop the guided scan after this many seconds and
+                                         reconstruct what it accepted (default 600)
               -q, --quiet                No progress output
             """
         case "eval": return """
@@ -258,7 +263,8 @@ public enum IFScanArguments {
                      Spec(name: "keep-shoulders", short: nil, takesValue: false), Spec(name: "icp", short: nil, takesValue: true),
                      Spec(name: "triangles", short: nil, takesValue: true), Spec(name: "texture-size", short: nil, takesValue: true),
                      Spec(name: "save-dataset", short: nil, takesValue: true), Spec(name: "helper", short: nil, takesValue: true),
-                     Spec(name: "report", short: nil, takesValue: true), Spec(name: "quiet", short: "q", takesValue: false)]
+                     Spec(name: "report", short: nil, takesValue: true), Spec(name: "quiet", short: "q", takesValue: false),
+                     Spec(name: "time-limit", short: nil, takesValue: true)]
         guard let p = try parse(arguments, specs, command: "reconstruct") else { return .help("reconstruct") }
         guard p.positionals.count == 1 else {
             throw ArgumentError(p.positionals.isEmpty ? "reconstruct: missing input (dataset folder or .db3/.bag recording)"
@@ -290,6 +296,7 @@ public enum IFScanArguments {
         c.helper = p.values["helper"]
         c.report = p.values["report"]
         c.quiet = p.flags.contains("quiet")
+        c.timeLimitSeconds = Double(try number(p, "time-limit", Float(c.timeLimitSeconds), in: 5 ... 86_400))
         return .reconstruct(c)
     }
 
