@@ -11,6 +11,7 @@
 #   Helpers/rs-macos-release            recovery: hands a camera left captured by a crashed helper back to macOS
 #   Frameworks/librealsense2.X.Y.dylib  install name @rpath/librealsense2.X.Y.dylib
 #   Resources/AppIcon.icns              rendered by tools/release/make-app-icon.swift
+#   Resources/NOTICE.txt, Licenses/     our license and NOTICE, and the licenses of the bundled third-party code
 # Every Mach-O is signed ad hoc, inside out (Apple Silicon runs nothing unsigned). Release bundles ship the two Swift
 # executables without the linker's debug map (strip -S); build/dSYMs/ keeps their debug information (not shipped).
 set -euo pipefail
@@ -100,6 +101,25 @@ otool -l "$APP/Contents/Frameworks/$LIBNAME" | awk '/cmd LC_RPATH/ { getline; ge
 done
 
 cp "$WORK/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+
+# Licenses of everything in the bundle. librealsense's NOTICE.md covers the code its build fetches and links into the
+# dylib (libusb under LGPL-2.1, nlohmann/json, Fast-CDR, rosbag2, sqlite, LZ4, yaml-cpp).
+LICENSES="$APP/Contents/Resources/Licenses"
+mkdir -p "$LICENSES"
+cp "$ROOT/NOTICE" "$APP/Contents/Resources/NOTICE.txt"
+license() {
+    [ -f "$ROOT/$2" ] || { echo "error: $2 is missing (run git submodule update --init)" >&2; exit 1; }
+    cp "$ROOT/$2" "$LICENSES/$1"
+}
+license IntelFaceScan-LICENSE.txt   LICENSE
+license librealsense-LICENSE.txt    third_party/librealsense/LICENSE
+license librealsense-NOTICE.md      third_party/librealsense/NOTICE.md
+license Eigen-COPYING.MPL2.txt      third_party/eigen/COPYING.MPL2
+license nanoflann-COPYING.txt       third_party/nanoflann/COPYING
+license meshoptimizer-LICENSE.md    third_party/meshoptimizer/LICENSE.md
+license xatlas-LICENSE.txt          third_party/xatlas/LICENSE
+license stb-LICENSE.txt             third_party/stb/LICENSE
+license PoissonRecon-LICENSE.txt    third_party/PoissonRecon/LICENSE
 BUILD_NUMBER="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -116,6 +136,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key>                <string>$BUILD_NUMBER</string>
     <key>CFBundleInfoDictionaryVersion</key>  <string>6.0</string>
     <key>CFBundleDevelopmentRegion</key>      <string>en</string>
+    <key>CFBundleLocalizations</key>          <array><string>en</string><string>pl</string></array>
     <key>LSMinimumSystemVersion</key>         <string>$DEPLOYMENT_TARGET</string>
     <key>LSArchitecturePriority</key>         <array><string>arm64</string></array>
     <key>LSApplicationCategoryType</key>      <string>public.app-category.graphics-design</string>
