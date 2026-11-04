@@ -770,7 +770,7 @@ build, exported OBJ welded by position as viewers do:
 | intersecting triangle pairs | 145 | 138 | 143–162 |
 | synthesized area | – | 15 cm² of 857 cm² | 549 cm² of 1390 cm² (trimmed fringe: 1326 triangles) |
 | surface to ground truth, measured part: mean / p95 / max | 0.129 / 0.390 / 2.36 mm | 0.128 / 0.387 / 2.54 mm | 0.128 / 0.389 / 2.31 mm |
-| surface to ground truth, whole mesh: mean / p95 / max | 0.129 / 0.390 / 2.36 mm | 0.130 / 0.393 / 2.36 mm | 3.54 / 16.9 / 54.5 mm |
+| surface to ground truth, whole mesh: mean / p95 / max | 0.129 / 0.390 / 2.36 mm | 0.130 / 0.393 / 2.36 mm | 3.54–3.66 / 16.9–18.9 / 54.5–54.9 mm |
 | cleanup | 0.4 s | 1.2 s | 4.3–5.4 s |
 
 Intersecting pairs are triangles that share no vertex and cross each other: tiny ones along ragged borders and in the
