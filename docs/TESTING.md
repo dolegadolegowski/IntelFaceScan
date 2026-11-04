@@ -15,15 +15,17 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
 
 * `scripts/test.sh` wraps `swift test`. With only the Command Line Tools installed it adds the Swift Testing macro
   plugin path that SwiftPM does not find on its own; with Xcode it is plain `swift test`. XCTest is not used.
-* The four test targets run one after another, as separate test runs (the tests of a target in parallel). Timing
-  on an M3 Ultra (28 cores, Command Line Tools), November 2026: ScanKitTests 94 tests ~15 s (Vision),
-  ReconKitTests 64 tests ~55–63 s (the longest single test sets it: the combined-imperfections reconstruction of
-  `Pipeline robustness`), FaceReconCoreTests 79 tests ~7 s, CameraKitTests 70 tests ~30 s (most of it
-  `Helper playback backpressure`); about 2 min in all when nothing changed, about 2.5 min from a clean debug build
-  (about 40 s of it building).
+* The five test targets run one after another, as separate test runs (the tests of a target in parallel). Timing
+  on an M3 Ultra (28 cores, Command Line Tools), November 2026: ScanKitTests 110 tests ~16 s (Vision),
+  ReconKitTests 82 tests ~55–70 s (the longest single test sets it: the combined-imperfections reconstruction of
+  `Pipeline robustness`), IntelFaceScanAppTests 30 tests ~8 s, FaceReconCoreTests 89 tests ~7 s, CameraKitTests 77
+  tests ~27 s (most of it `Helper playback backpressure`); about 2.5 min in all when nothing changed, about 3 min
+  from a clean debug build (about 40 s of it building).
 * Skipped, with a reason (`➜ Test ... skipped: "..."`), never failed: benchmarks and measurement sweeps that are
-  run by hand (`PipelineBenchmark`, `Mesh performance`, `ReconCaptureRange`, ...), `endToEndRecordingsReconstruct`
-  without `IFS_TEST_RECORDINGS`, the `CoreAvailability` placeholder tests (the core is integrated), and the
+  run by hand (`PipelineBenchmark`, `Mesh performance`, `ReconCaptureRange`, the `IFS_RECON_STUDY=1` tables of
+  docs/RECONSTRUCTION.md, `GuidanceSyntheticVisionStudy` with `IFS_VISION_STUDY=1` – `IFS_VISION_STUDY_GRID=1` adds
+  a pitch × yaw grid, ...), the app's full guided synthetic scan without `IFS_APP_FULL_SCAN=1` (~4.5 min),
+  `endToEndRecordingsReconstruct` without `IFS_TEST_RECORDINGS`, the `CoreAvailability` placeholder tests (the core is integrated), and the
   CameraKit helper integration tests when `build/helper/IntelFaceScanHelper` is not built (or `IFS_HELPER_PATH` is
   not set); the playback ones also need `build/helper/tests/make-test-recording` (`-DIFS_HELPER_TESTS=ON`).
   `IFS_HELPER` is the variable `ifscan` and the recording tests use.
@@ -41,7 +43,8 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
 | `ScanKitTests/SyntheticCameraSourceTests` | `SyntheticCameraSource`: lifecycle and events, 30 fps pacing, configured resolution, threshold filter, the pose animation |
 | `ReconKitTests/SyntheticScanTests` | synthetic ground truth: depth equals an independent brute-force ray cast of the ground-truth mesh, back-projected depth lies on the surface, noise statistics, invalid pixels at silhouettes, `HeadPose` sign conventions, determinism, closed outward mesh |
 | `ReconKitTests/CLIArgumentTests`, `CLIToolTests` | `ifscan` parsing (32 invalid command lines), commands run in-process, exit codes, outputs checked before any work (unwritable paths, `--save-dataset` onto the input), ground-truth evaluation of a scan that does not start with the frontal pose (world frames aligned), `synthetic-camera` stopping at `--time-limit`, OBJ dialects |
-| `ReconKitTests/EndToEndSyntheticTests` | synthetic 1280×800 scan → `ReconstructionPipeline` (decimated to 60k triangles before texturing) → rotation error mean < 1°, worst frame < 1.5°, head misalignment < 5 mm, surface distance mean < 1 mm and p95 < 2.5 mm, export frame upright; the same through `ifscan reconstruct`, and the exported OBJ measured through `--report` matches the report's distance. Enabled by `CoreAvailability` (the core is integrated); recordings from `IFS_TEST_RECORDINGS` |
+| `ReconKitTests/EndToEndSyntheticTests` | synthetic 1280×800 scan → `ReconstructionPipeline` (decimated to 60k triangles before texturing) → rotation error mean < 1°, worst frame < 1.5°, head misalignment < 5 mm, surface distance of the measured part (`ReconMesh.measuredSurface`: without the synthesized closing of the back of the head) mean < 1 mm and p95 < 2.5 mm, export frame upright; the same through `ifscan reconstruct`, and the exported OBJ measured through `--report` matches the report's whole-mesh distance. Enabled by `CoreAvailability` (the core is integrated); recordings from `IFS_TEST_RECORDINGS` |
+| `IntelFaceScanAppTests` | the app executable (`@testable import`): `AppModel` lifecycle with the fake-camera helper (skipped without `build/helper/IntelFaceScanHelper`), settings mapping and loading older stored settings, English/Polish strings and Polish plurals, result export success and failure paths, the SceneKit preview rendered offscreen; `IFS_APP_FULL_SCAN=1` runs the full guided synthetic scan, reconstruction and OBJ export through `AppModel`. `IntelFaceScan --render-snapshots <dir>` renders the UI's screens to PNG (add `-AppleLanguages '(pl)'` for Polish) |
 
 The other suites belong to the modules' work streams: `CameraKitTests` (wire format, JSON, the helper in fake-camera
 mode end to end, session lifecycle, frame broadcasting, playback backpressure, the helper's security checks),
@@ -67,7 +70,9 @@ of another work stream: `@Test(.enabled(if: CoreAvailability.reconstruction, "..
   faded out (no aliasing), so the optional colored ICP and texturing see consistent detail across views. A
   camera-mounted light adds mild shading (`lighting`), plus color sensor noise.
 * **Camera**: D455 color intrinsics at 1280×800 (fx 640.4, fy 639.9, cx 641.2, cy 401.3) scaled to
-  `width × height`; depth aligned to color, Z16 in 0.1 mm units. Depth is the exact ray/mesh intersection at each
+  `width × height`, an ideal pinhole unless `lensDistortion` is set (e.g. `LensDistortion.d455Color`: color, mask
+  and landmarks go through the lens; the aligned depth follows it only for modified Brown-Conrady, as librealsense's
+  NEON align does); `headOffsetM` moves the head off the optical axis; depth aligned to color, Z16 in 0.1 mm units. Depth is the exact ray/mesh intersection at each
   pixel center, plus Gaussian noise with σ = `depthNoiseAt1m · z²` (default 2 mm at 1 m → 0.72 mm at 0.6 m),
   invalid at viewing angles above 80°, at depth jumps (both sides, like stereo matching), and as 1% speckle. An
   optional wall stands behind the head (`backgroundDistanceM`).
@@ -77,7 +82,8 @@ of another work stream: `@Test(.enabled(if: CoreAvailability.reconstruction, "..
   `world_from_camera` has rotation Rᵀ. The reconstruction's world is the camera frame of its first *frontal*
   keyframe; for a pose list that does not start with `front` the evaluation maps it to the ground truth's world
   through keyframe 0's estimated pose (`ground_truth_from_world` in the report).
-* **Per keyframe**: `headPose` = truth + N(0, 2°) per angle (like Vision), 76 projected landmarks (Vision's groups:
+* **Per keyframe**: `headPose` = truth + Vision's line-of-sight effect (yaw + 0.75 a, pitch − 0.67 b for a face
+  seen a / b degrees right of / below the optical axis, `visionLineOfSightGain`) + N(0, 2°) per angle, 76 projected landmarks (Vision's groups:
   contour, brows, eyes, pupils, nose crest and base, lips) with 1 px noise, a Vision-like face rectangle, the head
   mask (head above 1.5 cm below the chin), and `FrameQuality` measured on the images (variance of Laplacian,
   valid depth ratio and count, median face depth).
@@ -137,7 +143,8 @@ $IFSCAN eval /tmp/head.obj --gt /tmp/head.ifsdataset/ground_truth.obj --report /
   user, no password, every frame) and the guided-scan logic (`ScanController`, `ScanConfiguration.offline`), then
   runs `ReconstructionPipeline` and `MeshExport` – the app's code path. The input `synthetic-camera` scans the
   animated `SyntheticCameraSource` head in real time through Vision and the guided scan instead. Options: `--ply`,
-  `--voxel-mm`, `--method tsdf|poisson`, `--keep-shoulders`, `--icp colored|geometric` (default geometric =
+  `--voxel-mm`, `--method tsdf|poisson`, `--keep-shoulders`, `--open-back` (leave the unscanned back of the head
+  and the neck open instead of closing them with a synthesized surface), `--icp colored|geometric` (default geometric =
   point-to-plane), `--triangles` (decimate before texturing; UV unwrapping and baking the full-resolution
   0.75 mm head mesh of `ifscan synth`, ~500k triangles, take ~16 s of its ~18 s reconstruction in a release
   build), `--texture-size`, `--save-dataset` (not onto the input), `--helper`, `--report`, `-q`,
@@ -150,7 +157,9 @@ $IFSCAN eval /tmp/head.obj --gt /tmp/head.ifsdataset/ground_truth.obj --report /
   `build/IntelFaceScan.app/Contents/Helpers/`, and `/Applications/IntelFaceScan.app`.
 * The report (`--report`) holds the reconstruction report, timings, `export_transform`/`export_scale`
   (world meters → exported millimeters), camera poses, and for synthetic datasets pose errors relative to
-  keyframe 0, `ground_truth_from_world` and the surface distance to the ground truth (in the ground truth's frame).
+  keyframe 0, `ground_truth_from_world` and the surface distance to the ground truth (in the ground truth's frame):
+  `surface_to_ground_truth` for the measured part, and `whole_mesh_to_ground_truth` with the synthesized surface
+  (filled holes, the closed back of the head) when there is some – what `ifscan eval` measures on the exported OBJ.
 * `eval` reads both OBJs as millimeters and samples the first mesh area-uniformly (fixed seed,
   `--samples`, default 200 000): mean, RMS, median, 95th percentile and maximum (one-sided Hausdorff) distance.
   An exported mesh is in the export frame (head upright, face +Z, origin at the head center); `--report` maps it
@@ -211,7 +220,9 @@ bundled helper) → upload the zipped app. The smoke tests and `scripts/build.sh
 still fails). A run takes about 10–11 minutes with the SDK cache and about 14–16 without (the SDK build takes ~4
 minutes on the runner); `scripts/test.sh` takes ~5 of them, the runner being several times slower than an M3 Ultra.
 Timing-sensitive tests are less reliable there: the tests of a target share Swift's cooperative thread pool, which
-the synchronous reconstructions of other tests can fill. In November 2026 the image still reports macOS 27.0.1; the
+the synchronous reconstructions of other tests can fill (measured there: the synthetic camera rendered 0.32 s per
+frame, `ifscan reconstruct synthetic-camera --time-limit 5` ran in-process for 4 min); their upper bounds are loose
+for that reason. In November 2026 the image still reports macOS 27.0.1; the
 job and `scripts/build.sh` warn that the app needs 27.2 to run (building only needs the 27.2 SDK).
 
 ## Troubleshooting

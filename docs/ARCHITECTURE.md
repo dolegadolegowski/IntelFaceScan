@@ -71,19 +71,27 @@ Each work stream owns its tests under `Tests/<Module>Tests/` (file names prefixe
    points and a static camera (IMU). Accepted frames become `Keyframe`s (frame + head pose + landmarks + head mask);
    the coverage map shows which head areas are covered.
 3. **Reconstruction** (`ReconstructionPipeline`):
+   0. lens undistortion: keyframes whose color carries a distortion model (the D455's inverse Brown-Conrady) are
+      remapped once to a pinhole – color, mask, landmarks, face rectangle, and depth only where it follows the
+      distortion (on arm64 librealsense's align leaves aligned depth pinhole for inverse Brown-Conrady),
    1. segmentation: person mask ∩ depth band around the face ∩ above the chin/neck cut (option: keep shoulders),
-   2. initial poses from the Vision head pose (rotation) and landmark/mask centroids (translation),
+   2. initial poses from the Vision head pose with its line-of-sight bias taken out (rotation) and landmark/mask
+      centroids (translation),
    3. multi-scale point-to-plane ICP between neighboring keyframes (colored ICP optional; measured comparison in
       docs/RECONSTRUCTION.md),
    4. loop closures between overlapping poses (left↔front↔right, up/down↔front), pose graph optimization,
    5. TSDF fusion on the GPU (Metal), 0.75 mm voxels by default (chosen from the measured accuracy of 0.5, 0.75
       and 1 mm; coarser only when the volume would be too large), marching cubes; screened Poisson as the
       alternative (compared in docs/RECONSTRUCTION.md),
-   6. cleanup (small components, detail-preserving smoothing, hole filling, optional decimation),
-   7. UV atlas (xatlas) and texture from the most frontal sharp keyframes with blending + vertex colors.
+   6. cleanup (small components, detail-preserving smoothing, hole filling up to a 250 mm perimeter with a fold
+      check, and with `closeHead` – the default – closing the unscanned back of the head and the neck cut into a
+      watertight bust; optional decimation). Synthesized vertices are flagged (`ReconMesh.synthesized`), so accuracy
+      is measured on `measuredSurface` and the report gives the synthesized area,
+   7. UV atlas (xatlas) and texture from the most frontal sharp keyframes with blending + vertex colors; synthesized
+      surface gets a smooth interpolation of the surrounding measured colors instead of keyframe projections.
 4. **Result** – 3D preview (SceneKit: texture / vertex colors / shaded / wireframe), export OBJ+MTL+PNG
-   in millimeters (head upright +Y, face toward +Z, origin at the head center), optional PLY and the raw
-   session (ScanDataset).
+   in millimeters (head upright +Y, face toward +Z, origin at the head center; watertight with `closeHead`), optional
+   PLY and the raw session (ScanDataset).
 
 ## Conventions
 
@@ -125,10 +133,11 @@ mask/000000.png    8-bit head mask (optional)
 
 `scripts/build.sh`: tool checks → submodules → patched librealsense (`scripts/build-sdk.sh`) → helper (CMake) →
 Swift package (`swift build -c release`) → `build/IntelFaceScan.app` (`scripts/bundle-app.sh`: helper in
-`Contents/Helpers`, `librealsense2.X.Y.dylib` in `Contents/Frameworks`, `ifscan` in `Contents/MacOS`, ad-hoc
-signature). It prints the time of each step: from a fresh clone on an M3 Ultra (28 cores, Command Line Tools only)
-133–152 s in three fresh-clone builds – submodules 19 s, librealsense 45–63 s, helper 3–5 s, Swift release build 62–63 s,
-bundle 2–3 s; a second run without changes takes 3 s.
+`Contents/Helpers`, `librealsense2.X.Y.dylib` in `Contents/Frameworks`, `ifscan` in `Contents/MacOS`, NOTICE and the
+third-party licenses in `Contents/Resources`, ad-hoc signature). It prints the time of each step: from a fresh clone
+on an M3 Ultra (28 cores, Command Line Tools only) 122–153 s in five fresh-clone builds – submodules 19–21 s,
+librealsense 45–63 s, helper 3–5 s, Swift release build 62–68 s, bundle 2–8 s; a second run without changes takes
+3 s, or about a minute when SwiftPM 6.4's build backend decides to recompile every module.
 
 Requirements: an Apple Silicon Mac, the Command Line Tools (`xcode-select --install`) or Xcode 27 with the macOS
 27.2 SDK, CMake 3.20+ (`brew install cmake`; no other Homebrew package: libusb is built from source and linked
@@ -136,7 +145,8 @@ statically) and network access for the first build (submodules; librealsense dow
 fastcdr, yaml-cpp and sqlite while configuring). The script checks these up front and names the fix (missing
 tools, an Xcode whose license is not accepted, an SDK older than 27.2). Building works on older macOS 27 releases
 (warning); the app needs 27.2 to run. Metal shaders are compiled at runtime from source (the CLT have no `metal`
-compiler). Release binaries contain no absolute build paths (`-ffile-prefix-map`, no linker debug map).
+compiler). Shipped binaries contain no absolute build paths (`-ffile-prefix-map`; `scripts/bundle-app.sh` strips the
+linker debug map from the bundled Swift executables and keeps their dSYMs in `build/dSYMs`).
 `scripts/test.sh` runs the Swift Testing suites (adds the Testing macro plugin path when only the Command Line
 Tools are installed).
 
