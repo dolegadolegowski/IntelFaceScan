@@ -447,9 +447,11 @@ void print_results( const json & report )
     std::printf( "\n" );
 }
 
-int run( const Options & opt )
+int run( const Options & opt, bool * used_live_camera )
 {
     FrameQueue queue;
+    if( used_live_camera && opt.playback.empty() )
+        *used_live_camera = true;
     std::unique_ptr< CaptureEngine > engine = opt.playback.empty()
                                                 ? CaptureEngine::create_live( queue.callbacks( opt.json_only ) )
                                                 : CaptureEngine::create_playback( opt.playback, false,
@@ -600,8 +602,10 @@ int run( const Options & opt )
 }
 }  // namespace
 
-int run_probe( int argc, char ** argv )
+int run_probe( int argc, char ** argv, bool * used_live_camera )
 {
+    if( used_live_camera )
+        *used_live_camera = false;
     Options opt;
     for( int i = 0; i < argc; ++i )
     {
@@ -673,7 +677,7 @@ int run_probe( int argc, char ** argv )
     SignalGuard signals;
     try
     {
-        return run( opt );
+        return run( opt, used_live_camera );
     }
     catch( const std::exception & e )
     {

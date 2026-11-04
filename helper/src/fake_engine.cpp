@@ -364,11 +364,23 @@ public:
             throw std::runtime_error( "cannot write the recording" );
         }
         record_fd_ = fd;
+        record_ended_ = false;
     }
 
     void stop_recording() override
     {
         std::lock_guard< std::mutex > lock( mutex_ );
+        if( record_fd_ < 0 && record_ended_ )
+        {
+            // Ended with the "unplugged" camera (hardware_reset): the file is complete, as with the real engine.
+            record_ended_ = false;
+            if( record_error_ )
+            {
+                record_error_ = false;
+                throw std::runtime_error( "writing the recording failed" );
+            }
+            return;
+        }
         if( record_fd_ < 0 )
             throw std::runtime_error( "no recording is running" );
         int rc = ::close( record_fd_ );
@@ -395,6 +407,18 @@ public:
         }
         if( was_running )
             stop_producer();
+        {
+            // The camera leaves the bus: like an unplug during a recording with the real engine, the recording ends
+            // here, and the RECORD_STOP that follows still succeeds and delivers it.
+            std::lock_guard< std::mutex > lock( mutex_ );
+            if( record_fd_ >= 0 )
+            {
+                if( ::close( record_fd_ ) != 0 )
+                    record_error_ = true;
+                record_fd_ = -1;
+                record_ended_ = true;
+            }
+        }
         event( "device_disconnected", { { "message", "hardware reset" } } );
         std::this_thread::sleep_for( std::chrono::milliseconds( 200 ) );
         event( "device_connected", device_info() );
@@ -668,6 +692,7 @@ private:
     uint64_t frame_index_ = 0;
     int record_fd_ = -1;
     bool record_error_ = false;
+    bool record_ended_ = false;  // the "unplugged" camera ended the recording before stop_recording()
 };
 }  // namespace
 

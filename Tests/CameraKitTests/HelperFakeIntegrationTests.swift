@@ -135,6 +135,32 @@ struct HelperFakeIntegrationTests {
         await source.shutdown()
     }
 
+    @Test func recordingEndedWithTheCameraIsStillDelivered() async throws {
+        // The camera leaves mid-recording (the fake's hardware reset plays an unplug): the engine ends the recording.
+        // RECORD_STOP afterwards copies the file and succeeds with its size and the recording_finished event,
+        // instead of failing with "no recording is running" after the copy.
+        let dir = try TestHelper.scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("unplugged.db3")
+        let source = FakeCameraSource(helperURL: helper)
+        let events = EventRecorder(source.events())
+        _ = try await source.connect()
+        try await source.start()
+        try await source.startRecording(to: file)
+        try await Task.sleep(for: .milliseconds(300))
+        try await source.hardwareReset()
+        let bytes = try await source.stopRecording()
+        let size = try #require(try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)
+        #expect(bytes > 0 && size.int64Value == bytes)
+        let head = try #require(try FileHandle(forReadingFrom: file).read(upToCount: 19))
+        #expect(String(decoding: head, as: UTF8.self) == "IFSFAKE1 format=db3")
+        let finished = await events.wait(timeout: 2) { if case .recordingFinished = $0 { return true }; return false }
+        if case .recordingFinished(let reported)? = finished { #expect(reported == bytes) } else { Issue.record("no recordingFinished") }
+        // Once: the next stop has nothing to stop.
+        await #expect(throws: CameraError.commandFailed("no recording is running")) { _ = try await source.stopRecording() }
+        await source.shutdown()
+    }
+
     @Test func lostConnectionEndsTheHelper() async throws {
         let source = FakeCameraSource(helperURL: helper)
         let events = EventRecorder(source.events())

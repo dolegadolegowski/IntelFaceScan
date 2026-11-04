@@ -9,8 +9,10 @@ ifs_wire_header (24 bytes, little endian) | JSON (json_bytes, UTF-8) | payload (
 ```
 
 * `magic` = `IFS1`, `version` = 1. A receiver closes the connection on an invalid header
-  (`ifs_wire_header_valid`), a JSON body that does not parse or is not an object, or sizes above the limits
-  (`IFS_MAX_JSON_BYTES` = 256 KiB, `IFS_MAX_PAYLOAD_BYTES` = 64 MiB).
+  (`ifs_wire_header_valid`), a JSON body that does not parse or is not an object, sizes above the limits
+  (`IFS_MAX_JSON_BYTES` = 256 KiB, `IFS_MAX_PAYLOAD_BYTES` = 64 MiB), or (the helper) a body nested deeper than 32
+  arrays/objects (`ifs::kMaxJsonDepth`; checked on the raw text before parsing, brackets inside strings do not
+  count; the deepest command, CONFIGURE, needs 3).
 * Only `IFS_CMD_RECORD_START` carries a file descriptor (`SCM_RIGHTS` on the first byte of the header,
   `IFS_FLAG_HAS_FD`). Any other message with a descriptor is a protocol error (the descriptor is closed).
 * JSON keys are `snake_case`. Swift decodes them with `.convertFromSnakeCase` into the types of
@@ -31,13 +33,16 @@ ifs_wire_header (24 bytes, little endian) | JSON (json_bytes, UTF-8) | payload (
 3. The helper validates the socket path (absolute; parent directory owned by `uid`, mode `0700`, not a symlink),
    connects, and checks the peer with `LOCAL_PEERCRED`/`LOCAL_PEERPID`: the peer uid must be `uid` and the peer
    pid `parent-pid`. The app accepts exactly one connection and checks the peer: euid 0 (live) or its own uid
-   (playback), and that the peer executable (`proc_pidpath`) is the bundled helper.
+   (playback, fake), that the peer executable (`proc_pidpath`) is the bundled helper, and for playback/fake that the
+   peer pid is the process the app started.
 4. The helper sends `HELLO`. Then the app sends commands; every command has a unique `request_id` and gets exactly
    one `REPLY`. `FRAMESET`, `EVENT` and `LOG` messages arrive at any time.
-   * Validation: a command without an unsigned integer `request_id`, a command with a payload, or a body that is
-     not a JSON object closes the connection. A field not listed for a command, or a field of the wrong type, is an
-     error `REPLY` (`unknown field 'x'`); so is an unknown command type. At most 1024 commands (16 MiB) may wait
-     in the helper's queue.
+   * Validation: a command without an unsigned integer `request_id`, a command with a payload, a body that is not a
+     JSON object, or a body nested deeper than 32 levels closes the connection. A field not listed for a command, or
+     a field of the wrong type, is an error `REPLY` (`unknown field 'x'`); so is an unknown command type. At most
+     1024 commands (16 MiB) may wait in the helper's queue.
+   * The app must keep reading: when more than 4096 replies, events and logs (or 16 MiB of them) wait to be sent
+     behind the socket buffer, the helper ends the session as if the connection had been closed (no `BYE`).
    * `CONFIGURE` and `SET_FILTERS`: every key is required except `laser_power` (`null` or absent = maximum);
      `align_to_color` must be `true`; `send_ir` requires `enable_ir`.
 5. End: the app sends `QUIT` (or closes the socket, or exits: the helper watches the socket and `parent-pid`).
@@ -148,7 +153,8 @@ sets the RGB auto-exposure ROI directly and maps the rectangle onto the depth im
 `{"request_id": 10, "format": "db3"}`. The helper records into its own root-private temporary directory, and on
 `RECORD_STOP` copies the finished file into the descriptor, closes it, deletes the temporary file and replies
 `{"bytes": 123456789}`. The helper never opens a path received from the app. Formats: `db3` (default of
-librealsense 2.58) and `bag`.
+librealsense 2.58) and `bag`. A recording that ended with the camera (unplugged mid-recording: the next command
+finishes it) is still delivered by the `RECORD_STOP` that follows, with its reply and `recording_finished`.
 
 ### PLAYBACK (playback only)
 `{"request_id": 11, "action": "pause"}` / `{"action": "resume", "real_time": false}`.

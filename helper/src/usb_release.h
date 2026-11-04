@@ -23,7 +23,8 @@ struct UsbReleaseResult
     bool attached = false;  // after the wait: every device has its macOS drivers again
 };
 
-// Re-enumerates every RealSense device that has no macOS driver attached. With wait_ms > 0, waits up to that long
+// Re-enumerates every RealSense device that has no macOS driver attached (also one another root process holds:
+// nothing tells them apart from one this process captured, docs/HELPER.md). With wait_ms > 0, waits up to that long
 // until the system drivers are attached again. 'log' receives one line per device and the final state.
 UsbReleaseResult release_realsense_devices( int wait_ms, const std::function< void( const std::string & ) > & log );
 

@@ -7,9 +7,14 @@
 // includes librealsense headers itself. JSON shapes are those of docs/PROTOCOL.md (DeviceInfo,
 // CaptureConfiguration, FilterConfiguration, FRAMESET metadata).
 //
-// Threading: callbacks are invoked from librealsense / processing threads and must not block for long (the IPC
-// layer queues framesets and drops old ones). Methods may be called from the IPC thread; implementations
-// serialize them internally. Methods throw std::runtime_error with a user-readable message on failure.
+// Threading: callbacks are invoked from librealsense / processing threads. on_event and on_log never wait; on_frameset
+// may wait on purpose: in non-real-time playback the IPC layer holds the processing thread until the app has room
+// (lossless backpressure, docs/PROTOCOL.md), otherwise it queues the frameset and drops old ones. So an engine must
+// never call on_frameset while holding a lock that one of its methods takes. In turn the IPC layer never waits in
+// on_frameset while an engine method runs on the command thread (Connection::EngineCall): a method may wait for the
+// thread that is inside the callback (stop() joins the processing thread, pausing a playback flushes its reader).
+// Methods may be called from the IPC thread; implementations serialize them internally. Methods throw
+// std::runtime_error with a user-readable message on failure.
 
 #pragma once
 
@@ -84,7 +89,9 @@ public:
     // Records the raw sensor streams into 'path' (a file inside the helper's root-private temporary directory,
     // chosen by the helper, never by the app). format: "db3" | "bag". May restart the streams.
     virtual void start_recording( const std::string & path, const std::string & format ) = 0;
-    // Returns once the recording file is complete and closed.
+    // Returns once the recording file is complete and closed. Also succeeds (once) when the engine already finished
+    // the recording itself, e.g. any command after the camera was unplugged mid-recording ends it: the file is then
+    // complete too. Throws when no recording was started.
     virtual void stop_recording() = 0;
 
     // Playback only.

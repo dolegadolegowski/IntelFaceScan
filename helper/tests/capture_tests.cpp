@@ -1383,6 +1383,35 @@ TEST_CASE( live_device_events_and_shutdown )
     CHECK( col.events().size() == events );
 }
 
+TEST_CASE( live_recording_ended_by_an_unplug_still_stops )
+{
+    // The camera unplugged mid-recording: the next command finishes the recording on the engine's side. The app's
+    // RECORD_STOP that follows must succeed (the IPC layer then delivers the file and reports recording_finished),
+    // not fail with "No recording is running".
+    TempDir dir;
+    RecordingOptions o;
+    o.frames = 1000;
+    LiveRig rig( o, 1 );
+    CaptureEngine & engine = *rig.engine;
+    engine.configure( to_json( LiveRig::config() ) );
+    engine.start();
+    rig.warm_up();
+    const std::string file = dir.file( "unplugged.db3" );
+    engine.start_recording( file, "db3" );
+    rig.warm_up();
+    CHECK( rig.feed( 5 ) == 5 );
+
+    mark_device_lost_for_testing( engine );
+    CHECK_THROWS_WITH( engine.device_info(), "disconnected" );
+    CHECK( rig.col.event_count( "recording_finished" ) == 1 );
+    CHECK( ! engine.streaming() );
+    engine.stop_recording();
+    CHECK( fs::exists( file ) && fs::file_size( file ) > 0 );
+    // Only once: a second stop has nothing to stop.
+    CHECK_THROWS_WITH( engine.stop_recording(), "No recording" );
+    engine.shutdown();
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Throughput (printed for docs/CAMERA.md; the bounds only catch gross regressions)
 
@@ -1445,6 +1474,31 @@ TEST_CASE( bench_processing_and_recording )
     }
 }
 
+TEST_CASE( probe_reports_that_it_tried_the_live_camera )
+{
+    // main.cpp hands the camera back to macOS after a live probe; a probe that failed to open the camera (none is
+    // connected here, and tests never run as root) may still have captured part of it, so it counts as well.
+    std::vector< std::string > args{ "--enumerate", "--json" };
+    std::vector< char * > argv;
+    for( auto & a : args )
+        argv.push_back( a.data() );
+    bool live = false;
+    std::fflush( stdout );
+    int saved = ::dup( 1 );
+    REQUIRE( saved >= 0 );
+    std::FILE * null = std::fopen( "/dev/null", "w" );
+    REQUIRE( null );
+    ::dup2( ::fileno( null ), 1 );
+    int rc = run_probe( int( argv.size() ), argv.data(), &live );
+    std::fflush( stdout );
+    ::dup2( saved, 1 );
+    ::close( saved );
+    std::fclose( null );
+    CHECK( live );
+    if( ::geteuid() != 0 )
+        CHECK_MSG( rc != 0, "no camera can be opened without root" );
+}
+
 TEST_CASE( probe_runs_on_a_recording )
 {
     TempDir dir;
@@ -1469,12 +1523,14 @@ TEST_CASE( probe_runs_on_a_recording )
     std::FILE * capture = std::fopen( out.c_str(), "w" );
     REQUIRE( saved >= 0 && capture );
     ::dup2( ::fileno( capture ), 1 );
-    int rc = run_probe( int( argv.size() ), argv.data() );
+    bool live = true;
+    int rc = run_probe( int( argv.size() ), argv.data(), &live );
     std::fflush( stdout );
     ::dup2( saved, 1 );
     ::close( saved );
     std::fclose( capture );
     REQUIRE( rc == 0 );
+    CHECK_MSG( ! live, "a recording needs no USB hand-back" );
     std::FILE * f = std::fopen( out.c_str(), "r" );
     REQUIRE( f );
     std::string text;

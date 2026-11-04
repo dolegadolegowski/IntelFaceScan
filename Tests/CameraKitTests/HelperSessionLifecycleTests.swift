@@ -102,3 +102,106 @@ struct HelperSessionLifecycleTests {
         await source.shutdown()
     }
 }
+
+/// What a test's launch override started.
+private final class LaunchRecord: @unchecked Sendable {
+    private let lock = NSLock()
+    private var started: HelperProcessHandle?
+    private var other: HelperProcessHandle?
+    private var args: [String] = []
+
+    func record(_ handle: HelperProcessHandle, arguments: [String], impostor: HelperProcessHandle? = nil) {
+        lock.withLock {
+            started = handle
+            args = arguments
+            other = impostor
+        }
+    }
+
+    var handle: HelperProcessHandle? { lock.withLock { started } }
+    var impostor: HelperProcessHandle? { lock.withLock { other } }
+    var socketDirectory: String? {
+        lock.withLock {
+            guard let i = args.firstIndex(of: "--socket"), i + 1 < args.count else { return nil }
+            return (args[i + 1] as NSString).deletingLastPathComponent
+        }
+    }
+
+    func cleanUp() {
+        for handle in [handle, impostor].compactMap({ $0 }) where !handle.hasExited {
+            handle.terminate()
+            handle.waitForExit(timeout: 3)
+        }
+    }
+}
+
+@Suite("Helper session launch checks", .serialized, .timeLimit(.minutes(1)))
+struct HelperSessionLaunchTests {
+    private func eventually(_ seconds: Double = 5, _ condition: () -> Bool) async -> Bool {
+        let deadline = Date(timeIntervalSinceNow: seconds)
+        while !condition() && Date() < deadline { try? await Task.sleep(for: .milliseconds(20)) }
+        return condition()
+    }
+
+    @Test func closingWhileTheLivePromptShowsDoesNotWait() async throws {
+        // The live helper's handle ends only when the in-process AppleScript returns, i.e. after the administrator
+        // prompt. A stand-in that never connects and never exits plays the prompt that is still showing (no real
+        // prompt in tests). Closing the source used to wait ~15 s for it; the socket is removed instead, so a helper
+        // started after all could not connect and would exit by itself (or with the app).
+        let sleep = URL(fileURLWithPath: "/bin/sleep")
+        let session = HelperCameraSession(mode: .live, helperURL: sleep)
+        let launched = LaunchRecord()
+        defer { launched.cleanUp() }
+        session.launchOverride = { _, args in
+            let handle = try HelperLauncher.launchAsUser(helper: sleep, arguments: ["30"])
+            launched.record(handle, arguments: args)
+            return handle
+        }
+        let attempt = Task { try await session.connect() }
+        #expect(await eventually { launched.handle != nil })
+        let t0 = Date()
+        await session.shutdown(timeout: 20)
+        let elapsed = Date().timeIntervalSince(t0)
+        #expect(elapsed < 3, "closing waited \(elapsed) s for a helper that never connected")
+        do {
+            _ = try await attempt.value
+            Issue.record("connect() succeeded without a helper")
+        } catch {}
+        let directory = try #require(launched.socketDirectory)
+        #expect(!FileManager.default.fileExists(atPath: directory), "\(directory) was left behind")
+        // The root helper cannot be signalled by the app: the stand-in was left alone.
+        #expect(launched.handle?.hasExited == false)
+    }
+
+    @Test(.enabled(if: TestHelper.available, TestHelper.skipReason))
+    func helperTheAppDidNotStartIsRejected() async throws {
+        // A process of the same user that connects first and then executes the real helper passes the uid and
+        // executable checks: here the real helper is started beside the process the session believes it started.
+        let helper = try #require(TestHelper.url)
+        let session = HelperCameraSession(mode: .fake(colorRowPadding: 0), helperURL: helper)
+        let launched = LaunchRecord()
+        defer { launched.cleanUp() }
+        session.launchOverride = { helper, args in
+            let impostor = try HelperLauncher.launchAsUser(helper: helper, arguments: args)
+            let handle = try HelperLauncher.launchAsUser(helper: URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"])
+            launched.record(handle, arguments: args, impostor: impostor)
+            return handle
+        }
+        do {
+            _ = try await session.connect()
+            Issue.record("a helper the app did not start was accepted")
+        } catch let error as CameraError {
+            guard case .connectionFailed(let message) = error else {
+                Issue.record("unexpected error: \(error)")
+                return
+            }
+            #expect(message.contains("not the camera helper the app started"), "\(message)")
+        }
+        #expect(!session.isConnected)
+        // The rejected helper sees its connection closed and ends; the process that never connected is stopped.
+        #expect(launched.impostor?.waitForExit(timeout: 5) == true)
+        #expect(launched.impostor?.exitStatus == 0)
+        #expect(launched.handle?.waitForExit(timeout: 5) == true)
+        await session.shutdown(timeout: 5)
+    }
+}

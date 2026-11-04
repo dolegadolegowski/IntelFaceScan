@@ -269,8 +269,13 @@ std::string session_loop( ifs::Lifecycle & life, ifs::Connection & connection, i
     {
         if( life.wait( 5000 ) == ifs::Lifecycle::Event::terminate )
             return life.reason();
-        while( auto command = connection.pop_command() )
+        // Nothing more is run once the connection broke: the replies could not be sent, and each command could take
+        // a while on the camera (up to kMaxPendingCommands of them may still be queued).
+        while( ! connection.broken() )
         {
+            auto command = connection.pop_command();
+            if( ! command )
+                break;
             service.handle( *command );
             if( service.quit_requested() )
                 return "the app asked the helper to quit";
@@ -368,7 +373,9 @@ int run_session( const Options & o )
     connection.drop_pending_framesets();
     if( o.mode == ifs::HelperMode::live )
     {
-        // After shutdown_engine(): the librealsense context is gone, nothing uses the device any more.
+        // After shutdown_engine(): the librealsense context is gone, nothing uses the device any more. Every
+        // RealSense device without a macOS driver is released, not only the one captured here: librealsense does not
+        // report its capture, and no other sign of it is reliable (docs/HELPER.md, session end).
         ifs::UsbReleaseResult r;
         try
         {
@@ -394,6 +401,41 @@ int run_session( const Options & o )
     connection.finish( kByeTimeout );
     return status;
 }
+
+// `--probe` on the live camera: the camera is captured from the macOS drivers like in a session, so it is handed back
+// the same way afterwards, whatever the probe's outcome (Ctrl-C included: the probe stops cleanly on SIGINT).
+int run_probe_tool( int argc, char ** argv )
+{
+    bool live = false;
+    int rc = 1;
+    try
+    {
+        rc = ifs::run_probe( argc, argv, &live );
+    }
+    catch( ... )
+    {
+        std::fprintf( stderr, "probe: internal error\n" );
+    }
+    // Without root nothing could be captured (libusb needs it), and a re-enumeration would fail anyway.
+    if( live && ::geteuid() == 0 )
+    {
+        ifs::UsbReleaseResult r;
+        try
+        {
+            r = ifs::release_realsense_devices( kReleaseWaitMs, []( const std::string & line ) {
+                std::fprintf( stderr, "%s\n", line.c_str() );
+            } );
+        }
+        catch( ... )
+        {
+            r.failed = 1;
+        }
+        if( r.failed )
+            std::fprintf( stderr, "The camera could not be handed back to macOS: re-plug it or run "
+                                  "'sudo IntelFaceScanHelper --release -w'\n" );
+    }
+    return rc;
+}
 }  // namespace
 
 int main( int argc, char ** argv )
@@ -401,7 +443,7 @@ int main( int argc, char ** argv )
     ifs::harden_process();
 
     if( argc > 1 && std::strcmp( argv[1], "--probe" ) == 0 )
-        return ifs::run_probe( argc - 2, argv + 2 );
+        return run_probe_tool( argc - 2, argv + 2 );
     if( argc > 1 && std::strcmp( argv[1], "--release" ) == 0 )
         return ifs::run_release_tool( argc - 2, argv + 2 );
 

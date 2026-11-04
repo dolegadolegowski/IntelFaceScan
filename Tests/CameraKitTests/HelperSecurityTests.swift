@@ -51,6 +51,91 @@ struct HelperSecurityPeerTests {
         #expect(client.process.waitForExit(timeout: 10) && client.process.exitStatus == 0)
     }
 
+    private func usage(_ pid: pid_t) -> rusage_info_v4? {
+        var info = rusage_info_v4()
+        let rc = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
+        }
+        return rc == 0 ? info : nil
+    }
+
+    /// Threads of a process that are on a CPU right now (nil once it is gone).
+    private func runningThreads(_ pid: pid_t) -> Int? {
+        var handles = [UInt64](repeating: 0, count: 256)
+        let bytes = handles.withUnsafeMutableBytes { raw in
+            proc_pidinfo(pid, PROC_PIDLISTTHREADS, 0, raw.baseAddress, Int32(raw.count))
+        }
+        guard bytes > 0 else { return nil }
+        var running = 0
+        for handle in handles.prefix(Int(bytes) / MemoryLayout<UInt64>.size) {
+            var info = proc_threadinfo()
+            let size = Int32(MemoryLayout<proc_threadinfo>.size)
+            if proc_pidinfo(pid, PROC_PIDTHREADINFO, handle, &info, size) == size,
+               info.pth_run_state == TH_STATE_RUNNING {
+                running += 1
+            }
+        }
+        return running
+    }
+
+    /// Waits until no thread of the helper ran for a few samples in a row: it ran every command sent so far (bounded
+    /// wait). Its CPU time is no indicator: it only advances when a running thread is switched out.
+    private func waitUntilIdle(_ pid: pid_t) {
+        var quiet = 0
+        for _ in 0..<2000 where quiet < 3 {
+            guard let running = runningThreads(pid) else { return }
+            quiet = running == 0 ? quiet + 1 : 0
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+    }
+
+    /// Sends QUERY_DEVICE commands in batches the helper runs before the next one arrives (a burst beyond 1024 queued
+    /// commands ends the session for another reason) and never reads a reply.
+    /// Returns the number sent until the helper closed the connection, and its peak footprint meanwhile.
+    private func flood(_ client: RawHelperClient, _ body: [String: Any], upTo limit: Int) -> (sent: Int, peak: UInt64) {
+        let pid = client.hello.pid
+        var peak = usage(pid)?.ri_lifetime_max_phys_footprint ?? 0
+        var sent = 0
+        while sent < limit {
+            do {
+                try client.send(HelperMessageType.queryDevice.rawValue, body)
+            } catch {
+                break  // the helper closed the connection
+            }
+            sent += 1
+            if sent % 512 == 0 {
+                waitUntilIdle(pid)
+                guard let info = usage(pid) else { break }
+                peak = max(peak, info.ri_lifetime_max_phys_footprint)
+            }
+        }
+        return (sent, peak)
+    }
+
+    @Test func floodingCommandsWithoutReadingEndsTheSession() throws {
+        // A peer that sends commands and never reads the replies: they piled up in the (root) helper without a bound,
+        // ~4 KB per QUERY_DEVICE here (12 MB -> 131 MB after 20000 commands with a camera's longer replies). Now the
+        // session ends once 4096 replies, events and logs or 16 MiB wait behind the socket buffer ("the app stopped
+        // reading"), through the normal shutdown.
+        let client = try RawHelperClient(helper: helper)
+        let (sent, peak) = flood(client, [:], upTo: 40_000)
+        #expect(client.process.waitForExit(timeout: 10), "the helper kept its session after \(sent) unread replies")
+        #expect(client.process.exitStatus == 0, "the session must end through the normal shutdown")
+        // About 30 MB (16 MiB of replies plus the helper itself); unbounded it was past 240 MB after 40000 commands.
+        #expect(peak < 64 * 1024 * 1024, "helper footprint peaked at \(peak >> 20) MiB after \(sent) commands")
+    }
+
+    @Test func manyUnreadRepliesEndTheSessionBeforeTheirBytesDo() throws {
+        // The count bound: 2 KB error replies ("unknown field 'xx...'") reach 4096 queued messages at 8 MiB. About as
+        // many again fit into the socket buffers first, so the session ends after about 8200 commands (measured 8193,
+        // batches of 512); the byte bound alone would end it only after about 12300 (4096 + 16 MiB / 2 KB).
+        let client = try RawHelperClient(helper: helper)
+        let (sent, _) = flood(client, [String(repeating: "x", count: 2000): 1], upTo: 40_000)
+        #expect(client.process.waitForExit(timeout: 10), "the helper kept its session after \(sent) unread replies")
+        #expect(client.process.exitStatus == 0)
+        #expect(sent < 10_500, "the session should end after about 4096 queued replies, not \(sent)")
+    }
+
     @Test func setIDRecordingDestinationIsRefused() throws {
         // Root writing through the descriptor would keep the set-id bits the kernel clears for any other writer.
         let client = try RawHelperClient(helper: helper)
@@ -208,6 +293,70 @@ struct HelperSecurityLaunchTests {
         #expect(received.last == "")  // the terminator of the last argument
         received.removeLast()
         #expect(received == tricky)
+    }
+
+    /// A stand-in for `IntelFaceScanHelper --release -w`: its lines on stderr, like the real tool.
+    private func releaseTool(in dir: URL, status: Int32, lines: [String]) throws -> URL {
+        let tool = dir.appendingPathComponent("release-\(status)")
+        let body = lines.map { "echo '\($0)' >&2" }.joined(separator: "\n")
+        try "#!/bin/sh\n[ \"$*\" = '--release -w' ] || exit 64\n\(body)\nexit \(status)\n"
+            .write(to: tool, atomically: true, encoding: .utf8)
+        #expect(chmod(tool.path, 0o755) == 0)
+        return tool
+    }
+
+    /// The administrator launch without the administrator clause, through osascript (as in a process without AppKit).
+    private func unprivilegedLaunch(_ helper: URL, _ arguments: [String]) -> HelperProcessHandle {
+        let command = HelperLauncher.privilegedShellCommand(helper: helper.path, arguments: arguments,
+                                                            captureOutput: true)
+        return HelperLauncher.runAppleScript(
+            HelperLauncher.appleScriptSource(command: command, prompt: "unused", privileged: false), inProcess: false)
+    }
+
+    @Test func releaseCameraReturnsTheToolsLines() async throws {
+        // releaseCameraToSystem() promised the tool's output but returned "" on success: "do shell script" returns
+        // stdout, and the tool writes to stderr (which a failed run reports as the error message).
+        let dir = try TestHelper.scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ok = try releaseTool(in: dir, status: 0, lines: ["RealSense device re-enumerated: ok (0x00000000)",
+                                                              "macOS drivers attached"])
+        let output = try await LiveCameraSource.releaseCamera(helper: ok, launch: unprivilegedLaunch)
+        #expect(output == "RealSense device re-enumerated: ok (0x00000000)\nmacOS drivers attached")
+
+        let none = try releaseTool(in: dir, status: 0, lines: ["No RealSense device found"])
+        #expect(try await LiveCameraSource.releaseCamera(helper: none, launch: unprivilegedLaunch)
+                == "No RealSense device found")
+
+        let failing = try releaseTool(in: dir, status: 1, lines: ["RealSense device re-enumerated: failed (0xe00002c5)"])
+        await #expect(throws: CameraError.commandFailed(
+            "Releasing the camera failed (status 1): RealSense device re-enumerated: failed (0xe00002c5)")) {
+            _ = try await LiveCameraSource.releaseCamera(helper: failing, launch: unprivilegedLaunch)
+        }
+    }
+
+    @Test func scriptsRunThroughOSAScriptWithoutAppKit() throws {
+        // The test runner has no NSApplication: the administrator launch would go through /usr/bin/osascript, whose
+        // results must mean what the in-process ones mean.
+        #expect(!HelperLauncher.hasAppKitApplication)
+
+        let cancelled = HelperLauncher.runAppleScript("error \"User canceled.\" number -128", inProcess: false)
+        #expect(cancelled.waitForExit(timeout: 30))
+        #expect(cancelled.launchError == .authorizationCancelled)
+
+        let failed = HelperLauncher.runAppleScript(
+            HelperLauncher.appleScriptSource(command: "echo out; echo 'no camera' >&2; exit 69", prompt: "",
+                                             privileged: false), inProcess: false)
+        #expect(failed.waitForExit(timeout: 30))
+        #expect(failed.launchError == nil)
+        #expect(failed.exitStatus == 69)
+        #expect(failed.diagnostics == "no camera")
+
+        let other = HelperLauncher.runAppleScript("error \"odd\" number -1743", inProcess: false)
+        #expect(other.waitForExit(timeout: 30))
+        #expect(other.launchError == .launchFailed("odd (-1743)"))
+
+        #expect(HelperLauncher.parseOSAScriptError("0:48: execution error: a (b) c (2)")! == (2, "a (b) c"))
+        #expect(HelperLauncher.parseOSAScriptError("syntax error: nope") == nil)
     }
 
     @Test func searchSkipsHelpersOthersCanReplace() throws {

@@ -20,4 +20,8 @@ std::unique_ptr< CaptureEngine > create_live_engine_for_device( rs2::device devi
 // and remove devices in it (rs2::context::load_device / unload_device) to play a disconnect and a reconnect.
 std::unique_ptr< CaptureEngine > create_live_engine_for_device( rs2::context context, rs2::device device,
                                                                 CaptureCallbacks callbacks );
+
+// Records an unplug of the camera of a live engine, as its devices-changed callback does when librealsense reports
+// the removal (for devices a test cannot remove from a context, such as an rs2::software_device).
+void mark_device_lost_for_testing( CaptureEngine & engine );
 }

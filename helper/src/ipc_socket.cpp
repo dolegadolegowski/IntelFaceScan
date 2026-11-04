@@ -95,6 +95,8 @@ UniqueFd connect_app_socket( const std::string & path, uid_t uid )
         fail( "socket path is not a socket" );
     if( st.st_uid != uid )
         fail( "socket is not owned by uid " + std::to_string( uid ) );
+    const dev_t checked_dev = st.st_dev;
+    const ino_t checked_ino = st.st_ino;
 
     UniqueFd sock( ::socket( AF_UNIX, SOCK_STREAM, 0 ) );
     if( ! sock.valid() )
@@ -117,6 +119,18 @@ UniqueFd connect_app_socket( const std::string & path, uid_t uid )
         fail( "cannot leave the socket directory: " + errno_text() );
     if( rc != 0 )
         fail( "connect() failed: " + std::string( std::strerror( connect_errno ) ) );
+
+    // connect() resolves the name again, and follows a link: the user owning the directory could have swapped the
+    // checked socket for a link to another one in between. A second look narrows that window to the connect() itself
+    // (the peer checks are the real defense). The name may already be gone: the app removes it once it accepted us.
+    struct stat now;
+    if( ::fstatat( dir.get(), name.c_str(), &now, AT_SYMLINK_NOFOLLOW ) == 0 )
+    {
+        if( now.st_dev != checked_dev || now.st_ino != checked_ino )
+            fail( "the socket was replaced while connecting" );
+    }
+    else if( errno != ENOENT )
+        fail( "cannot stat the socket after connecting: " + errno_text() );
     return sock;
 }
 

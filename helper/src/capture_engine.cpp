@@ -352,6 +352,14 @@ public:
     void hardware_reset() override;
     void shutdown() override;
 
+    // Test seam (capture_testing.h): what the devices-changed callback records for an unplugged camera.
+    void mark_device_lost_for_testing()
+    {
+        std::lock_guard< std::mutex > lock( m_watch->mutex );
+        m_watch->lost = true;
+        m_watch->expected = false;
+    }
+
 private:
     using OptionPlan = OptionValues;
 
@@ -402,6 +410,9 @@ private:
     std::shared_ptr< Session > m_session;
     std::unique_ptr< rs2::recorder > m_recorder;
     std::string m_recording_path;
+    // The engine finished the recording itself (the camera was disconnected mid-recording): the file is complete,
+    // and the stop_recording() that follows succeeds.
+    bool m_recording_ended = false;
     std::optional< PixelRect > m_roi;
     float m_roi_distance_m = 0;
 };
@@ -1238,6 +1249,7 @@ uint64_t RealSenseEngine::finish_recording_locked()
         teardown_session_locked( false );
     // The record device's destructor flushes the write queue and closes the file.
     m_recorder.reset();
+    m_recording_ended = true;
     uint64_t bytes = file_size( m_recording_path );
     log( "info", "Recording finished (" + std::to_string( bytes ) + " bytes)" );
     emit_event( callbacks(), "recording_finished", { { "bytes", bytes } } );
@@ -1555,6 +1567,7 @@ void RealSenseEngine::start_recording( const std::string & path, const std::stri
         // Wrapping the device hooks the recorder into the sensors' callbacks when they start.
         m_recorder = std::make_unique< rs2::recorder >( path, m_device );
         m_recording_path = path;
+        m_recording_ended = false;
     }
     catch( const rs2::error & e )
     {
@@ -1588,8 +1601,16 @@ void RealSenseEngine::stop_recording()
     std::lock_guard< std::mutex > lock( m_mutex );
     check_open_locked();
     if( ! m_recorder )
-        throw std::runtime_error( "No recording is running" );
+    {
+        // Already finished by the engine (any command after the camera was unplugged ends the recording): the file
+        // is complete and closed, which is all this promises.
+        if( ! m_recording_ended )
+            throw std::runtime_error( "No recording is running" );
+        m_recording_ended = false;
+        return;
+    }
     finish_recording_locked();
+    m_recording_ended = false;
 }
 
 void RealSenseEngine::playback_control( bool pause, bool real_time )
@@ -1739,6 +1760,11 @@ std::unique_ptr< CaptureEngine > create_live_engine_for_device( rs2::context con
     auto engine = std::make_unique< RealSenseEngine >( std::move( callbacks ), false );
     engine->open_device( context, device );
     return engine;
+}
+
+void mark_device_lost_for_testing( CaptureEngine & engine )
+{
+    dynamic_cast< RealSenseEngine & >( engine ).mark_device_lost_for_testing();
 }
 
 std::string sdk_version()
