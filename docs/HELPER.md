@@ -182,7 +182,7 @@ The app (`Sources/IntelFaceScanApp/IntelFaceScanApp.swift`) does this instead:
 ```swift
 func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     if terminationPending { return .terminateCancel }       // a reply is already on its way
-    guard let work = model.beginTermination() else { return .terminateNow }   // closes the source, synchronously
+    guard let work = model.beginTermination() else { return .terminateNow }   // starts closing the source, returns at once
     terminationPending = true
     Task.detached {                                         // waits off the main actor (TerminationWork.wait)
         _ = await work.wait()                               // camera shutdown and file writes, bounded
