@@ -162,7 +162,8 @@ public struct ReconstructionResult: Sendable {
             self.report.surfaceAreaMM2 = Float(total * 1e6)
             self.report.synthesizedAreaMM2 = Float(synthesized * 1e6)
             if synthesized > 0 {
-                self.report.notes.append(String(format: "%.0f of %.0f cm² synthesized (filled holes, closed back of the head): not measured",
+                // Hole filling without closeHead, also the closed back of the head with it.
+                self.report.notes.append(String(format: "%.0f of %.0f cm² synthesized by hole filling: not measured",
                                                 synthesized * 1e4, total * 1e4))
             }
         }
