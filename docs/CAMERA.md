@@ -15,7 +15,7 @@ camera (see "Measurement procedure").
 | Depth output | Z16 up to 1280×720 @ 30 fps (848×480 up to 90 fps), USB 3 required for 1280×720 + RGB |
 | RGB | OV9782 global shutter, 1280×800 @ 30 fps, ~90° × 65°, fixed focus, inverse Brown–Conrady model |
 | RGB position | ~59 mm to the right of the left imager (`depth_to_color.translation ≈ [-0.059, 0, 0]`) |
-| IMU | BMI055: accel 63 or 100 Hz, gyro 200 or 400 Hz (the helper uses the lowest rates: only the newest sample is used) |
+| IMU | accel 63 or 250 Hz (BMI055) / 100 or 200 Hz (BMI085, newer units), gyro 200 or 400 Hz (the helper uses the lowest rates: only the newest sample is used) |
 | Min-Z (datasheet) | ~52 cm at 1280×720 without disparity shift |
 | Max disparity search | 126 px (+ disparity shift), at the output resolution |
 | Default depth units | 1 mm; with advanced mode down to 1 µm (we use 0.1 mm) |
@@ -124,8 +124,19 @@ helper enables it on the first `configure`: the camera restarts (3–8 s) and ke
   against the device → advanced mode if needed (bounded 20 s wait for the re-enumeration through the
   devices-changed callback, query fallback) → check preset name, depth-units and laser ranges → stop the streams
   only if the profiles changed → preset → depth units (through the option, so the depth scale stays in sync) →
-  disparity shift (depth table) → emitter/laser (`null` = max, snapped to the option step) → auto exposure →
+  disparity shift (depth table) → emitter/laser (`null` = max, snapped to the option step; the emitter is switched
+  off only after the laser power, because setting the power switches the D4xx emitter on) → auto exposure →
   filters → restart.
+* **Presets re-apply themselves.** librealsense re-applies the active visual preset every time the depth sensor is
+  opened (stream start), until the preset is set to Custom (which writing the depth table for a disparity shift
+  does). High Accuracy and High Density keep the depth table, laser and exposure, but "Default" resets them (1 mm
+  depth units, shift 0, laser 150, emitter on, auto exposure on) after the sensor read its depth units, so the
+  frames would carry 0.1 mm while the camera sends 1 mm. While a preset is active the engine reads depth units,
+  disparity shift, emitter, laser power and both auto exposures before opening the sensors and sets back whatever
+  changed before starting them (in the configure order), so values set later with `SET_OPTION` survive as well.
+* **Depth units while streaming.** A `Depth Units` change while streaming (`SET_OPTION`, or `CONFIGURE` with the same
+  streams) keeps the stream profile; the processing thread then rebuilds the disparity transforms and the align
+  block (both cache the depth scale per profile) and restarts the temporal filter.
 * **Stream order.** RGB starts before depth and depth stops before RGB: the D4xx firmware restarts a running depth
   stream when RGB is toggled. A depth (or color) frame counter that goes backwards anyway is reported as
   `stream_restarted` (`{"stream", "previous_frame", "frame"}`) and resets the temporal filter.
@@ -135,7 +146,11 @@ helper enables it on the first `configure`: the camera restarts (3–8 s) and ke
   resume by itself.
 * **Auto-exposure ROI.** RGB: the rectangle clamped to the image. Depth: the rectangle's outline deprojected at
   `distance_m` with the color intrinsics, moved by the color→depth extrinsics, projected with the depth
-  intrinsics, bounding box clamped. Applied when streaming starts and on every `SET_ROI` while streaming.
+  intrinsics, bounding box clamped. Both are then grown to at least 32×32 px about their center and kept inside the
+  image (a face rectangle that mostly left the image would otherwise leave a sliver of a few pixels to meter).
+  Applied when streaming starts and on every `SET_ROI` while streaming.
+* **Callbacks end with `shutdown()`.** The processing thread is joined, and a devices-changed event that is being
+  emitted when `shutdown()` runs is waited for; after `shutdown()` returns no callback runs.
 * **FRAMESET.** `sequence` (helper-wide counter), `timestamp_ms` / `timestamp_domain` of the color frame,
   `depth_scale` from the depth frame, `depth_to_color` (column-major), `imu` (`null` before the first sample or
   without a motion module), `metadata` when the firmware reports it: `depth_exposure_us`, `depth_gain`,
@@ -164,7 +179,10 @@ helper enables it on the first `configure`: the camera restarts (3–8 s) and ke
 * Playback (`create_playback`) loads the file into the context (`load_device`, no repeat), opens the recorded
   depth/IR/color/IMU streams with the same code, plays in real time or every frame (`set_real_time(false)`:
   blocking frames, nothing is dropped), pauses/resumes, and reports `playback_finished` after the last frameset
-  was delivered (then `streaming_stopped`). `start()` after the end plays the file again.
+  was delivered (then `streaming_stopped`). `start()` after the end plays the file again from the beginning;
+  `start()` after a `stop()` in the middle continues after the last delivered frame (librealsense's resume).
+  A paused playback stays paused through `stop()`/`start()` and stream restarts until it is resumed
+  (librealsense forgets its pause when the sensors stop, so the engine pauses it again at each start).
 
 ### Known limitations
 
@@ -173,11 +191,17 @@ helper enables it on the first `configure`: the camera restarts (3–8 s) and ke
   probe handles SIGINT/SIGTERM/SIGHUP: it stops at the next frame, shuts the engine down and prints what it has.
 * Visual presets on D4xx exist only in advanced mode; enabling it restarts the camera once.
 * `align_to_color = false` is rejected (framesets always carry aligned depth).
+* Live: while the syncer learns the stream set after a start, the first frame's color, depth and IR come out as
+  separate sets; when the processing thread is busy the queue of 2 can drop one of them, i.e. the first frameset
+  after a start may be missing. Recordings are not affected (the recorder sits before the syncer).
+* Live, "Default" preset only: the other options it rewrites at every stream start (the RGB image controls:
+  brightness, contrast, gamma, hue, saturation, sharpness, white balance) return to the preset's values (see
+  "Presets re-apply themselves").
 
 ### Processing time
 
 Per frameset (1280×720 depth + 1280×800 color, playback reader included, M3 Ultra, synthetic head; from
-`capture-tests bench`):
+`build/helper/tests/capture-tests bench`, which runs only when asked for by name):
 
 | Filters | ms per frameset |
 |---|---|
@@ -193,33 +217,92 @@ spatial magnitude 1 before giving up resolution.
 
 ## Measurement procedure
 
-The probe measures through the same engine and filters as the app. Run it with the camera on a USB 3 port:
+The probe measures through the same engine and filters as the app (`helper/src/probe.cpp`, statistics in
+`capture_measure.cpp`). It needs the live camera, so it runs as root; it only prints (markdown tables, then the
+same as JSON) and never writes files. No other program may use the camera meanwhile (quit IntelFaceScan and the
+RealSense Viewer).
+
+**Setup.** Build the helper (`scripts/build-sdk.sh`, then `cmake -S helper -B build/helper
+-DIFS_SDK_DIR=$PWD/build/sdk/install && cmake --build build/helper -j`), or use the bundled one
+(`/Applications/IntelFaceScan.app/Contents/Helpers/IntelFaceScanHelper` instead of `build/helper/IntelFaceScanHelper`
+below). Camera directly on a USB 3 port (the enumeration shows `usb_type` 3.x), on a tripod, optical axis
+perpendicular to a flat, matte, textured wall (or a large board; a bare glossy wall is not representative), nothing
+moving, no sunlight on the wall. Let the camera stream for ~10 minutes first (depth drifts while the projector warms
+up), e.g. `sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:0 --raw-only --warmup 10000 >
+/dev/null` twice (10000 frames = 5.5 min at 30 fps). Measure the distance from the front glass to the wall with a
+tape; the probe reports what it measures as *Median distance*. The first run enables the camera's advanced mode
+(the camera restarts once, 3–8 s; the probe waits).
+
+**Commands** (from the repository root; each configuration is `WIDTHxHEIGHT:preset:shift`, preset `ha` = High
+Accuracy, `hd` = High Density; each takes ~4 s: 30 warm-up frames, 30 raw frames, 10 settling frames, 30 filtered
+frames):
 
 ```
-sudo build/helper/IntelFaceScanHelper --probe --enumerate                 # device, firmware, options, profiles
-sudo build/helper/IntelFaceScanHelper --probe > probe-0.50m.md            # full matrix, markdown + JSON
-sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:50 --minz 30   # Min-Z approach test
+# 0. The camera: serial, firmware, USB type, baseline, options, stream modes (the calibrated depth fx of each
+#    resolution is in the measurement results: "fx" / "theory.focal_px")
+sudo build/helper/IntelFaceScanHelper --probe --enumerate > probe-device.md
+
+# 1. Resolution: 1280x720 vs 848x480 (High Accuracy, shift 0), wall at 0.60 m
+sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:0,848x480:ha:0 > probe-resolution-0.60m.md
+
+# 2. Preset: High Accuracy vs High Density (1280x720, shift 50), wall at 0.47 m
+sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:50,1280x720:hd:50 > probe-preset-0.47m.md
+
+# 3. Disparity shift 0 vs 50 (1280x720 High Accuracy): the same distance for both (0.60 m: inside both ranges,
+#    the noise must be equal), then each at its own working distance (shift 50 at 0.47 m, below shift 0's Min-Z)
+sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:0,1280x720:ha:50 > probe-shift-0.60m.md
+sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:0,1280x720:ha:50 > probe-shift-0.47m.md
+
+# 4. Everything at once (8 configurations, ~40 s), once per distance: 0.40, 0.47, 0.60 m
+sudo build/helper/IntelFaceScanHelper --probe --configs \
+  1280x720:ha:0,1280x720:ha:50,1280x720:hd:0,1280x720:hd:50,848x480:ha:0,848x480:ha:50,848x480:hd:0,848x480:hd:50 \
+  > probe-all-0.47m.md
+
+# 5. Min-Z of one configuration: start ~0.7 m from the wall; when stderr says "Min-Z test: move ...", move the
+#    camera slowly toward the wall for 30 s (it prints distance and ROI fill once per second)
+sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:50 --minz 30 --raw-only > probe-minz-shift50.md
+
+# 6. Skin: a person's cheek filling the central 10% at 0.47 m, person still
+sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:50,1280x720:hd:50 --roi 0.1 > probe-skin.md
+
+# Afterwards: hand the camera back to macOS (the probe does not re-enumerate it; or unplug and replug it)
+sudo build/helper/IntelFaceScanHelper --release -w
 ```
 
-Default matrix: 1280×720 and 848×480 × High Accuracy and High Density × disparity shift 0, 50, 100, each raw
-(no filters) and filtered (face-scan filters without the distance threshold), 30 warm-up frames after each change,
-30 measured frames, central 30% ROI. Ctrl-C stops cleanly and prints what was measured.
+Without `--configs` the probe runs the default matrix (1280×720 and 848×480 × High Accuracy and High Density ×
+shift 0, 50, 100: 12 configurations, ~1 min). Other options: `--frames N` and `--warmup N` (default 30),
+`--roi F` (central fraction of width and height, default 0.3), `--raw-only` / `--filtered-only`, `--json` (JSON
+only). Progress goes to stderr, the report to stdout. Ctrl-C stops cleanly and prints what was measured so far.
+`--playback FILE` measures a recording instead (development; no sudo).
 
-1. **Target.** A flat, matte, textured wall (or a large board) — the projector pattern provides texture, but a
-   bare glossy wall is not representative. Camera on a tripod, optical axis perpendicular to the wall, nothing
-   moving, no sunlight on the wall. Let the camera warm up 10 minutes (depth drifts while the projector warms).
-2. **Distances.** Run the full matrix at 0.40, 0.50 and 0.60 m (lens front to wall; the probe reports the median
-   it measures). Configurations whose Min-Z/Max-Z exclude the distance show a low fill rate — expected, and the
-   table prints the theoretical range next to the result.
-3. **What the columns mean.** *Plane RMS*: RMS distance of the ROI points to their best-fit plane (spatial noise +
-   wall flatness). *Subpixel RMS*: the same as disparity error (px), comparable to the 0.08 px of the theory.
-   *Temporal noise*: median over ROI pixels of the per-pixel standard deviation across the frames. *Fill*: valid
-   pixels in the ROI / image. *Nearest valid*: 0.5th percentile of valid depths in the image.
-4. **Min-Z.** `--minz 30` with the configuration under test: start ~0.7 m from the wall, move the camera slowly
-   toward it; the probe reports the nearest distance at which ≥ 90% of the ROI still has depth.
-5. **Skin.** Repeat 1280×720 High Accuracy vs High Density at 0.47 m with a person's cheek filling the ROI
-   (`--roi 0.1`, person still) to check the fill rate on skin.
-6. Paste the markdown tables below and keep the JSON next to them; decide preset and shift from the results.
+**Reading the output.** For each configuration the table has a *raw* row (no filters) and a *filtered* row (the
+face-scan filters without the distance threshold). Columns (JSON keys of `results[].raw` / `.filtered` /
+`.theory` in brackets):
+
+| Column | Meaning | What to look for |
+|---|---|---|
+| Min-Z / Max-Z (theory) | f·B / (126 + shift) and f·B / shift with the camera's calibrated fx and baseline (`theory.min_z_m`, `max_z_m`; null = ∞) | the wall distance must lie inside, otherwise fill collapses: expected, not a defect |
+| Median distance | median depth in the ROI (`median_m`) | within ~2% of the tape measure (the depth origin sits a few mm behind the front glass); larger offsets are a calibration problem (on-chip calibration in the RealSense Viewer) |
+| Fill ROI | valid pixels in the ROI (`fill_rate`) | ≥ 99% on a textured wall inside the range; < 95%: out of range, too little texture, or over/under-exposure |
+| Fill image | valid pixels in the whole image (`full_fill_rate`) | context only (includes everything around the wall) |
+| Plane RMS | RMS distance of the ROI points to their least-squares plane, mm (`plane_rms_mm`) | the spatial noise: compare with *RMS theory*; up to ~1.5× is normal, > 2× means a problem (wall not flat, glossy, tilted, laser too weak) |
+| Subpixel RMS | the same error as disparity, px (`subpixel_rms`) | independent of distance and resolution, so it compares configurations directly: ~0.05–0.1 px is good (Intel's figure 0.08), > 0.15 is poor |
+| Temporal noise | median over ROI pixels of each pixel's standard deviation across the frames, mm (`temporal_noise_mm`) | the frame-to-frame jitter that the temporal filter and TSDF fusion average out; usually below the plane RMS |
+| Nearest valid | 0.5th percentile of all valid depths in the image (`nearest_m`) | the near end of what this configuration sees |
+| RMS theory | z² · 0.08 px / (f·B) at the measured distance (`theory.rms_mm_at_median`) | the reference for *Plane RMS* |
+
+How to decide:
+
+1. **Resolution** (command 1): at the same distance 1280×720 should show ~1/1.5 of the 848×480 plane RMS with a
+   similar subpixel RMS and fill. Keep 1280×720 unless its fill is clearly lower or its subpixel RMS clearly higher.
+2. **Preset** (commands 2 and 6): High Density fills more but lets more outliers through. Keep High Accuracy when
+   its fill is ≥ 99% on the wall and ≥ 95% on skin; otherwise compare the plane RMS of both on skin and take High
+   Density if it is not worse by more than ~20%.
+3. **Disparity shift** (command 3): at 0.60 m shift 0 and 50 must give the same plane and subpixel RMS (the shift
+   moves the range, not the noise). At 0.47 m shift 0 is below its Min-Z (low fill) and shift 50 measures; its
+   plane RMS there against shift 0's at 0.60 m is the gain of scanning closer (theory: 0.27 vs 0.45 mm). Command 5
+   gives the real Min-Z: the face distance should stay ≥ Min-Z + 6 cm (nose), see "Working distance".
+4. Fill in the tables below (from the JSON next to the markdown) and keep the probe output files with them.
 
 ### Results (to be measured)
 
@@ -249,15 +332,24 @@ Camera: serial `____`, firmware `____`, calibrated fx at 1280×720 `____` px, ba
 
 ## Testing without a camera
 
-`helper/tests` is a standalone CMake project (the helper build can include it behind an option, see its
-`CMakeLists.txt`):
+`helper/tests` builds with the helper (`-DIFS_HELPER_TESTS=ON`, as CI does) or as a standalone CMake project:
 
 ```
-cmake -S helper/tests -B build/helper-tests -DIFS_SDK_DIR=$PWD/build/sdk/install
-cmake --build build/helper-tests -j
-build/helper-tests/capture-tests              # all tests; an argument filters by name, e.g. "playback"
-ctest --test-dir build/helper-tests --output-on-failure
+cmake -S helper -B build/helper -DIFS_SDK_DIR=$PWD/build/sdk/install -DIFS_HELPER_TESTS=ON
+cmake --build build/helper -j
+ctest --test-dir build/helper --output-on-failure
+build/helper/tests/capture-tests              # all tests; an argument filters by name, e.g. "playback"
+build/helper/tests/capture-tests bench        # the throughput benchmark (only when asked for by name)
+
+cmake -S helper/tests -B build/helper-tests -DIFS_SDK_DIR=$PWD/build/sdk/install   # standalone
+cmake --build build/helper-tests -j && build/helper-tests/capture-tests
 ```
+
+The tests do not depend on the machine's speed (a 3-core CI runner is several times slower than an M-series
+desktop, measured by running them at background QoS with competing load): non-real-time playback delivers every
+frame; real-time playback tests check only that framesets flow, stop when paused (after the queue drained) and
+resume; the live tests feed the software camera one frame at a time and wait for each frameset (bounded), after a
+warm-up frame per stream start.
 
 * `make-test-recording` writes synthetic D455 recordings for end-to-end tests of the other modules:
   ```
@@ -274,11 +366,14 @@ ctest --test-dir build/helper-tests --output-on-failure
   (`--yaw` degrees per frame), or a tilted plane. `--noise` adds stereo-like noise (σ at 1 m, scaled by z²),
   `--restart-at N` restarts the depth counter (firmware restart), `--fast` skips the real-time pacing. `.bag` output
   needs patch 0002.
-* `capture-tests` covers: configuration parsing and every rejection path, protocol names, extrinsics, ROI mapping,
-  restart detection, stereo-range formulas, the probe statistics, playback end to end on `.db3` and `.bag`
-  (plane order and sizes, intrinsics, extrinsics, IMU, metadata, timestamps, every frame delivered, aligned depth
-  against the ray-cast scene: > 97% within 3 mm), filters reducing noise, threshold, stream-restart events,
-  pause/resume/stop/replay, device info, the live code path on a software device (configure validation, options,
-  streaming, `.db3`/`.bag` recording while streaming and their playback), the probe on a recording, and the
-  throughput benchmark.
+* `capture-tests` covers: configuration parsing and every rejection path, protocol names, extrinsics, ROI mapping
+  (direction, scale, clamping, minimum size), restart detection, stereo-range formulas, the probe statistics,
+  playback end to end on `.db3` and `.bag` (plane order and sizes, intrinsics, extrinsics, IMU, metadata,
+  timestamps, every frame delivered, aligned depth against the ray-cast scene: > 97% within 3 mm), filters reducing
+  noise, threshold, stream-restart events, pause/resume/stop/replay (a pause survives stop/start), device info, the
+  live code path on a software device (configure validation, options, streaming, `.db3`/`.bag` recording while
+  streaming and their playback with every recorded frame, depth units changed while streaming), disconnect and
+  reconnect events with adoption of the new device instance and no callback after `shutdown()` (a recording loaded
+  into the watched context stands in for the camera), the probe on a recording, and the throughput benchmark
+  (`bench`, on request).
 * The probe runs on recordings too: `IntelFaceScanHelper --probe --playback /tmp/wall.db3 --frames 10`.
