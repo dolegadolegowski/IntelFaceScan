@@ -198,6 +198,34 @@ struct MeshClosingTests {
         #expect(mesh.triangleCount > 1200)
     }
 
+    /// The synthesized flags follow their vertices through withCoreMesh: xatlas renumbers the vertices of a small open
+    /// cap (one chart, no seam split, the same vertex count), smoothing moves them in place.
+    @Test func synthesizedFlagsFollowTheirVertices() throws {
+        var mesh = MeshFactory.icosphere(level: 3)
+        mesh.indices = stride(from: 0, to: mesh.indices.count, by: 3).flatMap { t -> [UInt32] in
+            let tri = Array(mesh.indices[t ..< t + 3])
+            return tri.reduce(SIMD3<Float>.zero) { $0 + mesh.positions[Int($1)] }.y / 3 > 0.07 ? tri : []
+        }
+        try mesh.withCoreMesh { try check(fr_mesh_clean($0, 0)) }
+        mesh.synthesized = mesh.positions.map { $0.y > 0.09 }
+        let flagged = Set(zip(mesh.positions, mesh.synthesized).filter(\.1).map(\.0))
+        let count = mesh.vertexCount
+        var uv = fr_uv_params()
+        fr_uv_params_default(&uv)
+        uv.texture_size = 256
+        try mesh.withCoreMesh { m in
+            try check(fr_mesh_compute_normals(m))
+            try check(fr_mesh_uv_unwrap(m, &uv, nil, nil))
+        }
+        #expect(mesh.vertexCount == count, "no seam split")
+        #expect(mesh.positions.indices.allSatisfy { mesh.synthesized[$0] == flagged.contains(mesh.positions[$0]) })
+        let before = mesh.synthesized
+        var params = fr_smooth_params()
+        fr_smooth_params_default(&params)
+        try mesh.withCoreMesh { try check(fr_mesh_smooth($0, &params)) }
+        #expect(mesh.synthesized == before)
+    }
+
     @Test func invalidParametersAreRejected() throws {
         var mesh = try Self.openSphere(level: 2, cut: 0.05)
         try mesh.withCoreMesh { m in
