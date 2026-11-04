@@ -231,8 +231,10 @@ minutes on the runner); `scripts/test.sh` takes ~5 of them, the runner being sev
 Timing-sensitive tests are less reliable there: the tests of a target share Swift's cooperative thread pool, which
 the synchronous reconstructions of other tests can fill (measured there: the synthetic camera rendered 0.32 s per
 frame, `ifscan reconstruct synthetic-camera --time-limit 5` ran in-process for 4 min); their upper bounds are loose
-for that reason. In November 2026 the image still reports macOS 27.0.1; the
-job and `scripts/build.sh` warn that the app needs 27.2 to run (building only needs the 27.2 SDK).
+for that reason. The runner has 3 cores and 7 GB of memory (the job logs both). In November 2026 the image still
+reports macOS 27.0.1; the job and `scripts/build.sh` warn that the app needs 27.2 to run (building only needs the
+27.2 SDK). Test code must not compare dates with `<=` or `>=`: those `Date` operators are back-deployed only before
+27.2, so a build for 27.2 calls the system's, which 27.0.1 lacks, and the test bundle does not load there.
 
 ## Troubleshooting
 
