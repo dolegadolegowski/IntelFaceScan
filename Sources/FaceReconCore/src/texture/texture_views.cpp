@@ -40,15 +40,17 @@ void render_zbuffer( const fr_mesh & m, frame_view & v )
     {
         const uint32_t * tri = m.indices + size_t( f ) * 3;
         const vec3 a = screen[tri[0]], b = screen[tri[1]], c = screen[tri[2]];
-        if( a.z <= 0 || b.z <= 0 || c.z <= 0 )
+        if( a.z <= 0 || b.z <= 0 || c.z <= 0 || ! finite( a ) || ! finite( b ) || ! finite( c ) )
             continue;
         const float area = ( b.x - a.x ) * ( c.y - a.y ) - ( b.y - a.y ) * ( c.x - a.x );
         if( ! ( std::fabs( area ) > 1e-12f ) )
             continue;
-        const int x0 = std::max( 0, int( std::ceil( std::min( { a.x, b.x, c.x } ) ) ) );
-        const int x1 = std::min( w - 1, int( std::floor( std::max( { a.x, b.x, c.x } ) ) ) );
-        const int y0 = std::max( 0, int( std::ceil( std::min( { a.y, b.y, c.y } ) ) ) );
-        const int y1 = std::min( h - 1, int( std::floor( std::max( { a.y, b.y, c.y } ) ) ) );
+        // Clamped before the conversion: vertices just in front of the camera project far outside the image.
+        auto pixel = [&]( float v, int n ) { return std::clamp( v, -2.f, float( n ) + 2.f ); };
+        const int x0 = std::max( 0, int( std::ceil( pixel( std::min( { a.x, b.x, c.x } ), w ) ) ) );
+        const int x1 = std::min( w - 1, int( std::floor( pixel( std::max( { a.x, b.x, c.x } ), w ) ) ) );
+        const int y0 = std::max( 0, int( std::ceil( pixel( std::min( { a.y, b.y, c.y } ), h ) ) ) );
+        const int y1 = std::min( h - 1, int( std::floor( pixel( std::max( { a.y, b.y, c.y } ), h ) ) ) );
         if( x0 > x1 || y0 > y1 )
             continue;
         const float inv_area = 1.f / area;

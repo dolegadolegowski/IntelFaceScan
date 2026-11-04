@@ -75,8 +75,12 @@ std::vector< int32_t > rasterize_atlas( const fr_mesh & m, int w, int h )
             const float lo_y = std::min( { t.y[0], t.y[1], t.y[2] } ) - margin, hi_y = std::max( { t.y[0], t.y[1], t.y[2] } ) + margin;
             if( ! std::isfinite( lo_x ) || ! std::isfinite( hi_x ) || ! std::isfinite( lo_y ) || ! std::isfinite( hi_y ) )
                 continue;
-            const int x0 = std::max( 0, int( std::ceil( lo_x - 0.5f ) ) ), x1 = std::min( w - 1, int( std::floor( hi_x - 0.5f ) ) );
-            const int y0 = std::max( 0, int( std::ceil( lo_y - 0.5f ) ) ), y1 = std::min( h - 1, int( std::floor( hi_y - 0.5f ) ) );
+            // Clamped before the conversion: UVs far outside [0, 1] must not overflow int.
+            auto texel = [&]( float v, int n ) { return std::clamp( v, -2.f, float( n ) + 2.f ); };
+            const int x0 = std::max( 0, int( std::ceil( texel( lo_x - 0.5f, w ) ) ) );
+            const int x1 = std::min( w - 1, int( std::floor( texel( hi_x - 0.5f, w ) ) ) );
+            const int y0 = std::max( 0, int( std::ceil( texel( lo_y - 0.5f, h ) ) ) );
+            const int y1 = std::min( h - 1, int( std::floor( texel( hi_y - 0.5f, h ) ) ) );
             for( int y = y0; y <= y1; ++y )
                 for( int x = x0; x <= x1; ++x )
                 {
