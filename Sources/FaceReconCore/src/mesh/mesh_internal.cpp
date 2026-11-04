@@ -363,5 +363,63 @@ void compute_vertex_normals( const float * p, uint32_t n, const uint32_t * idx, 
     } );
 }
 
+uint32_t remove_nonmanifold( const mesh_buffers & b, std::vector< uint8_t > & keep )
+{
+    struct edge_use
+    {
+        uint64_t key;  // undirected
+        uint32_t face;
+        uint8_t forward;
+    };
+    const uint32_t t = b.triangle_count();
+    std::vector< edge_use > uses;
+    uses.reserve( size_t( t ) * 3 );
+    for( uint32_t f = 0; f < t; ++f )
+    {
+        if( ! keep[f] )
+            continue;
+        const uint32_t * tri = &b.indices[size_t( f ) * 3];
+        for( int k = 0; k < 3; ++k )
+        {
+            const uint32_t a = tri[k], c = tri[( k + 1 ) % 3];
+            uses.push_back( { a < c ? ( uint64_t( a ) << 32 | c ) : ( uint64_t( c ) << 32 | a ), f, uint8_t( a < c ) } );
+        }
+    }
+    std::sort( uses.begin(), uses.end(), []( const edge_use & x, const edge_use & y ) {
+        return x.key != y.key ? x.key < y.key : x.face < y.face;
+    } );
+    auto area2 = [&]( uint32_t f ) {
+        const uint32_t * tri = &b.indices[size_t( f ) * 3];
+        const vec3 p0 = b.position( tri[0] );
+        return length2( cross( b.position( tri[1] ) - p0, b.position( tri[2] ) - p0 ) );
+    };
+    uint32_t removed = 0;
+    for( size_t s = 0; s < uses.size(); )
+    {
+        size_t e = s;
+        int count[2] = { 0, 0 };
+        while( e < uses.size() && uses[e].key == uses[s].key )
+            ++count[uses[e++].forward];
+        if( count[0] > 1 || count[1] > 1 )
+            for( int dir = 0; dir < 2; ++dir )
+            {
+                if( count[dir] < 2 )
+                    continue;
+                uint32_t best = ~0u;
+                for( size_t i = s; i < e; ++i )
+                    if( uses[i].forward == dir && ( best == ~0u || area2( uses[i].face ) > area2( best ) ) )
+                        best = uses[i].face;
+                for( size_t i = s; i < e; ++i )
+                    if( uses[i].forward == dir && uses[i].face != best && keep[uses[i].face] )
+                    {
+                        keep[uses[i].face] = 0;
+                        ++removed;
+                    }
+            }
+        s = e;
+    }
+    return removed;
+}
+
 }  // namespace mesh
 }  // namespace fr

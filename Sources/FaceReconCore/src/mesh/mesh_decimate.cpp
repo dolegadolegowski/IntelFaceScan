@@ -1,6 +1,7 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
-// Quadric edge-collapse decimation through meshoptimizer (meshopt_simplifyWithAttributes) with locked borders.
+// Quadric edge-collapse decimation through meshoptimizer (meshopt_simplifyWithAttributes) with locked borders, then a
+// repair of the non-manifold edges the simplifier can leave.
 
 #include "fr_mesh.h"
 #include "mesh_internal.h"
@@ -80,6 +81,26 @@ fr_status fr_mesh_decimate( fr_mesh * mesh, uint32_t target_triangles, float max
                                       sizeof( float ) * 3, target_indices, target_error, options, &result_error );
         out.resize( count );
         b.indices.swap( out );
+        // The simplifier does not keep the surface manifold: on a closed 556k-triangle head decimated to 60k, 74 edges
+        // ended up with three or four triangles. Those triangles go but the largest per direction, and the small holes
+        // that leaves (only those) are filled again.
+        std::vector< uint8_t > keep( b.triangle_count(), 1 );
+        if( remove_nonmanifold( b, keep ) )
+        {
+            std::vector< uint32_t > kept;
+            std::vector< uint8_t > torn( b.vertex_count(), 0 );
+            kept.reserve( b.indices.size() );
+            for( uint32_t f = 0; f < b.triangle_count(); ++f )
+            {
+                const uint32_t * tri = &b.indices[size_t( f ) * 3];
+                if( keep[f] )
+                    kept.insert( kept.end(), tri, tri + 3 );
+                else
+                    torn[tri[0]] = torn[tri[1]] = torn[tri[2]] = 1;
+            }
+            b.indices.swap( kept );
+            fill_small_holes( b, 16, torn );
+        }
         b.remove_unreferenced();
         if( b.has_normals )
             compute_vertex_normals( b.positions.data(), b.vertex_count(), b.indices.data(), b.triangle_count(),

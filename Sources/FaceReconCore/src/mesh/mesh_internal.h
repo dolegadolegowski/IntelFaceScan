@@ -286,5 +286,17 @@ std::vector< uint32_t > remap_indices( const uint32_t * indices, size_t count, c
 void compute_vertex_normals( const float * positions, uint32_t vertex_count, const uint32_t * indices,
                              uint32_t triangle_count, float * normals, bool share_coincident = false );
 
+// On every edge used twice in one direction or by more than two triangles, only the largest triangle per direction
+// stays: keep[f] = 0 for the others (keep: one flag per triangle, 0 = already removed). Removing triangles never makes
+// another edge non-manifold. Returns the number of triangles removed. Welding collapses short edges without regard to
+// the topology (four marching-cubes vertices within a micrometer of a voxel corner merged into one left an edge with
+// three triangles on a head scan), and so does quadric decimation.
+uint32_t remove_nonmanifold( const mesh_buffers & b, std::vector< uint8_t > & keep );
+
+// Fills the boundary loops with at most max_edges edges that pass through a marked vertex (mesh_holes.cpp: minimal
+// triangulation, refined and faired, the variant with the fewest folds), the longest one included: the small holes an
+// operation tore into a surface around the marked vertices. Returns the number of loops filled.
+uint32_t fill_small_holes( mesh_buffers & b, uint32_t max_edges, const std::vector< uint8_t > & marked );
+
 }  // namespace mesh
 }  // namespace fr

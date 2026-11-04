@@ -272,6 +272,7 @@ fr_status fr_mesh_clean( fr_mesh * mesh, float epsilon_m )
         for( size_t i = 1; i < keys.size(); ++i )
             if( std::equal( keys[i].v, keys[i].v + 3, keys[i - 1].v ) )
                 keep[keys[i].index] = 0;
+        remove_nonmanifold( b, keep );
 
         std::vector< uint32_t > indices;
         indices.reserve( b.indices.size() );
