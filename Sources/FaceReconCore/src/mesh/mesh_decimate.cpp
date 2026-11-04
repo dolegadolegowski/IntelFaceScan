@@ -8,7 +8,10 @@
 
 #include "meshoptimizer.h"
 
+#include <algorithm>
+#include <array>
 #include <cfloat>
+#include <unordered_set>
 
 using namespace fr::mesh;
 
@@ -20,6 +23,92 @@ namespace
 constexpr float color_weight = 0.01f;
 constexpr float normal_weight = 0.01f;
 constexpr float uv_weight = 1.0f;
+
+// Opposed copies of a triangle (the same three vertices in both orientations) enclose nothing: the simplifier leaves
+// such fins where it collapses a thin piece (two at 60k triangles on the closed synthetic head, hanging off the surface
+// at a single vertex). Both copies go (keep[f] = 0). Returns the number of triangles removed.
+uint32_t remove_opposed_pairs( const mesh_buffers & b, std::vector< uint8_t > & keep )
+{
+    struct key
+    {
+        std::array< uint32_t, 3 > v;
+        uint32_t face;
+    };
+    std::vector< key > keys;
+    keys.reserve( b.triangle_count() );
+    for( uint32_t f = 0; f < b.triangle_count(); ++f )
+    {
+        key k{ { b.indices[size_t( f ) * 3], b.indices[size_t( f ) * 3 + 1], b.indices[size_t( f ) * 3 + 2] }, f };
+        std::sort( k.v.begin(), k.v.end() );
+        keys.push_back( k );
+    }
+    std::sort( keys.begin(), keys.end(), []( const key & x, const key & y ) { return x.v != y.v ? x.v < y.v : x.face < y.face; } );
+    uint32_t removed = 0;
+    for( size_t s = 0; s < keys.size(); )
+    {
+        size_t e = s + 1;
+        while( e < keys.size() && keys[e].v == keys[s].v )
+            ++e;
+        if( e - s > 1 )
+            for( size_t i = s; i < e; ++i )
+                if( keep[keys[i].face] )
+                {
+                    keep[keys[i].face] = 0;
+                    ++removed;
+                }
+        s = e;
+    }
+    return removed;
+}
+
+using triple = std::array< uint32_t, 3 >;
+
+triple sorted_triangle( const std::vector< uint32_t > & indices, size_t f )
+{
+    triple v = { indices[f * 3], indices[f * 3 + 1], indices[f * 3 + 2] };
+    std::sort( v.begin(), v.end() );
+    return v;
+}
+
+// Triangles none of whose edges is shared with another kept triangle (keep[f] != 0; all with keep = nullptr).
+std::vector< uint32_t > loose_triangles( const std::vector< uint32_t > & indices, const std::vector< uint8_t > * keep )
+{
+    const size_t t = indices.size() / 3;
+    std::unordered_set< uint64_t > directed;
+    directed.reserve( indices.size() );
+    for( size_t f = 0; f < t; ++f )
+        if( ! keep || ( *keep )[f] )
+            for( int k = 0; k < 3; ++k )
+                directed.insert( uint64_t( indices[f * 3 + k] ) << 32 | indices[f * 3 + ( k + 1 ) % 3] );
+    std::vector< uint32_t > out;
+    for( size_t f = 0; f < t; ++f )
+    {
+        if( keep && ! ( *keep )[f] )
+            continue;
+        bool shared = false;
+        for( int k = 0; k < 3 && ! shared; ++k )
+            shared = directed.count( uint64_t( indices[f * 3 + ( k + 1 ) % 3] ) << 32 | indices[f * 3 + k] ) > 0;
+        if( ! shared )
+            out.push_back( uint32_t( f ) );
+    }
+    return out;
+}
+
+// Triangles the simplifier (or the repair above) cut loose: no edge shared with another triangle, attached at most at
+// a vertex (one at 30k triangles on the closed synthetic head: three boundary edges that no filling can close, its
+// opposed copy being the only candidate). Loose triangles of the input (input_loose: sorted triples, sorted) stay.
+// Returns the number removed.
+uint32_t remove_loose_triangles( const mesh_buffers & b, std::vector< uint8_t > & keep, const std::vector< triple > & input_loose )
+{
+    uint32_t removed = 0;
+    for( uint32_t f : loose_triangles( b.indices, &keep ) )
+        if( ! std::binary_search( input_loose.begin(), input_loose.end(), sorted_triangle( b.indices, f ) ) )
+        {
+            keep[f] = 0;
+            ++removed;
+        }
+    return removed;
+}
 }  // namespace
 
 extern "C" {
@@ -65,6 +154,10 @@ fr_status fr_mesh_decimate( fr_mesh * mesh, uint32_t target_triangles, float max
                     *a++ = b.uvs[v * 2 + k];
         }
 
+        std::vector< triple > input_loose;
+        for( uint32_t f : loose_triangles( b.indices, nullptr ) )
+            input_loose.push_back( sorted_triangle( b.indices, f ) );
+        std::sort( input_loose.begin(), input_loose.end() );
         std::vector< uint32_t > out( b.indices.size() );
         const size_t target_indices = size_t( target_triangles ) * 3;
         const float target_error = max_error_m > 0 ? max_error_m : FLT_MAX;
@@ -82,10 +175,14 @@ fr_status fr_mesh_decimate( fr_mesh * mesh, uint32_t target_triangles, float max
         out.resize( count );
         b.indices.swap( out );
         // The simplifier does not keep the surface manifold: on a closed 556k-triangle head decimated to 60k, 74 edges
-        // ended up with three or four triangles. Those triangles go but the largest per direction, and the small holes
-        // that leaves (only those) are filled again.
+        // ended up with three or four triangles. Those triangles go but the largest per direction (after the fins of
+        // opposed triangle pairs), then the triangles cut loose, and the small holes that leaves (only those) are
+        // filled again.
         std::vector< uint8_t > keep( b.triangle_count(), 1 );
-        if( remove_nonmanifold( b, keep ) )
+        uint32_t removed = remove_opposed_pairs( b, keep );
+        removed += remove_nonmanifold( b, keep );
+        removed += remove_loose_triangles( b, keep, input_loose );
+        if( removed )
         {
             std::vector< uint32_t > kept;
             std::vector< uint8_t > torn( b.vertex_count(), 0 );

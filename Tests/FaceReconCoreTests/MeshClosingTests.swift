@@ -177,6 +177,27 @@ struct MeshClosingTests {
         #expect(undirected.values.allSatisfy { $0 <= 2 })
     }
 
+    /// meshoptimizer collapses thin closed pieces into fins: two opposed copies of a triangle, every edge used twice
+    /// but enclosing nothing (two at 60k triangles on the closed synthetic head; a viewer's weld turns them into a lone
+    /// triangle with three open edges). A flat tetrahedron next to a sphere is such a piece: its apex is the cheapest
+    /// collapse. fr_mesh_decimate removes the fins and leaves the rest closed.
+    @Test func decimationLeavesNoFins() throws {
+        var mesh = MeshFactory.icosphere(level: 3)
+        let base = UInt32(mesh.vertexCount)
+        mesh.positions += [[0.2, 0, 0], [0.21, 0, 0], [0.2, 0.01, 0], [0.203, 0.003, 0.00001]]
+        mesh.indices += [base, base + 2, base + 1, base, base + 1, base + 3, base + 1, base + 2, base + 3, base + 2, base, base + 3]
+        #expect(MeshMeasure.topology(mesh).boundaryEdges == 0 && MeshMeasure.topology(mesh).consistent)
+        let target = UInt32(mesh.triangleCount - 2)
+        try mesh.withCoreMesh { try check(fr_mesh_decimate($0, target, 0)) }
+        var copies: [[UInt32]: Int] = [:]
+        for t in 0 ..< mesh.triangleCount { copies[Array(mesh.indices[3 * t ..< 3 * t + 3]).sorted(), default: 0] += 1 }
+        #expect(copies.values.allSatisfy { $0 == 1 }, "no opposed copies of a triangle")
+        let topology = MeshMeasure.topology(mesh)
+        #expect(topology.boundaryEdges == 0 && topology.consistent)
+        #expect(mesh.positions.allSatisfy { simd_length($0) < 0.15 }, "the flat tetrahedron is gone, the sphere stays")
+        #expect(mesh.triangleCount > 1200)
+    }
+
     @Test func invalidParametersAreRejected() throws {
         var mesh = try Self.openSphere(level: 2, cut: 0.05)
         try mesh.withCoreMesh { m in

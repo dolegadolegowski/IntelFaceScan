@@ -86,7 +86,9 @@ fr_status fr_mesh_fill_holes_ex(fr_mesh *mesh, const fr_fill_params *params, fr_
 fr_status fr_mesh_fill_holes(fr_mesh *mesh, uint32_t max_hole_edges, uint32_t *filled_holes /* nullable */);
 
 /* Quadric decimation to target_triangles (or until max_error_m is reached); preserves borders and attributes.
-   Non-manifold edges the simplifier leaves are repaired (their extra triangles removed, the small holes filled). */
+   What the simplifier leaves of a manifold surface is repaired: fins (opposed copies of a triangle) and triangles it
+   cut loose are removed, as are the extra triangles on non-manifold edges, and the small holes that leaves are
+   filled. */
 fr_status fr_mesh_decimate(fr_mesh *mesh, uint32_t target_triangles, float max_error_m);
 
 /* Removes the part of the mesh on the negative side of the plane (point, normal); keeps where normal points. */
