@@ -15,9 +15,8 @@ let thirdParty = "../../third_party"
 let packagePaths = Set([Context.packageDirectory,
                         URL(fileURLWithPath: Context.packageDirectory).resolvingSymlinksInPath().path])
 let filePrefixMap = packagePaths.sorted().map { "-ffile-prefix-map=\($0)=." }
-// The linker's debug map (the absolute paths of every object file and source folder) would be in the shipped
-// executables too; release builds drop it (-S). Symbols stay, so crash reports still name functions.
-let releaseLinkerFlags = LinkerSetting.unsafeFlags(["-Xlinker", "-S"], .when(configuration: .release))
+// The linker's debug map (the absolute paths of every object file and source folder) stays in the executables under
+// .build, so dsymutil can make dSYMs from them; scripts/bundle-app.sh strips it (strip -S) from the bundled copies.
 
 let package = Package(
     name: "IntelFaceScan",
@@ -90,14 +89,12 @@ let package = Package(
         .executableTarget(
             name: "IntelFaceScanApp",
             dependencies: ["CameraKit", "ScanKit", "ReconKit", "SyntheticData"],
-            swiftSettings: [.swiftLanguageMode(.v5)],
-            linkerSettings: [releaseLinkerFlags]),
+            swiftSettings: [.swiftLanguageMode(.v5)]),
 
         .executableTarget(
             name: "ifscan",
             dependencies: ["CameraKit", "ScanKit", "ReconKit", "SyntheticData"],
-            swiftSettings: [.swiftLanguageMode(.v5)],
-            linkerSettings: [releaseLinkerFlags]),
+            swiftSettings: [.swiftLanguageMode(.v5)]),
 
         .testTarget(
             name: "FaceReconCoreTests",

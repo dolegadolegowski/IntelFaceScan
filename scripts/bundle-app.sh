@@ -11,7 +11,8 @@
 #   Helpers/rs-macos-release            recovery: hands a camera left captured by a crashed helper back to macOS
 #   Frameworks/librealsense2.X.Y.dylib  install name @rpath/librealsense2.X.Y.dylib
 #   Resources/AppIcon.icns              rendered by tools/release/make-app-icon.swift
-# Every Mach-O is signed ad hoc, inside out (Apple Silicon runs nothing unsigned).
+# Every Mach-O is signed ad hoc, inside out (Apple Silicon runs nothing unsigned). Release bundles ship the two Swift
+# executables without the linker's debug map (strip -S); build/dSYMs/ keeps their debug information (not shipped).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,6 +21,7 @@ SDK_PREFIX="${IFS_SDK_DIR:-$ROOT/build/sdk}/install"
 HELPER_BUILD="$ROOT/build/helper"
 TOOLS="$ROOT/build/tools"
 APP="$ROOT/build/IntelFaceScan.app"
+DSYMS="$ROOT/build/dSYMs"
 DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-27.2}"
 BUNDLE_ID="io.github.dolegadolegowski.IntelFaceScan"
 VERSION="0.1.0"
@@ -41,7 +43,7 @@ LIBNAME="$(otool -L "$HELPER" | awk '$1 ~ /^@rpath\/librealsense2/ { sub("@rpath
 mkdir -p "$TOOLS"
 # Small tools, rebuilt when their source changed.
 if [ ! -x "$TOOLS/rs-macos-release" ] || [ "$ROOT/tools/release/rs-macos-release.c" -nt "$TOOLS/rs-macos-release" ]; then
-    clang -O2 -Wall -arch arm64 -mmacosx-version-min="$DEPLOYMENT_TARGET" $PREFIX_MAP \
+    clang -O2 -Wall -arch arm64 -mmacosx-version-min="$DEPLOYMENT_TARGET" "$PREFIX_MAP" \
         "$ROOT/tools/release/rs-macos-release.c" -framework IOKit -framework CoreFoundation \
         -o "$TOOLS/rs-macos-release"
 fi
@@ -69,6 +71,18 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Frameworks
 
 cp "$BIN/IntelFaceScan" "$APP/Contents/MacOS/IntelFaceScan"
 cp "$BIN/ifscan" "$APP/Contents/MacOS/ifscan"
+if [ "$CONFIG" = "release" ]; then
+    # The linker's debug map lists the absolute paths of every object file (and with them the builder's user name):
+    # strip it from the shipped copies; the symbols stay, so crash reports still name functions. dSYMs made from the
+    # unstripped builds (same UUID) resolve release crash logs to source lines, e.g.
+    #   atos -o build/dSYMs/IntelFaceScan.dSYM/Contents/Resources/DWARF/IntelFaceScan -l <load address> <address>
+    rm -rf "$DSYMS"
+    mkdir -p "$DSYMS"
+    for exe in IntelFaceScan ifscan; do
+        strip -S "$APP/Contents/MacOS/$exe"
+        dsymutil "$BIN/$exe" -o "$DSYMS/$exe.dSYM" || echo "bundle-app.sh: warning: no dSYM for $exe" >&2
+    done
+fi
 # SwiftPM resource bundles, should a target ever declare resources.
 for bundle in "$BIN"/*.bundle; do
     [ -d "$bundle" ] && cp -R "$bundle" "$APP/Contents/Resources/"
