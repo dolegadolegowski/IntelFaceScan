@@ -475,8 +475,14 @@ final class AppModel {
         screen = .scanning
     }
 
-    func skipPose() {
-        scanController?.skipPose()
+    /// Skips the pose the skip button names (ScanUpdate.skipPose), not whatever pose the controller works on by the
+    /// time the click arrives.
+    func skipPose(_ pose: ScanPose) {
+        scanController?.skipPose(pose)
+    }
+
+    func skipRemainingOptionalPoses() {
+        scanController?.skipRemainingOptionalPoses()
     }
 
     /// Ends the scan with the keyframes accepted so far.

@@ -180,7 +180,13 @@ enum S {
     static var guidedScan: String { tr("Guided scan", "Skan prowadzony") }
     static var overallProgress: String { tr("Overall", "Całość") }
     static var coverage: String { tr("Covered head regions", "Pokryte obszary głowy") }
-    static var skipPose: String { tr("Skip pose", "Pomiń pozę") }
+    /// The skip button, naming the pose it skips ("Skip Up-left").
+    static func skipPose(_ pose: ScanPose) -> String {
+        tr("Skip \(poseName(pose))", "Pomiń: \(poseName(pose).lowercased())")
+    }
+    static var skipRemainingOptionalPoses: String {
+        tr("Skip the remaining optional poses", "Pomiń pozostałe pozy opcjonalne")
+    }
     static var finishScan: String { tr("Finish", "Zakończ") }
     static var cancelScan: String { tr("Cancel", "Anuluj") }
     static func keyframes(_ n: Int) -> String {
@@ -239,10 +245,64 @@ enum S {
         }
     }
 
-    /// The banner text: a turn that is not within the tolerance says which way to correct it.
+    /// The banner text: a turn that is not within the tolerance says which way to correct it, and with no active pose
+    /// the directions still open.
     static func instruction(for update: ScanUpdate) -> String {
         if case .turn = update.instructionKind, let hint = update.turnHint, hint != .further { return turnHint(hint) }
+        if update.instructionKind == .turnAnyDirection { return turnAnyDirection(update.unfinishedPoses) }
         return instruction(update.instructionKind)
+    }
+
+    /// Turn toward any of the given poses (the front pose left out). Two to four are listed, the last after "or", so
+    /// that no order shows: "Turn your head up, down, to your left or right" (the sides last, as one item when both
+    /// are open). One gets its own instruction; more than four only "Turn your head in any direction", the pose
+    /// guide's arrows showing which.
+    static func turnAnyDirection(_ poses: [ScanPose]) -> String {
+        let anyDirection = tr("Turn your head in any direction", "Obróć głowę w dowolną stronę")
+        let open = ScanPose.allCases.filter { $0 != .front && poses.contains($0) }
+        if open.count == 1 { return poseInstruction(open[0]) }
+        guard (2 ... 4).contains(open.count) else { return anyDirection }
+        var items = open.filter { $0 != .left && $0 != .right }.map(direction)
+        let sides = open.contains(.left) && open.contains(.right)
+        if sides {
+            items.append(tr("to your left or right", "w swoją lewą lub prawą stronę"))
+        } else if let side = open.first(where: { $0 == .left || $0 == .right }) {
+            items.append(direction(side))
+        }
+        // The two sides already end in "or".
+        let list = sides ? items.joined(separator: ", ")
+            : items.dropLast().joined(separator: ", ") + tr(" or ", " lub ") + items[items.count - 1]
+        return tr("Turn your head \(list)", "Obróć głowę \(list)")
+    }
+
+    /// One-letter words ("w", "z", "i" in Polish) bound to the next word with a no-break space, so that a wrapped
+    /// banner does not end a line with one ("Obróć głowę w dół, w / swoją lewą lub prawą stronę").
+    static func keepingShortWordsAttached(_ text: String) -> String {
+        var words = text.components(separatedBy: " ")
+        guard words.count > 1 else { return text }
+        var result = ""
+        while !words.isEmpty {
+            let word = words.removeFirst()
+            result += word
+            guard !words.isEmpty else { break }
+            result += word.count == 1 && word.first?.isLetter == true ? "\u{00A0}" : " "
+        }
+        return result
+    }
+
+    /// A pose as a direction to turn in (the list of turnAnyDirection); the sides person-relative, like the poses.
+    static func direction(_ pose: ScanPose) -> String {
+        switch pose {
+        case .front: return tr("straight ahead", "prosto")
+        case .up: return tr("up", "w górę")
+        case .down: return tr("down", "w dół")
+        case .left: return tr("to your left", "w swoją lewą stronę")
+        case .right: return tr("to your right", "w swoją prawą stronę")
+        case .upLeft: return tr("up-left", "w lewo do góry")
+        case .upRight: return tr("up-right", "w prawo do góry")
+        case .downLeft: return tr("down-left", "w lewo w dół")
+        case .downRight: return tr("down-right", "w prawo w dół")
+        }
     }
 
     static func turnHint(_ hint: TurnHint) -> String {
@@ -264,6 +324,7 @@ enum S {
         case .moveBack: return moveBack
         case .lookAtCamera: return tr("Hold still, looking at the camera", "Nie ruszaj się, patrz w kamerę")
         case .turn(let pose, _, _): return poseInstruction(pose)
+        case .turnAnyDirection: return turnAnyDirection([])
         case .straightenHead: return tr("Keep your head straight", "Trzymaj głowę prosto")
         case .holdStill: return tr("Hold still…", "Nie ruszaj się…")
         case .capturing: return tr("Capturing — hold still", "Rejestracja — nie ruszaj się")

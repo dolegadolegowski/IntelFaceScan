@@ -400,6 +400,7 @@ import Testing
 
     @Test func instructionTextsExist() {
         #expect(!ScanInstruction.turn(.left, yawDelta: 10, pitchDelta: 0).englishText.isEmpty)
+        #expect(ScanInstruction.turnAnyDirection.englishText == "Turn your head in any direction")
         for r in ScanRejection.allCases { #expect(!r.englishText.isEmpty) }
         for p in ScanPose.allCases { #expect(!p.englishName.isEmpty) }
     }

@@ -37,7 +37,11 @@ import Testing
                 #expect(abs(kf.headPose.pitch - pose.target.pitch) <= 8)
             }
         }
-        // Poses are captured in the configured order and keyframe ids are sequential.
+        // The simulated user turns to the phase's pose (the first unfinished one), so the poses are captured in the
+        // configured order, each while it is the active pose; keyframe ids are sequential.
+        for u in sim.updates where u.acceptedKeyframe {
+            #expect(u.activePose == capture.keyframes[u.keyframeID ?? 0].scanPose)
+        }
         var order: [ScanPose] = []
         for kf in capture.keyframes where order.last != kf.scanPose { order.append(kf.scanPose) }
         #expect(order == ScanPose.required)
@@ -459,21 +463,47 @@ import Testing
     }
 
     @Test func turnInstructionPointsToTarget() async {
+        // No front pose: left is open from the start. A head 15 degrees toward it (a third of the target) is turned
+        // toward left, and the instruction shows the remaining 30 degrees.
         var configuration = ScanConfiguration.testOffline
         configuration.poses = [.left]
         let (controller, tracker) = makeController(configuration)
         var sim = ScanSimulation()
-        sim.user.speedDegPerSec = 0   // the user does not move: stays frontal
+        sim.user.speedDegPerSec = 0   // the user does not move
+        sim.user.yaw = 15
         await sim.run(controller, tracker: tracker, maxFrames: 30, until: { _ in false })
         guard case .turn(let pose, let yawDelta, let pitchDelta) = sim.updates.last?.instructionKind else {
             Issue.record("expected a turn instruction, got \(String(describing: sim.updates.last?.instructionKind))")
             return
         }
-        #expect(pose == .left)
-        #expect(abs(yawDelta - 45) < 0.5)
+        #expect(pose == .left && sim.updates.last?.activePose == .left)
+        #expect(abs(yawDelta - 30) < 0.5)
         #expect(abs(pitchDelta) < 0.5)
-        #expect(sim.updates.last?.angularErrorDeg ?? 0 > 40)
+        #expect(sim.updates.last?.angularErrorDeg ?? 0 > 25)
+        #expect(sim.updates.last?.targetDelta.map { abs($0.x - 30) < 0.5 } == true)
         #expect(sim.updates.last?.poseIndex == 0)
+
+        // Facing the camera, the head is turned toward no pose: turn in any direction (the only one left).
+        let (frontal, frontalTracker) = makeController(configuration)
+        var still = ScanSimulation()
+        still.user.speedDegPerSec = 0
+        await still.run(frontal, tracker: frontalTracker, maxFrames: 30, until: { _ in false })
+        #expect(still.updates.last?.instructionKind == .turnAnyDirection)
+        #expect(still.updates.last?.activePose == nil && still.updates.last?.angularErrorDeg == nil)
+        #expect(still.updates.last?.unfinishedPoses == [.left])
+
+        // The former fixed suggestion names left all along, with the whole turn.
+        configuration.posesInAnyOrder = false
+        let (suggesting, suggestingTracker) = makeController(configuration)
+        var old = ScanSimulation()
+        old.user.speedDegPerSec = 0
+        await old.run(suggesting, tracker: suggestingTracker, maxFrames: 30, until: { _ in false })
+        if case .turn(.left, let yawDelta, _) = old.updates.last?.instructionKind {
+            #expect(abs(yawDelta - 45) < 0.5)
+        } else {
+            Issue.record("expected a turn toward left, got \(String(describing: old.updates.last?.instructionKind))")
+        }
+        #expect(old.updates.last?.activePose == .left && old.updates.last?.angularErrorDeg ?? 0 > 40)
     }
 
     @Test func poseDeltaUsesFrontOffsetAndOvershootWindow() {

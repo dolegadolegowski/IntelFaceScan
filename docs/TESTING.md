@@ -16,10 +16,10 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
 * `scripts/test.sh` wraps `swift test`. With only the Command Line Tools installed it adds the Swift Testing macro
   plugin path that SwiftPM does not find on its own; with Xcode it is plain `swift test`. XCTest is not used.
 * The five test targets run one after another, as separate test runs (the tests of a target in parallel). Timing
-  on an M3 Ultra (28 cores, Command Line Tools), November 2026: ScanKitTests 118 tests ~20 s (Vision),
+  on an M3 Ultra (28 cores, Command Line Tools), November 2026: ScanKitTests 127 tests ~27 s (Vision),
   ReconKitTests 88 tests ~75–100 s (the longest single test sets it: the combined-imperfections reconstruction of
   `Pipeline robustness`; the two 1280×800 reconstructions of `Pipeline wide side views` run beside it),
-  IntelFaceScanAppTests 35 tests ~8 s, FaceReconCoreTests 91 tests ~7 s, CameraKitTests 77 tests ~27 s (most of it
+  IntelFaceScanAppTests 40 tests ~8 s, FaceReconCoreTests 91 tests ~7 s, CameraKitTests 77 tests ~27 s (most of it
   `Helper playback backpressure`); about 2.5–3 min in all when nothing changed, about 3.5 min from a clean debug
   build (about 40 s of it building).
 * The reconstruction tests of ReconKitTests (the suites and tests marked `.heavyReconstruction`,
@@ -59,13 +59,17 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
 | `ReconKitTests/SyntheticScanTests` | synthetic ground truth: depth equals an independent brute-force ray cast of the ground-truth mesh, back-projected depth lies on the surface, noise statistics, invalid pixels at silhouettes, `HeadPose` sign conventions, determinism, closed outward mesh |
 | `ReconKitTests/CLIArgumentTests`, `CLIToolTests` | `ifscan` parsing (32 invalid command lines), commands run in-process, exit codes, outputs checked before any work (unwritable paths, `--save-dataset` onto the input), ground-truth evaluation of a scan that does not start with the frontal pose (world frames aligned), `synthetic-camera` stopping at `--time-limit`, OBJ dialects |
 | `ReconKitTests/EndToEndSyntheticTests` | synthetic 1280×800 scan → `ReconstructionPipeline` (decimated to 60k triangles before texturing) → rotation error mean < 1°, worst frame < 1.5°, head misalignment < 5 mm, surface distance of the measured part (`ReconMesh.measuredSurface`: without the synthesized closing of the back of the head) mean < 1 mm and p95 < 2.5 mm, export frame upright; the same through `ifscan reconstruct`, and the exported OBJ measured through `--report` matches the report's whole-mesh distance. Enabled by `CoreAvailability` (the core is integrated); recordings from `IFS_TEST_RECORDINGS` |
-| `IntelFaceScanAppTests` | the app executable (`@testable import`): `AppModel` lifecycle with the fake-camera helper (skipped without `build/helper/IntelFaceScanHelper`), settings mapping and loading older stored settings, the scan sounds (which cue when, without playing) and the save panel's doubled extension, English/Polish strings, report notes and Polish plurals, result export success and failure paths, the SceneKit preview rendered offscreen; `IFS_APP_FULL_SCAN=1` runs the full guided synthetic scan, reconstruction and OBJ export through `AppModel`. A debug build renders the UI's screens to PNG: `$(swift build --show-bin-path)/IntelFaceScan --render-snapshots <dir>` (add `-AppleLanguages '(pl)'` for Polish); release builds, including the bundled app, ignore the option |
+| `IntelFaceScanAppTests` | the app executable (`@testable import`): `AppModel` lifecycle with the fake-camera helper (skipped without `build/helper/IntelFaceScanHelper`), settings mapping and loading older stored settings, the scan sounds (which cue when, without playing; one tick per reached pose in any order), the banner listing the open directions with no active pose (English and Polish, the last after "or", the sides person-relative, no list beyond four), the pose guide's arrows only for that instruction and the skip button naming its pose, and the save panel's doubled extension, English/Polish strings, report notes and Polish plurals, result export success and failure paths, the SceneKit preview rendered offscreen; `IFS_APP_FULL_SCAN=1` runs the full guided synthetic scan, reconstruction and OBJ export through `AppModel`. A debug build renders the UI's screens to PNG: `$(swift build --show-bin-path)/IntelFaceScan --render-snapshots <dir>` (add `-AppleLanguages '(pl)'` for Polish); release builds, including the bundled app, ignore the option |
 
 The other suites belong to the modules' work streams: `CameraKitTests` (wire format, JSON, the helper in fake-camera
 mode end to end, session lifecycle, frame broadcasting, playback backpressure, the helper's security checks),
 `ScanKitTests/Guidance*` (head tracker, masks, quality, scan controller; `Guidance pose recognition`: turns far
-beyond the target, any order after the front pose, short turns held, turn hints, with the head poses of the first
-live D455 session), `FaceReconCoreTests/Recon*`, `Mesh*`,
+beyond the target, no order after the front pose (a turn toward any unfinished pose makes it the active pose, near
+the front the instruction is to turn in any direction, turned toward a pose beyond its sideways tolerance the hint
+corrects it), short turns held toward whichever pose the head is heading to, their time kept per pose through
+jitter between neighbouring diagonals, the front pose within 12°, diagnostics per active pose, skipping exactly the
+pose the update names and the remaining optional ones, the former fixed suggestion with `posesInAnyOrder = false`,
+turn hints, with the head poses of the first live D455 session), `FaceReconCoreTests/Recon*`, `Mesh*`,
 `Texture*`, `ExportFile*` and `ReconKitTests/Pipeline*` (with the registration check, robustness to real-data
 imperfections and side views beyond 60°: `Pipeline wide side views`, 65° side views without depth beyond 60°
 incidence, all 12 keyframes used, side frames < 0.6° / 2.5 mm), `ReconLensDistortion*` (undistorting keyframes once

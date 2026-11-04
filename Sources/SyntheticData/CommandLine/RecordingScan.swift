@@ -17,8 +17,11 @@ public enum RecordingScan {
         /// true when the guided scan reached .finished (all poses captured) before the recording ended.
         public var completed: Bool
         public var failure: String?
-        /// Per scan pose: how often each rejection reason (or "turning" = not at the target yet) held a frame back.
+        /// Per scan pose (the active pose of the frame): how often each rejection reason (or "turning" = not at the
+        /// target yet) held a frame back.
         public var rejections: [ScanPose: [String: Int]] = [:]
+        /// The same for capture frames with no active pose (the head turned toward no unfinished pose, or not seen).
+        public var noActivePoseRejections: [String: Int] = [:]
     }
 
     public static func run(recording: URL, helper: URL, configuration: ScanConfiguration,
@@ -77,16 +80,18 @@ public enum RecordingScan {
                     let update = await controller.process(frame)
                     monitor.end()
                     trace?(update)
-                    if case .capturing(let pose) = update.phase, !update.acceptedKeyframe {
+                    if case .capturing = update.phase, !update.acceptedKeyframe {
                         let reason: String?
                         if let rejection = update.rejection {
                             reason = rejection.rawValue
                         } else if case .turn = update.instructionKind {
                             reason = "turning"
+                        } else if update.instructionKind == .turnAnyDirection {
+                            reason = "turning"
                         } else {
                             reason = nil   // holding the pose, or waiting between keyframes
                         }
-                        if let reason { monitor.reject(pose, reason) }
+                        if let reason { monitor.reject(update.activePose, reason) }
                     }
                     if update.phase == .finished {
                         monitor.complete()
@@ -129,12 +134,14 @@ public enum RecordingScan {
         if result.configuration == nil { result.configuration = capture }
         let state = monitor.state
         return Result(capture: result, device: device, framesProcessed: state.frames, completed: state.completed,
-                      failure: state.failure, rejections: state.rejections)
+                      failure: state.failure, rejections: state.rejections,
+                      noActivePoseRejections: state.noActivePoseRejections)
     }
 
     private final class Monitor: @unchecked Sendable {
         struct State { var frames = 0; var busy = false; var lastActivity = ProcessInfo.processInfo.systemUptime
-                       var completed = false; var failure: String?; var rejections: [ScanPose: [String: Int]] = [:] }
+                       var completed = false; var failure: String?; var rejections: [ScanPose: [String: Int]] = [:]
+                       var noActivePoseRejections: [String: Int] = [:] }
         private let lock = NSLock()
         private var current = State()
 
@@ -148,7 +155,15 @@ public enum RecordingScan {
             }
         }
         func complete() { lock.withLock { current.completed = true } }
-        func reject(_ pose: ScanPose, _ reason: String) { lock.withLock { current.rejections[pose, default: [:]][reason, default: 0] += 1 } }
+        func reject(_ pose: ScanPose?, _ reason: String) {
+            lock.withLock {
+                if let pose {
+                    current.rejections[pose, default: [:]][reason, default: 0] += 1
+                } else {
+                    current.noActivePoseRejections[reason, default: 0] += 1
+                }
+            }
+        }
         func fail(_ reason: String) { lock.withLock { current.failure = reason } }
         func idle(for seconds: Double) -> Bool {
             lock.withLock { !current.busy && ProcessInfo.processInfo.systemUptime - current.lastActivity >= seconds }

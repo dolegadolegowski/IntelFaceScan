@@ -84,6 +84,31 @@ enum DeveloperSnapshots {
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(fixture.model(screen: .scanning))
         if !write(panel, to: directory.appendingPathComponent("scan-panel.png")) { failures += 1 }
+        // The head turned toward no unfinished pose: arrows toward the open directions, the banner lists them.
+        let anyDirection = fixture.model(screen: .scanning, anyDirection: true)
+        let anyPanel = ScanPanelContent()
+            .padding(12)
+            .frame(width: 354, height: 760, alignment: .top)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .environment(anyDirection)
+        if !write(anyPanel, to: directory.appendingPathComponent("scan-panel-any-direction.png")) { failures += 1 }
+        let anyScreen = DetailScreenForSnapshot(screen: .scanning)
+            .padding(16)
+            .frame(width: 1240, height: 820)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .environment(anyDirection)
+        if !write(anyScreen, to: directory.appendingPathComponent("scan-any-direction.png")) { failures += 1 }
+        // The skip button with the diagonals on: naming the active pose, and with only optional poses left and the
+        // head turned toward none, skipping them all.
+        for (name, skip) in [("scan-panel-skip-pose", SkipFixture.activePose),
+                             ("scan-panel-skip-remaining", .remainingPoses)] {
+            let panel = ScanPanelContent()
+                .padding(12)
+                .frame(width: 354, height: 900, alignment: .top)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .environment(fixture.model(screen: .scanning, skip: skip))
+            if !write(panel, to: directory.appendingPathComponent("\(name).png")) { failures += 1 }
+        }
         // The result panel's report scrolls too.
         if let report = fixture.model(screen: .result).result?.report {
             let view = ReportView(report: report)
@@ -195,8 +220,9 @@ enum DeveloperSnapshots {
         return CGImageDestinationFinalize(destination)
     }
 
+    /// Renders with the pose guide's head held still, so that the same fixture renders the same image every time.
     private static func write<V: View>(_ view: V, to url: URL) -> Bool {
-        let renderer = ImageRenderer(content: view)
+        let renderer = ImageRenderer(content: view.environment(\.poseGuideAnimates, false))
         renderer.scale = 2
         guard let image = renderer.cgImage,
               let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
@@ -223,7 +249,16 @@ private struct DetailScreenForSnapshot: View {
     }
 }
 
-/// A plausible mid-scan state: front/up done, down partly, now turning left.
+/// The skip button's states (the diagonals on).
+private enum SkipFixture {
+    /// Turning toward up-left (optional): "Skip Up-left".
+    case activePose
+    /// The required poses done, the head near the front: "Skip the remaining optional poses".
+    case remainingPoses
+}
+
+/// A plausible mid-scan state: front, up and down done, left partly, now turning left (`anyDirection`: the head back
+/// near the front, yaw 3 degrees, turned toward no unfinished pose, as the controller reports it).
 @MainActor
 private struct Fixture {
     let device: DeviceInfo? = {
@@ -242,9 +277,14 @@ private struct Fixture {
     }()
 
     func model(screen: AppModel.Screen, sourceKind: CameraSourceKind = .synthetic, recording: Bool = false,
-               dataset: Bool = false, allPoses: Bool = false) -> AppModel {
+               dataset: Bool = false, allPoses: Bool = false, anyDirection: Bool = false,
+               skip: SkipFixture? = nil) -> AppModel {
         let model = AppModel(defaults: nil)
-        let configuration = ScanConfiguration()
+        var configuration = ScanConfiguration()
+        if skip != nil { configuration.poses = ScanPose.allCases }
+        // Where the head is: turning left, toward up-left, or near the front.
+        let head = anyDirection || skip == .remainingPoses ? HeadPose(yaw: 3, pitch: 1, roll: 2)
+            : skip == .activePose ? HeadPose(yaw: 21, pitch: 14, roll: 2) : HeadPose(yaw: 24, pitch: 1, roll: 2)
         let face = CGRect(x: 520, y: 220, width: 230, height: 280)
         var landmarks: [SIMD2<Float>] = []
         for i in 0 ..< 40 {
@@ -252,7 +292,7 @@ private struct Fixture {
             landmarks.append(SIMD2(635 + 100 * cos(a), 370 + 125 * sin(a)))
         }
         let tracking = TrackingState(imageSize: CGSize(width: 1280, height: 800), faceRect: face, landmarks: landmarks,
-                                     pose: HeadPose(yaw: 24, pitch: 1, roll: 2), distance: 0.63,
+                                     pose: head, distance: 0.63,
                                      distanceIsEstimate: false, advice: .ok, range: 0.56 ... 0.71)
         var update = ScanUpdate()
         update.phase = .capturing(.left)
@@ -263,7 +303,37 @@ private struct Fixture {
         update.keyframeCount = 10
         update.targetDelta = SIMD2(21, -1)
         update.angularErrorDeg = 21
+        update.activePose = .left
         update.poseIndex = 3
+        update.smoothedPose = head
+        switch skip {
+        case .activePose:
+            update.poseProgress = [.front: 1, .up: 1, .down: 1, .left: 1, .right: 0.67, .upLeft: 0.34, .upRight: 0,
+                                   .downLeft: 0, .downRight: 0]
+            update.overallProgress = 0.56
+            update.instructionKind = .turn(.upLeft, yawDelta: 9, pitchDelta: 6)
+            update.activePose = .upLeft
+            update.targetDelta = SIMD2(9, 6)
+            update.angularErrorDeg = 10.8
+            update.skipPose = .upLeft
+            update.phase = .capturing(.upLeft)
+        case .remainingPoses:
+            update.poseProgress = [.front: 1, .up: 1, .down: 1, .left: 1, .right: 1, .upLeft: 1, .upRight: 0,
+                                   .downLeft: 0, .downRight: 0.34]
+            update.overallProgress = 0.7
+            update.canSkipRemainingPoses = true
+            update.phase = .capturing(.upRight)
+        case nil:
+            break
+        }
+        if skip != nil { update.rejection = nil }
+        if anyDirection || skip == .remainingPoses {
+            update.instructionKind = .turnAnyDirection
+            update.rejection = nil
+            update.activePose = nil
+            update.targetDelta = nil
+            update.angularErrorDeg = nil
+        }
         let poses = [HeadPose](repeating: HeadPose(yaw: 0, pitch: 0, roll: 0), count: 3)
             + [HeadPose](repeating: HeadPose(yaw: 0, pitch: 25, roll: 0), count: 3)
             + [HeadPose](repeating: HeadPose(yaw: 0, pitch: -25, roll: 0), count: 3)

@@ -157,12 +157,17 @@ public enum IFScanTool {
         }
     }
 
-    /// Why frames were held back, per pose (most frequent reasons first).
+    /// Why frames were held back, per active pose (most frequent reasons first), then on no pose.
     static func logRejections(_ scan: RecordingScan.Result, _ log: (String) -> Void) {
+        func text(_ counts: [String: Int]) -> String {
+            counts.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+        }
         for pose in ScanPose.allCases {
             guard let counts = scan.rejections[pose], !counts.isEmpty else { continue }
-            let text = counts.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
-            log("  \(pose.rawValue): frames held back: \(text)")
+            log("  \(pose.rawValue): frames held back: \(text(counts))")
+        }
+        if !scan.noActivePoseRejections.isEmpty {
+            log("  no active pose: frames held back: \(text(scan.noActivePoseRejections))")
         }
     }
 

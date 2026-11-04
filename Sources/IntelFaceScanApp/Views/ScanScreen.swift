@@ -31,7 +31,7 @@ private struct InstructionBanner: View {
 
     var body: some View {
         let update = model.scanUpdate
-        let text = update.map { S.instruction(for: $0) } ?? ""
+        let text = update.map { S.keepingShortWordsAttached(S.instruction(for: $0)) } ?? ""
         VStack(spacing: 4) {
             if !text.isEmpty {
                 Text(text)
@@ -66,7 +66,8 @@ struct ScanPanelContent: View {
         let configuration = model.scanConfiguration
         VStack(alignment: .leading, spacing: 16) {
             Text(S.guidedScan).font(.title2.weight(.semibold))
-            PoseGuideView(update: update, mirrored: model.settings.mirrored, tolerance: configuration.angleTolerance)
+            PoseGuideView(update: update, mirrored: model.settings.mirrored,
+                          tolerance: configuration.tolerance(for: update?.activePose ?? .front))
                 .frame(height: 170)
                 .frame(maxWidth: .infinity)
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.08)))
@@ -93,10 +94,21 @@ struct ScanPanelContent: View {
                     .frame(height: 190)
             }
 
-            HStack {
-                if update?.canSkipPose == true {
-                    Button(S.skipPose, systemImage: "forward.end") { model.skipPose() }
+            // Skip names the pose it skips: the one the head is turned toward (no order to fall back to after the
+            // front pose), or, turned toward none with only optional poses left, all of them. Its own row (the
+            // Polish text does not fit beside Cancel and Finish), kept hidden while there is nothing to skip so that
+            // the buttons below do not jump as the head turns.
+            if configuration.poses.contains(where: { configuration.optionalPoses.contains($0) }) {
+                let pose = update?.skipPose
+                let remaining = pose == nil && update?.canSkipRemainingPoses == true
+                Button(pose.map(S.skipPose) ?? S.skipRemainingOptionalPoses, systemImage: "forward.end") {
+                    if let pose { model.skipPose(pose) } else if remaining { model.skipRemainingOptionalPoses() }
                 }
+                .opacity(pose != nil || remaining ? 1 : 0)
+                .disabled(pose == nil && !remaining)
+                .accessibilityHidden(pose == nil && !remaining)
+            }
+            HStack {
                 Spacer()
                 Button(S.cancelScan, role: .cancel) { model.cancelScan() }
                     .keyboardShortcut(.escape, modifiers: [])
@@ -116,7 +128,8 @@ private struct PoseProgressRow: View {
 
     var body: some View {
         let progress = update?.poseProgress[pose] ?? 0
-        let current = update?.phase == .capturing(pose)
+        // The pose the head is working on (after the front pose the scan suggests no order).
+        let current = update?.activePose == pose
         let skipped = update?.skippedPoses.contains(pose) ?? false
         HStack(spacing: 8) {
             Image(systemName: progress >= 1 ? "checkmark.circle.fill" : (skipped ? "forward.circle" : (current ? "smallcircle.filled.circle" : "circle")))
@@ -129,12 +142,12 @@ private struct PoseProgressRow: View {
                 .tint(progress >= 1 ? .green : .accentColor)
                 .opacity(skipped ? 0.4 : 1)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(current ? .isSelected : [])
         .animation(.easeOut(duration: 0.2), value: progress)
     }
 }
 
-/// Animated head turning toward the current pose, an arrow toward the remaining correction and a ring that fills
-/// while the pose is held.
 /// false holds the pose guide's head still (developer snapshots: AppKit's cacheDisplay drops 3D layer transforms and
 /// draws the rotated head at the wrong place). A plain key: the @Entry macro's plugin is not in the Command Line Tools.
 private struct PoseGuideAnimatesKey: EnvironmentKey {
@@ -148,20 +161,25 @@ extension EnvironmentValues {
     }
 }
 
+/// Animated head turning toward the active pose, an arrow toward the remaining correction and a ring that fills
+/// while the pose is held. With no active pose (after the front pose, the head turned toward none) the head faces
+/// front with an arrow toward every unfinished direction and a check mark on the finished ones.
 struct PoseGuideView: View {
     let update: ScanUpdate?
     let mirrored: Bool
+    /// The active pose's tolerance (ScanConfiguration.tolerance(for:)).
     let tolerance: Float
     @Environment(\.poseGuideAnimates) private var animates
 
     var body: some View {
-        let pose = currentPose
+        let pose = update?.activePose
+        let directions = Self.directions(update)
         let target: (yaw: Float, pitch: Float) = pose?.target ?? (yaw: 0, pitch: 0)
         // Direction of the pose on screen (as the user sees the mirrored preview).
         let poseDirection = ScanGuidance.screenDirection(yawDelta: target.yaw, pitchDelta: target.pitch, mirrored: mirrored)
         let delta = update?.targetDelta ?? SIMD2(0, 0)
         let correction = ScanGuidance.screenDirection(yawDelta: delta.x, pitchDelta: delta.y, mirrored: mirrored)
-        let atTarget = (update?.angularErrorDeg ?? .infinity) <= tolerance
+        let atTarget = pose != nil && (update?.angularErrorDeg ?? .infinity) <= tolerance
         TimelineView(.animation) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             // The head swings from the front toward the target and back, easing at both ends.
@@ -180,12 +198,23 @@ struct PoseGuideView: View {
                     .rotation3DEffect(.degrees(Double(dx * swing * 40)), axis: (x: 0, y: 1, z: 0), perspective: 0.6)
                     .rotation3DEffect(.degrees(Double(dy * swing * 30)), axis: (x: 1, y: 0, z: 0), perspective: 0.6)
                     .offset(x: dx * swing * 10, y: dy * swing * 8)
-                if !atTarget, correction != .zero {
+                if pose != nil, !atTarget, correction != .zero {
                     Image(systemName: "arrow.right")
                         .font(.system(size: 34, weight: .bold))
                         .foregroundStyle(Color.accentColor)
                         .rotationEffect(.radians(Double(atan2(correction.y, correction.x))))
                         .offset(x: CGFloat(correction.x) * (78 + 6 * swing), y: CGFloat(correction.y) * (78 + 6 * swing))
+                }
+                // Any direction: an arrow pulsing outward toward each unfinished pose, a check mark on finished ones.
+                ForEach(directions) { item in
+                    let target = item.pose.target
+                    let v = ScanGuidance.screenDirection(yawDelta: target.yaw, pitchDelta: target.pitch, mirrored: mirrored)
+                    let radius: CGFloat = item.done ? 66 : 68 + 5 * swing
+                    Image(systemName: item.done ? "checkmark.circle.fill" : "arrow.right")
+                        .font(.system(size: item.done ? 18 : 26, weight: .bold))
+                        .foregroundStyle(item.done ? Color.green : Color.accentColor)
+                        .rotationEffect(.radians(item.done ? 0 : Double(atan2(v.y, v.x))))
+                        .offset(x: CGFloat(v.x) * radius, y: CGFloat(v.y) * radius)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -195,12 +224,32 @@ struct PoseGuideView: View {
                 Text(S.poseName(pose)).font(.headline).padding(.bottom, 6)
             }
         }
-        .accessibilityLabel(currentPose.map { S.poseInstruction($0) } ?? "")
+        .accessibilityLabel(accessibilityText)
     }
 
-    private var currentPose: ScanPose? {
-        if case .capturing(let pose) = update?.phase { return pose }
-        return nil
+    struct Direction: Identifiable, Equatable {
+        var pose: ScanPose
+        var done: Bool
+        var id: ScanPose { pose }
+    }
+
+    /// The arrows and check marks of a turn in any direction: the poses after the front one, unfinished or done
+    /// (skipped ones are left out), in ScanPose order. Only with that instruction (after the front pose, the head
+    /// turned toward no unfinished pose), not on any frame without an active pose: no face, move closer or back, the
+    /// frame entering the front pose.
+    static func directions(_ update: ScanUpdate?) -> [Direction] {
+        guard let update, update.instructionKind == .turnAnyDirection else { return [] }
+        return ScanPose.allCases.compactMap { pose in
+            guard pose != .front, let progress = update.poseProgress[pose],
+                  !update.skippedPoses.contains(pose) else { return nil }
+            return Direction(pose: pose, done: progress >= 1)
+        }
+    }
+
+    private var accessibilityText: String {
+        if let pose = update?.activePose { return S.poseInstruction(pose) }
+        if let update, update.instructionKind == .turnAnyDirection { return S.turnAnyDirection(update.unfinishedPoses) }
+        return ""
     }
 }
 

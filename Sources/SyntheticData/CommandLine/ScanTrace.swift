@@ -1,15 +1,15 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
-// `ifscan reconstruct --trace trace.csv`: one CSV row per frame the guided scan processed (phase, pose, the head
-// pose Vision measured and the smoothed one the target check uses, the remaining turn, distance, the gates'
-// measurements and the rejection). It shows why a real session did not accept a pose, frame by frame.
+// `ifscan reconstruct --trace trace.csv`: one CSV row per frame the guided scan processed (phase, pose, the active
+// pose, the head pose Vision measured and the smoothed one the target check uses, the remaining turn, distance, the
+// gates' measurements and the rejection). It shows why a real session did not accept a pose, frame by frame.
 
 import Foundation
 import ScanKit
 
 public final class ScanTraceWriter: @unchecked Sendable {
     public static let header = [
-        "sequence", "t_s", "phase", "pose", "instruction", "rejection", "accepted", "keyframes",
+        "sequence", "t_s", "phase", "pose", "active_pose", "instruction", "rejection", "accepted", "keyframes",
         "face", "confidence", "yaw", "pitch", "roll", "smoothed_yaw", "smoothed_pitch", "smoothed_roll",
         "target_dyaw", "target_dpitch", "angular_error", "turn_hint", "speed_deg_s", "hold",
         "distance_m", "distance_estimate", "distance_advice", "range_min_m", "range_max_m",
@@ -51,8 +51,8 @@ public final class ScanTraceWriter: @unchecked Sendable {
         let rect = u.observation?.faceRect
         let fields: [String] = [
             String(u.sequence), d((u.timestampMs - startMs) / 1000), phaseName(u.phase), poseName(u.phase),
-            instructionName(u.instructionKind), u.rejection?.rawValue ?? "", u.acceptedKeyframe ? "1" : "0",
-            String(u.keyframeCount),
+            u.activePose?.rawValue ?? "", instructionName(u.instructionKind), u.rejection?.rawValue ?? "",
+            u.acceptedKeyframe ? "1" : "0", String(u.keyframeCount),
             u.observation == nil ? "0" : "1", f(pose?.confidence), f(pose?.yaw), f(pose?.pitch), f(pose?.roll),
             f(smoothed?.yaw), f(smoothed?.pitch), f(smoothed?.roll),
             f(u.targetDelta?.x), f(u.targetDelta?.y), f(u.angularErrorDeg), u.turnHint?.rawValue ?? "",
@@ -90,6 +90,7 @@ public final class ScanTraceWriter: @unchecked Sendable {
         case .moveBack: return "moveBack"
         case .lookAtCamera: return "lookAtCamera"
         case .turn: return "turn"
+        case .turnAnyDirection: return "turnAnyDirection"
         case .straightenHead: return "straightenHead"
         case .holdStill: return "holdStill"
         case .capturing: return "capturing"

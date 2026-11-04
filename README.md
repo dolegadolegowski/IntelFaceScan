@@ -25,8 +25,9 @@ millimeters** that opens in Blender and macOS Preview (MeshLab should read it to
 
 - **Live preview** of color and depth (Metal), the face distance and the recommended working range for the current
   camera configuration.
-- **Guided scan:** front → up → down → left → right (optional diagonals), with an animated head showing where to turn,
-  a progress ring and a coverage map. Targets are measured relative to *your* frontal pose. A frame is accepted only
+- **Guided scan:** front first, then up, down, left and right (optional diagonals) in any order: the app recognizes
+  which way you turn your head, with an animated head showing the directions still open, a progress ring and a
+  coverage map. Targets are measured relative to *your* frontal pose. A frame is accepted only
   when the pose is reached and held still, the image is sharp, the depth has enough points and the camera is not
   moving (IMU). Rejections are explained on screen (too far, too close, moving, blurry, no face…).
 - **Camera configuration for faces:** depth 1280×720 or 848×480, RGB 1280×800, 30 fps, High Accuracy or High Density,
@@ -95,23 +96,27 @@ notarized): on another Mac, open it the first time with right-click → **Open**
 3. Choose **Live camera**, enter the administrator password and wait for the preview. Move until the distance
    indicator is green: about **0.56–0.71 m** with the default configuration, **0.41–0.56 m** with *Close-range mode* on
    (the exact range for your camera is shown under the preview).
-4. Press **Start scan**, look at the camera, then turn up, down, left and right (and the diagonals if enabled). The
-   animated head suggests the next pose, but after the front one every pose counts in whatever order you make it,
-   and a turn a little further than the animation is fine, but keep left and right within about 60° of the front:
-   side views turned farther share little surface with the frontal ones and are registered less accurately or left
-   out. When you reach a pose you hear a short tick: **hold still** until the chime, which means its 3 sharp, still
-   frames (configurable) are captured; then move on. A turn that stops a little short of the suggested pose also
-   counts when you hold it for about 2 s. A fanfare ends the scan, which
-   takes about a minute.
+4. Press **Start scan** and look at the camera until the front pose is captured. Then turn your head up, down, left and
+   right (and the diagonals if enabled) **in any order**: there is no order to follow. Facing the camera, the
+   instruction names the directions still open (more than four: just *in any direction*) and the animated head points to
+   each; once you turn toward one, the app recognizes it and guides you to that pose. Turn about **45–60° to the sides**
+   and about 25° up and down; a turn a little further is fine, but keep left and right within about 60° of the front:
+   side views turned farther share little surface with the frontal ones and are registered less accurately or left out.
+   When you reach a pose you hear a short tick: **hold still after the tick** until the chime, which means its 3 sharp,
+   still frames (configurable) are captured; then turn to another direction. A turn that stops a little short (60 % of
+   the way) also counts when you hold it for about 2 s. A fanfare ends the scan, which takes about a minute.
 5. Check the summary, then press **Reconstruct 3D model**. On an M3 Ultra, reconstructing a 15-keyframe scan takes
    about 20–40 s.
 6. Look at the model in the 3D preview and export **OBJ** (and optionally PLY and the raw session).
 
 Tips: if a pose does not complete, read the instruction at the bottom of the preview and the reason below it (most
-often *Move closer* / *Move back*, *Hold still…*, the turn instruction, such as *Turn your head to your left*, or a
-correction such as *Too far — turn back a little* or *Raise your chin a little*).
-*Skip pose* moves on. *Finish* ends the scan with the frames captured so far; then press *Reconstruct 3D model* on the
-summary to build the model from them.
+often *Move closer* / *Move back*, *Hold still…*, the directions still open while you face the camera, such as
+*Turn your head up, down, to your left or right*, the turn instruction once you turn toward a pose, such as
+*Turn your head to your left*, or a correction such as *Too far — turn back a little*, *Raise your chin a little* or
+*Turn your face a little to your right*).
+The skip button names the optional pose you are turning toward (*Skip Up-left*) and skips it; with only optional poses
+left and your head turned toward none of them, *Skip the remaining optional poses* skips them all. *Finish* ends the
+scan with the frames captured so far; then press *Reconstruct 3D model* on the summary to build the model from them.
 
 ## Settings
 
@@ -166,7 +171,7 @@ ifscan reconstruct synthetic-camera -o demo.obj      # the animated synthetic he
 ifscan synth -o test.ifsdataset                      # synthetic dataset with ground truth
 ifscan reconstruct test.ifsdataset -o test.obj --report report.json
 ifscan eval test.obj --gt test.ifsdataset/ground_truth.obj --report report.json   # surface distance in mm
-ifscan reconstruct recording.db3 -o head.obj --trace scan.csv   # one CSV row per frame: pose, distance, gates, rejection
+ifscan reconstruct recording.db3 -o head.obj --trace scan.csv   # one CSV row per frame: active pose, distance, gates, rejection
 ifscan info recording.db3
 ```
 
@@ -287,8 +292,9 @@ milimetrach**, który otwiera się w Blenderze i Podglądzie macOS (MeshLab powi
 ## Funkcje
 
 - **Podgląd na żywo** koloru i głębi (Metal), odległość twarzy i zalecany zakres pracy dla bieżącej konfiguracji.
-- **Prowadzony skan:** prosto → góra → dół → lewo → prawo (opcjonalnie skosy), z animowaną głową pokazującą, gdzie się
-  obrócić, pierścieniem postępu i mapą pokrycia. Cele są mierzone względem *Twojej* pozycji na wprost. Klatka jest
+- **Prowadzony skan:** najpierw prosto, potem góra, dół, lewo i prawo (opcjonalnie skosy) w dowolnej kolejności:
+  aplikacja sama rozpoznaje, w którą stronę obracasz głowę, a animowana głowa pokazuje kierunki, które jeszcze
+  zostały; do tego pierścień postępu i mapa pokrycia. Cele są mierzone względem *Twojej* pozycji na wprost. Klatka jest
   przyjmowana tylko wtedy, gdy poza jest osiągnięta i utrzymana, obraz jest ostry, głębia ma dość punktów, a kamera
   się nie rusza (IMU). Odrzucenia są wyjaśniane na ekranie (za daleko, za blisko, ruch, nieostro, brak twarzy…).
 - **Konfiguracja kamery pod twarz:** głębia 1280×720 lub 848×480, RGB 1280×800, 30 fps, High Accuracy lub High Density,
@@ -360,22 +366,29 @@ Uruchom aplikację przez `open build/IntelFaceScan.app` albo skopiuj ją do `/Ap
 3. Wybierz **Kamera na żywo**, wpisz hasło administratora i poczekaj na podgląd. Ustaw się tak, aby wskaźnik
    odległości był zielony: ok. **0,56–0,71 m** w konfiguracji domyślnej, **0,41–0,56 m** z włączonym *Trybem bliskiego
    zasięgu* (dokładny zakres dla Twojej kamery jest widoczny pod podglądem).
-4. Naciśnij **Rozpocznij skan**, spójrz w kamerę, potem obróć głowę w górę, w dół, w lewo i w prawo (i ukośnie, jeśli
-   pozy ukośne są włączone). Animowana głowa podpowiada następną pozę, ale po pozie prosto każda poza liczy się w
-   dowolnej kolejności, a obrót trochę dalszy niż na animacji też jest dobry, ale w lewo i w prawo obracaj się
-   najwyżej o ok. 60° od pozycji na wprost: dalsze widoki boczne mają mało wspólnej powierzchni z frontalnymi, więc
-   są rejestrowane mniej dokładnie albo pomijane. Po osiągnięciu pozy słychać krótki dźwięk: **nie ruszaj się** do
-   drugiego dźwięku, który oznacza, że 3 ostre, nieruchome klatki (do ustawienia) są zebrane; wtedy przejdź dalej.
-   Obrót, który zatrzymał się trochę przed podpowiadaną pozą, też się liczy, gdy przytrzymasz go ok. 2 s. Fanfara
-   kończy skan, który trwa około minuty.
+4. Naciśnij **Rozpocznij skan** i patrz w kamerę, aż poza prosto zostanie zarejestrowana. Potem obracaj głowę w górę,
+   w dół, w lewo i w prawo (i ukośnie, jeśli pozy ukośne są włączone) **w dowolnej kolejności**: nie ma kolejności do
+   przestrzegania. Gdy patrzysz w kamerę, polecenie wymienia kierunki, które jeszcze zostały (gdy jest ich więcej niż
+   cztery, mówi tylko *w dowolną stronę*), a animowana głowa wskazuje każdy z nich strzałką; gdy obrócisz się w stronę
+   jednego z nich, aplikacja go rozpozna i poprowadzi Cię do tej pozy. Obracaj głowę o ok. **45–60° na boki** i o ok.
+   25° w górę i w dół; obrót trochę dalszy też jest dobry, ale w lewo i w prawo obracaj się najwyżej o ok. 60° od
+   pozycji na wprost: dalsze widoki boczne mają mało wspólnej powierzchni z frontalnymi, więc są rejestrowane mniej
+   dokładnie albo pomijane. Po osiągnięciu pozy słychać krótki dźwięk: **po nim nie ruszaj się** do drugiego dźwięku,
+   który oznacza, że 3 ostre, nieruchome klatki (do ustawienia) są zebrane; wtedy obróć się w inną stronę. Obrót, który
+   zatrzymał się trochę wcześniej (60 % drogi), też się liczy, gdy przytrzymasz go ok. 2 s. Fanfara kończy skan, który
+   trwa około minuty.
 5. Sprawdź podsumowanie i naciśnij **Rekonstruuj model 3D**. Na M3 Ultra rekonstrukcja skanu z 15 klatek kluczowych
    trwa ok. 20–40 s.
 6. Obejrzyj model w podglądzie 3D i wyeksportuj **OBJ** (opcjonalnie PLY i surową sesję).
 
 Wskazówki: jeśli poza nie zostaje zaliczona, przeczytaj polecenie u dołu podglądu i powód podany pod nim (najczęściej
-*Podejdź bliżej* / *Odsuń się*, *Nie ruszaj się…*, polecenie obrotu, np. *Obróć głowę w swoją lewą stronę*, albo
-poprawka, np. *Za daleko — cofnij głowę trochę* lub *Unieś lekko brodę*).
-*Pomiń pozę* przechodzi dalej. *Zakończ* kończy skan z dotychczasowymi klatkami; potem naciśnij *Rekonstruuj model 3D*
+*Podejdź bliżej* / *Odsuń się*, *Nie ruszaj się…*, kierunki, które jeszcze zostały, gdy patrzysz w kamerę, np.
+*Obróć głowę w górę, w dół, w swoją lewą lub prawą stronę*, polecenie obrotu, gdy już obracasz się w stronę pozy, np.
+*Obróć głowę w swoją lewą stronę*, albo poprawka, np. *Za daleko — cofnij głowę trochę*, *Unieś lekko brodę* lub
+*Obróć twarz lekko w swoją prawą stronę*).
+Przycisk pomijania nazywa pozę opcjonalną, w stronę której się obracasz (*Pomiń: góra-lewo*), i ją pomija; gdy zostały
+już tylko pozy opcjonalne, a nie obracasz się w stronę żadnej z nich, przycisk *Pomiń pozostałe pozy opcjonalne*
+pomija je wszystkie. *Zakończ* kończy skan z dotychczasowymi klatkami; potem naciśnij *Rekonstruuj model 3D*
 w podsumowaniu, aby zbudować z nich model.
 
 ## Ustawienia
@@ -430,7 +443,7 @@ ifscan reconstruct synthetic-camera -o demo.obj      # animowana syntetyczna gł
 ifscan synth -o test.ifsdataset                      # syntetyczny zestaw danych ze wzorcem
 ifscan reconstruct test.ifsdataset -o test.obj --report raport.json
 ifscan eval test.obj --gt test.ifsdataset/ground_truth.obj --report raport.json   # odległość powierzchni w mm
-ifscan reconstruct nagranie.db3 -o glowa.obj --trace skan.csv   # jeden wiersz CSV na klatkę: poza, odległość, bramki, powód odrzucenia
+ifscan reconstruct nagranie.db3 -o glowa.obj --trace skan.csv   # jeden wiersz CSV na klatkę: aktywna poza, odległość, bramki, powód odrzucenia
 ifscan info nagranie.db3
 ```
 

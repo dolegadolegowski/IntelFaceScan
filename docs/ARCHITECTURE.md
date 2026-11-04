@@ -66,16 +66,27 @@ Each work stream owns its tests under `Tests/<Module>Tests/` (file names prefixe
    0.1 mm units, intrinsics, depth→color extrinsics, IMU). The UI renders color and a depth colormap with Metal,
    and the face distance with the recommended range for the current configuration.
 2. **Guided scan** – `HeadTracker` (Vision: face rectangle + yaw/pitch/roll, 76 landmarks, person segmentation)
-   feeds `ScanController`: the front pose first, then up, down, left, right (+ optional diagonals) in whatever order
-   the person turns (the scan suggests them in that order; targets are relative to the front pose; turns up to 40°
-   beyond a target count, and a turn short of the suggested target, at 60 % or more and held 1.5 s); a frame is
-   accepted only when the pose is within tolerance and held still, sharp (variance of Laplacian), with enough valid
-   depth points and a static camera (IMU). Accepted frames become `Keyframe`s (frame + head pose + landmarks + head
-   mask); the coverage map shows which head areas are covered. A turn that misses its pose gets a hint (further,
-   back, chin up/down, face left/right) for the banner, the app plays a sound when a pose is reached, captured and
-   when the scan is complete, and `ScanController` logs what held each pose back (`IntelFaceScan`/`Guidance`, at
-   `notice`: outcome shares and the furthest turn) when it completes or is still open at the end;
-   `ifscan reconstruct <recording> --trace scan.csv` writes every frame's measurements.
+   feeds `ScanController`: the front pose first (within 12°; the other targets are relative to it), then up, down,
+   left, right (+ optional diagonals) in whatever order the person turns. Nothing is suggested after the front pose:
+   every frame picks the *active pose* (`ScanUpdate.activePose`) among the unfinished poses: the one the head reached
+   (within tolerance, or a short turn held; the previous one while it stays reached), else the one it is turned
+   toward (the largest fraction of its target, at least 30 %, within the sideways tolerance), else, turned toward one
+   beyond its sideways tolerance, the closest such pose for the instruction only (its hint says how to correct),
+   else none (`ScanInstruction.turnAnyDirection`: the app lists up to four open directions, the last after "or", and
+   draws an arrow toward each). Turns up to 40° beyond a target count, and a turn short of a pose's target, at 60 %
+   or more and held 1.5 s (each pose keeps its own start time, so Vision's jitter between neighbouring poses does not
+   restart it); `ScanPhase.capturing(pose)` only follows the keyframes (CLI, trace). Skipping names its pose:
+   `ScanUpdate.skipPose` is the active pose when it is optional (`ScanController.skipPose(_:)`), and with no active
+   pose and only optional poses left the app offers `skipRemainingOptionalPoses()`. A frame is accepted only when
+   the active pose is within tolerance and held still, sharp (variance of Laplacian), with enough valid depth points
+   and a static camera (IMU). Accepted frames become `Keyframe`s (frame + head pose + landmarks + head mask); the
+   coverage map shows which head areas are covered. A turn that misses its pose gets a hint (further, back, chin
+   up/down, face left/right) for the banner, the app plays a sound when a pose is reached, captured and when the scan
+   is complete, and `ScanController` logs what held each pose back (`IntelFaceScan`/`Guidance`, at `notice`: the time
+   and outcome shares of the frames it was the active pose, and the furthest turn toward it on those frames or with
+   the head within its sideways tolerance) when it completes or is still open at the end, where a last line counts
+   the frames with no active pose; `ifscan reconstruct <recording> --trace scan.csv` writes every frame's
+   measurements, the active pose among them.
 3. **Reconstruction** (`ReconstructionPipeline`):
    0. lens undistortion: keyframes whose color carries a distortion model (the D455's inverse Brown-Conrady) are
       remapped once to a pinhole – color, mask, landmarks, face rectangle, and the depth only when it follows the

@@ -101,6 +101,7 @@ struct AppLocalizationTests {
     func enumerationsTranslated() {
         expectTranslated(ScanPose.allCases, "poseName", S.poseName)
         expectTranslated(ScanPose.allCases, "poseInstruction", S.poseInstruction)
+        expectTranslated(ScanPose.allCases, "direction", S.direction)
         expectTranslated(ReconstructionProgress.Stage.allCases, "stageName", S.stageName)
         expectTranslated(ModelDisplayMode.allCases, "displayModeName", S.displayModeName)
         expectTranslated(AppSettings.PreviewMode.allCases, "previewMode") { $0.label }

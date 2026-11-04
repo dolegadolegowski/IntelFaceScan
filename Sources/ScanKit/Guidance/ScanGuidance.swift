@@ -40,7 +40,6 @@ public enum ScanRejection: String, Sendable, CaseIterable, Codable, Hashable {
     }
 }
 
-/// What the user should do now.
 /// Which way to correct a turn that is not within a pose's tolerance (ScanUpdate.turnHint): further toward the target,
 /// back toward the front (turned too far), or across the pose direction. Person-relative, like the poses: faceLeft is
 /// the person's left (HeadPose yaw > 0).
@@ -74,6 +73,7 @@ public enum TurnHint: String, Sendable, CaseIterable, Codable {
     }
 }
 
+/// What the user should do now.
 public enum ScanInstruction: Sendable, Equatable {
     case idle
     case showFace
@@ -84,6 +84,9 @@ public enum ScanInstruction: Sendable, Equatable {
     /// Turn the head toward the pose target; deltas = target - current, degrees, HeadPose convention
     /// (yawDelta > 0: turn so the nose moves toward the image right, pitchDelta > 0: turn the face up).
     case turn(ScanPose, yawDelta: Float, pitchDelta: Float)
+    /// After the front pose, the head is turned toward no unfinished pose (ScanUpdate.activePose is nil): turn it
+    /// toward any of them (ScanUpdate.unfinishedPoses), in any order.
+    case turnAnyDirection
     case straightenHead
     /// Within tolerance: hold still until frames are accepted.
     case holdStill(ScanPose)
@@ -99,6 +102,7 @@ public enum ScanInstruction: Sendable, Equatable {
         case .moveBack: return "Move back"
         case .lookAtCamera: return "Hold still, looking at the camera"
         case .turn(let pose, _, _): return "Turn your head: \(pose.englishName)"
+        case .turnAnyDirection: return "Turn your head in any direction"
         case .straightenHead: return "Keep your head straight"
         case .holdStill(let pose): return "Hold still (\(pose.englishName))"
         case .capturing(let pose): return "Capturing \(pose.englishName)"

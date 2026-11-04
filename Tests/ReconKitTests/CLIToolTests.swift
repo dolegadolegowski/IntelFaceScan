@@ -332,6 +332,7 @@ func cliNamesPlaceholderStagesWhenReconstructing() async throws {
     update.sequence = 7
     update.timestampMs = 2000
     update.phase = .capturing(.right)
+    update.activePose = .right
     update.instructionKind = .holdStill(.right)
     update.rejection = .headMoving
     update.turnHint = .back
@@ -345,9 +346,18 @@ func cliNamesPlaceholderStagesWhenReconstructing() async throws {
     update.acceptedKeyframe = true
     update.completedPose = .right
     writer.add(update)
+    // After the pose: the head turned toward no unfinished pose.
+    update.sequence = 9
+    update.timestampMs = 2066.7
+    update.phase = .capturing(.up)
+    update.activePose = nil
+    update.instructionKind = .turnAnyDirection
+    update.acceptedKeyframe = false
+    update.completedPose = nil
+    writer.add(update)
     writer.close()
     let lines = try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map(String.init)
-    #expect(lines.count == 3)
+    #expect(lines.count == 4)
     let header = lines[0].split(separator: ",", omittingEmptySubsequences: false).map(String.init)
     #expect(header == ScanTraceWriter.header.split(separator: ",").map(String.init))
     func field(_ line: String, _ name: String) -> String {
@@ -360,4 +370,7 @@ func cliNamesPlaceholderStagesWhenReconstructing() async throws {
     #expect(field(lines[1], "smoothed_yaw") == "-74.20" && field(lines[1], "range_max_m") == "0.71")
     #expect(field(lines[1], "t_s") == "0.000" && field(lines[2], "t_s") == "0.033")
     #expect(field(lines[2], "accepted") == "1" && field(lines[2], "instruction") == "holdStill")
+    #expect(field(lines[1], "active_pose") == "right" && field(lines[2], "active_pose") == "right")
+    #expect(field(lines[3], "pose") == "up" && field(lines[3], "active_pose") == "")
+    #expect(field(lines[3], "instruction") == "turnAnyDirection")
 }

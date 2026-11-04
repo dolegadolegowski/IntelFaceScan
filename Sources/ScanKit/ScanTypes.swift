@@ -41,7 +41,7 @@ public struct HeadPose: Codable, Sendable, Equatable, Hashable {
     }
 }
 
-/// The guided scan poses, in the order the scan asks for them.
+/// The guided scan poses, in the order the scan lists them (the front pose first; the others in any order).
 public enum ScanPose: String, Codable, Sendable, CaseIterable, Hashable {
     case front
     case up
