@@ -189,7 +189,8 @@ helper enables it on the first `configure`: the camera restarts (3–8 s) and ke
 
 * Toggling RGB while depth streams restarts depth (handled by the stream order; reported as `stream_restarted`).
 * Never `kill -9` the helper during a camera command: the firmware can hang until the camera is re-plugged. The
-  probe handles SIGINT/SIGTERM/SIGHUP: it stops at the next frame, shuts the engine down and prints what it has.
+  probe handles SIGINT/SIGTERM/SIGHUP: it stops at the next frame, shuts the engine down, prints what it has and
+  hands the camera back to macOS (USB re-enumeration, waiting up to 5 s for the system drivers).
 * Visual presets on D4xx exist only in advanced mode; enabling it restarts the camera once.
 * `align_to_color = false` is rejected (framesets always carry aligned depth).
 * Live: while the syncer learns the stream set after a start, the first frame's color, depth and IR come out as
@@ -266,7 +267,8 @@ sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:50 --minz 30
 # 6. Skin: a person's cheek filling the central 10% at 0.47 m, person still
 sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:50,1280x720:hd:50 --roi 0.1 > probe-skin.md
 
-# Afterwards: hand the camera back to macOS (the probe does not re-enumerate it; or unplug and replug it)
+# The probe hands the camera back to macOS when it ends (USB re-enumeration, as the app's helper does; Ctrl-C
+# included). Only if it says the hand-back failed, or the probe was killed: release it, or unplug and replug it
 sudo build/helper/IntelFaceScanHelper --release -w
 ```
 
@@ -375,6 +377,7 @@ warm-up frame per stream start.
   live code path on a software device (configure validation, options, streaming, `.db3`/`.bag` recording while
   streaming and their playback with every recorded frame, depth units changed while streaming), disconnect and
   reconnect events with adoption of the new device instance and no callback after `shutdown()` (a recording loaded
-  into the watched context stands in for the camera), the probe on a recording, and the throughput benchmark
-  (`bench`, on request).
+  into the watched context stands in for the camera), a recording ended by an unplug that RECORD_STOP still
+  completes, the probe on a recording (and that it reports trying the live camera, which `main.cpp` then hands back
+  to macOS), and the throughput benchmark (`bench`, on request).
 * The probe runs on recordings too: `IntelFaceScanHelper --probe --playback /tmp/wall.db3 --frames 10`.
