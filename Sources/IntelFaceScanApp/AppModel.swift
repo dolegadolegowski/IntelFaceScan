@@ -406,7 +406,7 @@ final class AppModel {
         case .finished:
             completeScan()
         case .failed(let message):
-            present(S.error, message: message)
+            present(S.scanFailed, message: message)
             cancelScan()
         default:
             break

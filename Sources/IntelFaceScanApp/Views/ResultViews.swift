@@ -67,7 +67,7 @@ struct ReconstructionView: View {
                 Text(progress.map { S.stageName($0.stage) } ?? "")
                     .font(.headline)
             } currentValueLabel: {
-                Text(progress?.message ?? "").foregroundStyle(.secondary)
+                Text(S.progressDetail(progress?.message ?? "")).foregroundStyle(.secondary)
             }
             .frame(maxWidth: 520)
             .animation(.easeOut(duration: 0.2), value: progress?.fraction ?? 0)

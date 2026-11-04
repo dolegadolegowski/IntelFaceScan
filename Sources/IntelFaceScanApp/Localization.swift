@@ -270,6 +270,51 @@ enum S {
         case .finished: return tr("Finished", "Gotowe")
         }
     }
+    /// The pipeline's progress detail (ReconstructionProgress.message, English from ReconKit and the core) in the UI
+    /// language. The Polish UI translates the details the pipeline sends today and leaves out any other: the stage
+    /// name and the bar still show, and no English appears in a Polish window.
+    static func progressDetail(_ message: String) -> String {
+        guard AppLanguage.current == .polish else { return message }
+        return polishProgressDetail(message) ?? ""
+    }
+
+    static func polishProgressDetail(_ message: String) -> String? {
+        let fixed: [String: String] = [
+            "head masks": "maski głowy",
+            "building clouds": "budowanie chmur punktów",
+            "pairwise registration": "rejestracja par klatek",
+            "pose graph optimization": "optymalizacja grafu póz",
+            "registration finished": "rejestracja zakończona",
+            "registration finished (some frames unregistered)": "rejestracja zakończona (część klatek bez rejestracji)",
+            "checking registration": "sprawdzanie rejestracji",
+            "marching cubes": "marching cubes",
+            "merging registered clouds": "łączenie zarejestrowanych chmur punktów",
+            "poisson: solving": "Poisson: rozwiązywanie",
+            "poisson: trimming": "Poisson: przycinanie",
+            "poisson: finished": "Poisson: gotowe",
+            "cleanup": "czyszczenie siatki",
+            "texturing": "teksturowanie",
+        ]
+        if message.isEmpty { return "" }
+        if let text = fixed[message] { return text }
+        if let m = message.wholeMatch(of: #/(\d+) keyframes/#), let n = Int(m.1) {
+            return "\(n) \(polishPlural(n, "klatka", "klatki", "klatek"))"
+        }
+        if let m = message.wholeMatch(of: #/(\d+) usable keyframes/#), let n = Int(m.1) {
+            return "\(n) \(polishPlural(n, "użyteczna klatka", "użyteczne klatki", "użytecznych klatek"))"
+        }
+        if let m = message.wholeMatch(of: #/integrating frame (\d+) of (\d+)/#) {
+            return "integracja klatki \(m.1) z \(m.2)"
+        }
+        if let m = message.wholeMatch(of: #/screened Poisson \(depth (\d+)\)/#) {
+            return "screened Poisson (głębokość \(m.1))"
+        }
+        if let m = message.wholeMatch(of: #/(\d+) vertices, (\d+) triangles/#), let v = Int(m.1), let t = Int(m.2) {
+            return "\(v) \(polishPlural(v, "wierzchołek", "wierzchołki", "wierzchołków")), "
+                + "\(t) \(polishPlural(t, "trójkąt", "trójkąty", "trójkątów"))"
+        }
+        return nil
+    }
     static var result: String { tr("3D model", "Model 3D") }
     static var saveOBJ: String { tr("Save OBJ…", "Zapisz OBJ…") }
     static var savePLY: String { tr("Save PLY…", "Zapisz PLY…") }
@@ -372,6 +417,9 @@ enum S {
     }
     static var recordingFailed: String { tr("Recording failed", "Nagrywanie nie powiodło się") }
     static var reconstructionFailed: String { tr("Reconstruction failed", "Rekonstrukcja nie powiodła się") }
+    static var scanFailed: String {
+        tr("The scan stopped: face tracking keeps failing", "Skan przerwany: śledzenie twarzy stale zawodzi")
+    }
     static var saveFailed: String { tr("Could not save", "Nie można zapisać") }
     static var quitting: String { tr("Releasing the camera…", "Zwalnianie kamery…") }
 }

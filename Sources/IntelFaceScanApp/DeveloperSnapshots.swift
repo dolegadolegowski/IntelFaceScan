@@ -297,7 +297,8 @@ private struct Fixture {
         let capture = ScanCapture(keyframes: keyframes, device: device)
         model.applyFixture(screen: screen, sourceKind: sourceKind, device: device, tracking: tracking,
                            scanUpdate: update, scanConfiguration: configuration, capture: capture,
-                           progress: ReconstructionProgress(stage: .fusion, fraction: 0.46, message: "TSDF 412 / 900"),
+                           progress: ReconstructionProgress(stage: .fusion, fraction: 0.46,
+                                                            message: "integrating frame 7 of 15"),
                            result: result, stats: FrameStats(displayFPS: 30, analysisFPS: 24),
                            recordingStartedAt: recording ? Date(timeIntervalSinceNow: -83) : nil,
                            datasetCapture: dataset ? capture : nil)

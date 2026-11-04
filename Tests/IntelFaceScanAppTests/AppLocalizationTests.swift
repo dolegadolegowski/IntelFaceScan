@@ -133,6 +133,30 @@ struct AppLocalizationTests {
         #expect(AppTest.inBothLanguages { S.resetView }.pl == "Przywróć widok")
     }
 
+    /// The details ReconstructionPipeline and the core report today (ReconstructionPipeline.emit, the core's
+    /// registration and Poisson progress); English passes through, Polish never shows English.
+    @Test("Reconstruction progress details")
+    func progressDetails() {
+        let sent = ["15 keyframes", "head masks", "14 usable keyframes", "building clouds", "pairwise registration",
+                    "pose graph optimization", "registration finished", "registration finished (some frames unregistered)",
+                    "checking registration", "integrating frame 3 of 15", "marching cubes", "merging registered clouds",
+                    "screened Poisson (depth 10)", "poisson: solving", "poisson: trimming", "poisson: finished", "cleanup",
+                    "texturing", "412118 vertices, 823904 triangles"]
+        for message in sent {
+            let both = AppTest.inBothLanguages { S.progressDetail(message) }
+            #expect(both.en == message)
+            #expect(!both.pl.isEmpty, "\"\(message)\" has no Polish text")
+            #expect(both.pl != message || message == "marching cubes", "\"\(message)\" is not translated")
+        }
+        let pl = { (m: String) in AppLanguage.$override.withValue(.polish) { S.progressDetail(m) } }
+        #expect(pl("1 keyframes") == "1 klatka")
+        #expect(pl("22 usable keyframes") == "22 użyteczne klatki")
+        #expect(pl("integrating frame 3 of 15") == "integracja klatki 3 z 15")
+        #expect(pl("2 vertices, 5 triangles") == "2 wierzchołki, 5 trójkątów")
+        #expect(pl("some new English detail") == "", "unknown details leak into the Polish UI")
+        #expect(pl("") == "")
+    }
+
     @Test("The override is scoped to the task")
     func overrideScope() async {
         let outside = AppLanguage.current
