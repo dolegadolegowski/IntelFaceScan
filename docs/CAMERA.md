@@ -64,7 +64,9 @@ error is smaller. At 0.45 m a 16 cm wide head covers ~240 depth pixels at 1280×
 ~8–10 cm farther. A configuration is usable when the nose stays beyond Min-Z and the back of the head within Max-Z:
 
 * near limit = Min-Z + 0.06 m, far limit = min(Min-Z + 0.20 m, Max-Z − 0.25 m) (beyond Min-Z + 0.20 m the
-  noise grows without benefit; the 0.25 m keeps the back of the head inside Max-Z).
+  noise grows without benefit; the 0.25 m keeps the back of the head inside Max-Z). The app's distance indicator
+  (`WorkingDistance`, from the camera's baseline) uses a 0.05 m near margin, so it shows 0.56–0.71 m for shift 0 and
+  0.41–0.56 m for shift 50 at 1280×720.
 
 | Configuration | Face distance | Depth RMS at the near limit (theory) | Use |
 |---|---|---|---|

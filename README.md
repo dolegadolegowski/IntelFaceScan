@@ -3,12 +3,12 @@
 Native macOS app (Apple Silicon, macOS 27.2+) for a full, detailed **3D scan of a human head** with an
 **Intel RealSense D455** connected over USB‑C. The app guides you through a short sequence of head poses, checks every
 frame with Apple Vision, registers and fuses the views on the GPU and saves a textured **OBJ + MTL + PNG in
-millimeters** that opens in Blender, MeshLab and macOS Preview.
+millimeters** that opens in Blender and macOS Preview (MeshLab should read it too but has not been tried yet).
 
 **[🇵🇱 Polska wersja poniżej](#po-polsku)**
 
-> **Status:** the whole pipeline is implemented and tested without a camera (synthetic head rendered at 30 fps through
-> Apple Vision, recordings played back through the camera helper, 400+ automated tests). Exported models were checked
+> **Status:** the whole pipeline is implemented and tested without a camera (synthetic head rendered at 30 fps and
+> analyzed by Apple Vision, recordings played back through the camera helper, 400+ automated tests). Exported models were checked
 > by importing them in Blender 5.0 and rendering them with macOS Quick Look (what Preview uses); MeshLab has not been
 > tried yet. It has **not yet been run against a physical D455**: the camera measurements in
 > [docs/CAMERA.md](docs/CAMERA.md) are still theoretical. See [Accuracy](#accuracy) and [Limitations](#limitations).
@@ -32,7 +32,7 @@ millimeters** that opens in Blender, MeshLab and macOS Preview.
 - **Camera configuration for faces:** depth 1280×720 or 848×480, RGB 1280×800, 30 fps, High Accuracy or High Density,
   maximum laser power, emitter on, auto exposure on the face, 0.1 mm depth units, optional close range (disparity
   shift 50). Post-processing in the camera helper: threshold → disparity → spatial → temporal → hole filling (off by
-  default) → align depth to color; decimation only for the preview. Factory calibration (intrinsics, extrinsics,
+  default) → align depth to color (no decimation: the app scales the preview itself). Factory calibration (intrinsics, extrinsics,
   baseline) from the camera.
 - **Reconstruction:** lens undistortion, head segmentation (person mask ∩ depth band ∩ chin cut, option to keep the
   shoulders), initial poses from Vision, multi-scale point-to-plane ICP (colored ICP optional), pose graph with loop
@@ -93,14 +93,18 @@ notarized): on another Mac, open it the first time with right-click → **Open**
 2. Use **even, diffuse light** (no strong light from one side, no direct sun). Take off glasses; tie back long hair if
    you can (stereo depth sees little of fine hair). Avoid shiny makeup.
 3. Choose **Live camera**, enter the administrator password and wait for the preview. Move until the distance
-   indicator is green: **0.57–0.71 m** with the default configuration, **0.42–0.56 m** with *Close-range mode* on.
+   indicator is green: about **0.56–0.71 m** with the default configuration, **0.41–0.56 m** with *Close-range mode* on
+   (the exact range for your camera is shown under the preview).
 4. Press **Start scan** and follow the animated head: front, up, down, left, right (and the diagonals if enabled).
    Each pose captures 3 sharp, still frames (configurable). The whole scan takes about a minute.
-5. Check the summary, then press **Reconstruct 3D model**. On an M3 Ultra a 15-keyframe scan takes about 20–40 s.
+5. Check the summary, then press **Reconstruct 3D model**. On an M3 Ultra, reconstructing a 15-keyframe scan takes
+   about 20–40 s.
 6. Look at the model in the 3D preview and export **OBJ** (and optionally PLY and the raw session).
 
-Tips: if a pose does not complete, read the hint under the preview (most often *move closer/farther*, *hold still*
-or *turn a bit more*). *Skip pose* moves on; *Finish* reconstructs from what you have.
+Tips: if a pose does not complete, read the instruction at the bottom of the preview and the reason below it (most
+often *Move closer* / *Move back*, *Hold still…* or the turn instruction, such as *Turn your head to your left*).
+*Skip pose* moves on. *Finish* ends the scan with the frames captured so far; then press *Reconstruct 3D model* on the
+summary to build the model from them.
 
 ## Settings
 
@@ -117,10 +121,11 @@ or *turn a bit more*). *Skip pose* moves on; *Finish* reconstructs from what you
 | Keep neck and shoulders | off | keeps neck and shoulders instead of cutting below the chin |
 | Diagonal poses (optional) | off | adds up-left, up-right, down-left, down-right for better coverage |
 | Frames per pose | 3 | more frames average more noise, the scan takes longer |
-| Voxel size | 0.75 mm | measured best between 0.5 and 1.5 mm ([docs/RECONSTRUCTION.md](docs/RECONSTRUCTION.md)) |
-| Method | TSDF | screened Poisson is the alternative (smoother, less accurate on synthetic tests) |
+| Voxel size | 0.75 mm | best (or within 1 % of the best) of the measured 0.5, 0.75 and 1 mm voxels at 0.5–1.5 mm depth noise ([docs/RECONSTRUCTION.md](docs/RECONSTRUCTION.md)); the slider goes from 0.5 to 1.5 mm |
+| Surface | TSDF (GPU) | Screened Poisson is the alternative (smoother, less accurate on synthetic tests) |
 | Close the back of the head | on | closes the unscanned back of the head and the neck with a smooth synthesized surface colored from the neighboring hair and skin, so the model is watertight (Preview does not draw the inside of an open model); the closed part is a guess, not a measurement |
 | Mirror the preview | on | the preview behaves like a mirror |
+| Show face landmarks | on | draws the face landmarks found by Apple Vision on the live preview |
 
 ## Output files
 
@@ -129,8 +134,9 @@ or *turn a bit more*). *Skip pose* moves on; *Finish* reconstructs from what you
   head* is off.
 - `head.mtl` + `head.png` – material and texture (RGB, up to 4096×4096).
 - `head.ply` (optional) – binary PLY with normals and vertex colors.
-- `head.ifsdataset/` (optional) – the raw session: color, aligned depth, masks, poses and camera calibration of every
-  keyframe; reconstruct it again with `ifscan reconstruct`.
+- `scan.ifsdataset/` (optional) – the raw session: color, aligned depth, masks, poses and camera calibration of every
+  keyframe; reopen it in the app (**Open dataset…**, then **Use the saved frames**) or reconstruct it with
+  `ifscan reconstruct`.
 
 Opening the OBJ: **macOS Preview / Quick Look** – double-click. **MeshLab** – File → Import Mesh. **Blender** – File →
 Import → Wavefront (.obj), keep *Forward −Z, Up Y*, and set the import *Scale* to **0.001** (Blender treats units as
@@ -147,10 +153,11 @@ meters, the file is in millimeters); the face looks at you in the front view (nu
 ```bash
 ifscan reconstruct recording.db3 -o head.obj --ply head.ply --report report.json
 ifscan reconstruct session.ifsdataset -o head.obj --voxel-mm 0.5
-ifscan reconstruct session.ifsdataset -o head.obj --open-back   # keep only measured surface
+ifscan reconstruct session.ifsdataset -o head.obj --open-back   # leave the back of the head open
 ifscan reconstruct synthetic-camera -o demo.obj      # the animated synthetic head, no camera
 ifscan synth -o test.ifsdataset                      # synthetic dataset with ground truth
-ifscan eval head.obj ground_truth.obj                # surface distance in mm
+ifscan reconstruct test.ifsdataset -o test.obj --report report.json
+ifscan eval test.obj --gt test.ifsdataset/ground_truth.obj --report report.json   # surface distance in mm
 ifscan info recording.db3
 ```
 
@@ -159,14 +166,14 @@ ifscan info recording.db3
 Measured without a camera, on the synthetic head rendered with a D455-like noise model (5 poses × 2 frames,
 0.75 mm voxels, point-to-plane ICP; details in [docs/RECONSTRUCTION.md](docs/RECONSTRUCTION.md)). The surface
 distance covers the measured surface; the closed back of the head (about 40 % of the closed model's surface on the
-synthetic head) is a guess: with it included, the mean distance of the whole model grows to 3.7 mm.
+synthetic head) is a guess: with it included, the mean distance of the whole model grows to about 3.6 mm.
 
 | Case | Rotation error mean / max | Surface distance to ground truth mean / p95 |
 |---|---|---|
 | clean synthetic scan, 1280×800 (`ifscan reconstruct`) | 0.036° / 0.067° | 0.13 mm / 0.39 mm |
-| D455 lens distortion, head 15 cm and 6 cm off the optical axis | 0.04° / 0.08° | 0.13 mm / 0.37 mm |
+| D455 lens distortion, head 15 cm right and 6 cm down from the optical axis | 0.04° / 0.08° | 0.13 mm / 0.37 mm |
 | correlated depth noise + waviness | 0.29° / 0.51° | 0.34 mm / 0.92 mm |
-| all imperfections combined (noise, hair dropout, speckle, Vision errors ±4°, exposure ±20%) | 0.41° / 0.87° | 0.36 mm / 0.96 mm |
+| all imperfections combined (correlated depth noise + waviness, no depth on hair, silhouettes eroded by 6 px, 5 % depth holes, Vision error σ 3° per angle, exposure ±20 %, frontal frames last) | 0.41° / 0.87° | 0.36 mm / 0.96 mm |
 
 Expected D455 depth noise (theory, subpixel 0.08 px): 0.45 mm RMS at 0.60 m with the default configuration, 0.25 mm
 at 0.45 m with close range. **Real-camera accuracy and noise have not been measured yet**;
@@ -177,8 +184,8 @@ High Density and disparity shift 0 vs 50 on a flat wall and on skin.
 
 - Not yet validated with a physical D455 (see the status note at the top).
 - The back of the head is never seen (poses reach ±45° yaw). By default the model is closed there with a smooth
-  synthesized surface: plausible, not measured. Turn off *Close the back of the head* (or use `--open-back`) to keep
-  only measured surface.
+  synthesized surface: plausible, not measured. Turn off *Close the back of the head* (or use `--open-back`) to leave
+  it open; small holes are filled either way.
 - Some camera-side assumptions were measured on synthetic data and need a real D455 to confirm: that librealsense's
   aligned depth is free of lens distortion while color is not, and how much Apple Vision's head angles lean toward the
   line of sight for a face off the image center.
@@ -201,7 +208,7 @@ High Density and disparity shift 0 vs 50 on a flat wall and on skin.
 | [PoissonRecon](https://github.com/mkazhdan/PoissonRecon) | screened Poisson surface (alternative method) | the reference implementation |
 | [xatlas](https://github.com/jpcy/xatlas) | UV atlas | robust chart generation and packing |
 | [meshoptimizer](https://github.com/zeux/meshoptimizer) 1.3 | optional decimation | fast, quality-preserving simplification |
-| [stb](https://github.com/nothings/stb) | PNG writing | single-file, no dependencies |
+| Apple ImageIO | PNG writing (texture atlas, dataset images) | part of macOS; about 2× faster than stb_image_write on a 4096² atlas |
 
 Marching cubes, ICP, the pose graph, TSDF fusion, mesh cleanup and texture blending are our own code in
 `Sources/FaceReconCore` (C++17 / Objective‑C++ / Metal). Licenses: [NOTICE](NOTICE) and `third_party/*/`; the app
@@ -248,14 +255,22 @@ RealSense, Inc.; Intel is a trademark of Intel Corporation. This is an unofficia
 Natywna aplikacja na macOS (Apple Silicon, macOS 27.2+) do pełnego, dokładnego **skanu 3D głowy** kamerą
 **Intel RealSense D455** podłączoną przez USB‑C. Aplikacja prowadzi przez krótką sekwencję póz głowy, sprawdza każdą
 klatkę przez Apple Vision, rejestruje i łączy widoki na GPU i zapisuje teksturowany **OBJ + MTL + PNG w
-milimetrach**, który otwiera się w Blenderze, MeshLabie i Podglądzie macOS.
+milimetrach**, który otwiera się w Blenderze i Podglądzie macOS (MeshLab powinien go wczytać, ale nie był jeszcze sprawdzany).
 
-> **Stan:** cały potok jest zaimplementowany i przetestowany bez kamery (syntetyczna głowa renderowana w 30 fps przez
-> Apple Vision, nagrania odtwarzane przez helper kamery, ponad 400 testów automatycznych). Wyeksportowane modele
+> **Stan:** cały potok jest zaimplementowany i przetestowany bez kamery (syntetyczna głowa renderowana w 30 fps
+> i analizowana przez Apple Vision, nagrania odtwarzane przez helper kamery, ponad 400 testów automatycznych). Wyeksportowane modele
 > sprawdzono, importując je w Blenderze 5.0 i renderując przez Quick Look macOS (z niego korzysta Podgląd); MeshLaba
 > jeszcze nie próbowano. **Nie był jeszcze uruchomiony z fizyczną kamerą D455**: pomiary kamery w
 > [docs/CAMERA.md](docs/CAMERA.md) są na razie teoretyczne. Zobacz [Dokładność](#dokładność) i
 > [Ograniczenia](#ograniczenia).
+
+## Spis treści
+
+- [Funkcje](#funkcje) · [Wymagania](#wymagania) · [Budowanie i instalacja](#budowanie-i-instalacja)
+- [Uprawnienia i kamera](#uprawnienia-i-kamera) · [Jak skanować](#jak-skanować) · [Ustawienia](#ustawienia)
+- [Pliki wynikowe](#pliki-wynikowe) · [Nagrania i wiersz poleceń](#nagrania-i-wiersz-poleceń)
+- [Dokładność](#dokładność) · [Ograniczenia](#ograniczenia) · [Biblioteki i uzasadnienie](#biblioteki-i-uzasadnienie)
+- [Architektura i dokumentacja](#architektura-i-dokumentacja) · [Rozwój](#rozwój) · [Licencja](#licencja)
 
 ## Funkcje
 
@@ -265,9 +280,10 @@ milimetrach**, który otwiera się w Blenderze, MeshLabie i Podglądzie macOS.
   przyjmowana tylko wtedy, gdy poza jest osiągnięta i utrzymana, obraz jest ostry, głębia ma dość punktów, a kamera
   się nie rusza (IMU). Odrzucenia są wyjaśniane na ekranie (za daleko, za blisko, ruch, nieostro, brak twarzy…).
 - **Konfiguracja kamery pod twarz:** głębia 1280×720 lub 848×480, RGB 1280×800, 30 fps, High Accuracy lub High Density,
-  maksymalna moc lasera, emiter włączony, auto ekspozycja na twarzy, jednostki głębi 0,1 mm, opcjonalny tryb bliskiego
-  zasięgu (disparity shift 50). Przetwarzanie w helperze: threshold → disparity → spatial → temporal → hole filling (domyślnie
-  wyłączony) → wyrównanie głębi do koloru; decymacja tylko dla podglądu. Kalibracja fabryczna kamery.
+  maksymalna moc lasera, emiter włączony, automatyczna ekspozycja na twarz, jednostki głębi 0,1 mm, opcjonalny tryb
+  bliskiego zasięgu (przesunięcie dysparycji 50). Przetwarzanie w helperze: threshold → disparity → spatial →
+  temporal → hole filling (domyślnie wyłączony) → wyrównanie głębi do koloru (bez decymacji: podgląd skaluje sama
+  aplikacja). Kalibracja fabryczna odczytana z kamery (parametry wewnętrzne, zewnętrzne, baza stereo).
 - **Rekonstrukcja:** usuwanie dystorsji obiektywu, segmentacja głowy (maska osoby ∩ pasmo głębi ∩ cięcie pod brodą,
   opcja zachowania ramion), początkowe pozy z Vision, wieloskalowe ICP point-to-plane (colored ICP opcjonalnie), graf
   póz z domknięciami pętli, fuzja TSDF na GPU (domyślnie woksele 0,75 mm) i marching cubes, screened Poisson jako
@@ -330,35 +346,39 @@ Uruchom aplikację przez `open build/IntelFaceScan.app` albo skopiuj ją do `/Ap
 2. Zadbaj o **równe, rozproszone światło** (bez mocnego światła z boku, bez bezpośredniego słońca). Zdejmij okulary;
    jeśli możesz, zwiąż długie włosy (głębia stereo słabo widzi cienkie włosy). Unikaj błyszczącego makijażu.
 3. Wybierz **Kamera na żywo**, wpisz hasło administratora i poczekaj na podgląd. Ustaw się tak, aby wskaźnik
-   odległości był zielony: **0,57–0,71 m** w konfiguracji domyślnej, **0,42–0,56 m** z włączonym *Trybem bliskiego zasięgu*.
+   odległości był zielony: ok. **0,56–0,71 m** w konfiguracji domyślnej, **0,41–0,56 m** z włączonym *Trybem bliskiego
+   zasięgu* (dokładny zakres dla Twojej kamery jest widoczny pod podglądem).
 4. Naciśnij **Rozpocznij skan** i podążaj za animowaną głową: prosto, góra, dół, lewo, prawo (i pozy ukośne, jeśli są
    włączone). Każda poza zbiera 3 ostre, nieruchome klatki (do ustawienia). Cały skan trwa około minuty.
-5. Sprawdź podsumowanie i naciśnij **Rekonstruuj model 3D**. Na M3 Ultra skan z 15 klatek kluczowych trwa ok. 20–40 s.
+5. Sprawdź podsumowanie i naciśnij **Rekonstruuj model 3D**. Na M3 Ultra rekonstrukcja skanu z 15 klatek kluczowych
+   trwa ok. 20–40 s.
 6. Obejrzyj model w podglądzie 3D i wyeksportuj **OBJ** (opcjonalnie PLY i surową sesję).
 
-Wskazówki: jeśli poza się nie kończy, przeczytaj podpowiedź pod podglądem (najczęściej *podejdź bliżej/odsuń się*,
-*nie ruszaj się* albo *obróć się trochę bardziej*). *Pomiń pozę* przechodzi dalej; *Zakończ* rekonstruuje z tego,
-co już jest.
+Wskazówki: jeśli poza nie zostaje zaliczona, przeczytaj polecenie u dołu podglądu i powód podany pod nim (najczęściej
+*Podejdź bliżej* / *Odsuń się*, *Nie ruszaj się…* albo polecenie obrotu, np. *Obróć głowę w swoją lewą stronę*).
+*Pomiń pozę* przechodzi dalej. *Zakończ* kończy skan z dotychczasowymi klatkami; potem naciśnij *Rekonstruuj model 3D*
+w podsumowaniu, aby zbudować z nich model.
 
 ## Ustawienia
 
 | Ustawienie | Domyślnie | Uwagi |
 |---|---|---|
 | Rozdzielczość głębi | 1280×720 | 848×480 ma 1,5× większy szum przy tej samej odległości; tylko na wolnym Macu |
-| Preset | High Accuracy | mniej błędnych punktów; High Density wypełnia więcej skóry |
-| Tryb bliskiego zasięgu | wyłączony | disparity shift 50: twarz może być ok. 0,47 m od kamery, gdzie szum głębi jest ok. 40% mniejszy (teoria); włącz po zmierzeniu swojej kamery ([docs/CAMERA.md](docs/CAMERA.md)) |
+| Preset | Wysoka dokładność | mniej błędnych punktów; Wysoka gęstość wypełnia więcej skóry |
+| Tryb bliskiego zasięgu | wyłączony | przesunięcie dysparycji 50: twarz może być ok. 0,47 m od kamery, gdzie szum głębi jest ok. 40% mniejszy (teoria); włącz po zmierzeniu swojej kamery ([docs/CAMERA.md](docs/CAMERA.md)) |
 | Moc lasera | maksymalna | skóra ma mało tekstury: dopasowanie stereo widzi wzór projektora |
 | Filtr przestrzenny / czasowy | włączone | wygładzanie z zachowaniem krawędzi w dziedzinie dysparycji |
 | Wypełnianie dziur | wyłączone | wymyślona powierzchnia jest dla fuzji gorsza niż dziura |
-| Maksymalna odległość | 1,2 m | głębia dalej niż to jest odrzucana |
+| Maksymalna odległość | 1,2 m | głębia dalej niż ta odległość jest odrzucana |
 | Automatyczna ekspozycja na twarz | włączona | ekspozycja stereo i RGB podąża za twarzą, nie za tłem |
 | Zachowaj szyję i ramiona | wyłączone | zostawia szyję i ramiona zamiast cięcia pod brodą |
 | Pozy ukośne (opcjonalne) | wyłączone | dodaje górę-lewo, górę-prawo, dół-lewo, dół-prawo dla lepszego pokrycia |
 | Klatki na pozę | 3 | więcej klatek uśrednia więcej szumu, skan trwa dłużej |
-| Rozmiar woksela | 0,75 mm | zmierzony jako najlepszy między 0,5 a 1,5 mm ([docs/RECONSTRUCTION.md](docs/RECONSTRUCTION.md)) |
-| Metoda | TSDF | screened Poisson jako alternatywa (gładszy, mniej dokładny w testach syntetycznych) |
+| Rozmiar woksela | 0,75 mm | najlepszy (lub w granicach 1% najlepszego) spośród zmierzonych wokseli 0,5, 0,75 i 1 mm przy szumie głębi 0,5–1,5 mm ([docs/RECONSTRUCTION.md](docs/RECONSTRUCTION.md)); suwak 0,5–1,5 mm |
+| Powierzchnia | TSDF (GPU) | Screened Poisson jako alternatywa (gładszy, mniej dokładny w testach syntetycznych) |
 | Domknij tył głowy | włączone | domyka nieskanowany tył głowy i szyję gładką, wygenerowaną powierzchnią w kolorach sąsiednich włosów i skóry, więc model jest szczelny (Podgląd nie rysuje wnętrza otwartego modelu); domknięta część jest przybliżeniem, nie pomiarem |
 | Lustrzany podgląd | włączony | podgląd działa jak lustro |
+| Pokaż punkty twarzy | włączone | rysuje na podglądzie na żywo punkty twarzy wykryte przez Apple Vision |
 
 ## Pliki wynikowe
 
@@ -367,8 +387,9 @@ co już jest.
   szczelny, chyba że *Domknij tył głowy* jest wyłączone.
 - `head.mtl` + `head.png` – materiał i tekstura (RGB, do 4096×4096).
 - `head.ply` (opcjonalnie) – binarny PLY z normalnymi i kolorami wierzchołków.
-- `head.ifsdataset/` (opcjonalnie) – surowa sesja: kolor, wyrównana głębia, maski, pozy i kalibracja kamery każdej
-  klatki kluczowej; można ją zrekonstruować ponownie przez `ifscan reconstruct`.
+- `scan.ifsdataset/` (opcjonalnie) – surowa sesja: kolor, wyrównana głębia, maski, pozy i kalibracja kamery każdej
+  klatki kluczowej; można ją otworzyć w aplikacji (**Otwórz zestaw danych…**, potem **Użyj zapisanych klatek**) albo
+  zrekonstruować przez `ifscan reconstruct`.
 
 Otwieranie OBJ: **Podgląd / Quick Look** – podwójne kliknięcie. **MeshLab** – File → Import Mesh. **Blender** – File →
 Import → Wavefront (.obj), zostaw *Forward −Z, Up Y* i ustaw *Scale* importu na **0.001** (Blender traktuje jednostki
@@ -384,10 +405,11 @@ jako metry, plik jest w milimetrach); w widoku z przodu (numpad 1) twarz patrzy 
 ```bash
 ifscan reconstruct nagranie.db3 -o glowa.obj --ply glowa.ply --report raport.json
 ifscan reconstruct sesja.ifsdataset -o glowa.obj --voxel-mm 0.5
-ifscan reconstruct sesja.ifsdataset -o glowa.obj --open-back   # tylko zmierzona powierzchnia
+ifscan reconstruct sesja.ifsdataset -o glowa.obj --open-back   # tył głowy zostaje otwarty
 ifscan reconstruct synthetic-camera -o demo.obj      # animowana syntetyczna głowa, bez kamery
-ifscan synth -o test.ifsdataset                      # syntetyczny zestaw danych z wzorcem
-ifscan eval glowa.obj ground_truth.obj               # odległość powierzchni w mm
+ifscan synth -o test.ifsdataset                      # syntetyczny zestaw danych ze wzorcem
+ifscan reconstruct test.ifsdataset -o test.obj --report raport.json
+ifscan eval test.obj --gt test.ifsdataset/ground_truth.obj --report raport.json   # odległość powierzchni w mm
 ifscan info nagranie.db3
 ```
 
@@ -396,14 +418,14 @@ ifscan info nagranie.db3
 Zmierzona bez kamery, na syntetycznej głowie renderowanej z modelem szumu podobnym do D455 (5 póz × 2 klatki,
 woksele 0,75 mm, ICP point-to-plane; szczegóły w [docs/RECONSTRUCTION.md](docs/RECONSTRUCTION.md)). Odległość dotyczy
 zmierzonej powierzchni; domknięty tył głowy (ok. 40% powierzchni domkniętego modelu syntetycznej głowy) jest
-przybliżeniem: razem z nim średnia odległość całego modelu rośnie do 3,7 mm.
+przybliżeniem: razem z nim średnia odległość całego modelu rośnie do ok. 3,6 mm.
 
 | Przypadek | Błąd obrotu średni / maks. | Odległość od wzorca średnia / p95 |
 |---|---|---|
 | czysty skan syntetyczny, 1280×800 (`ifscan reconstruct`) | 0,036° / 0,067° | 0,13 mm / 0,39 mm |
-| dystorsja obiektywu D455, głowa 15 cm i 6 cm od osi optycznej | 0,04° / 0,08° | 0,13 mm / 0,37 mm |
+| dystorsja obiektywu D455, głowa 15 cm w prawo i 6 cm w dół od osi optycznej | 0,04° / 0,08° | 0,13 mm / 0,37 mm |
 | skorelowany szum głębi + falowanie | 0,29° / 0,51° | 0,34 mm / 0,92 mm |
-| wszystkie zakłócenia naraz (szum, brak głębi na włosach, plamki, błędy Vision ±4°, ekspozycja ±20%) | 0,41° / 0,87° | 0,36 mm / 0,96 mm |
+| wszystkie zakłócenia naraz (skorelowany szum głębi + falowanie, brak głębi na włosach, sylwetki zerodowane o 6 px, 5% dziur w głębi, błąd Vision σ 3° na kąt, ekspozycja ±20%, klatki frontalne na końcu) | 0,41° / 0,87° | 0,36 mm / 0,96 mm |
 
 Oczekiwany szum głębi D455 (teoria, subpiksel 0,08 px): 0,45 mm RMS przy 0,60 m w konfiguracji domyślnej, 0,25 mm
 przy 0,45 m w trybie bliskiego zasięgu. **Dokładność i szum z prawdziwą kamerą nie zostały jeszcze zmierzone**;
@@ -415,11 +437,11 @@ i High Density oraz disparity shift 0 i 50 na płaskiej ścianie i na skórze.
 - Jeszcze niesprawdzona z fizyczną kamerą D455 (zob. informację o stanie na górze).
 - Tył głowy nigdy nie jest widoczny (pozy sięgają ±45° w poziomie). Domyślnie model jest tam domknięty gładką,
   wygenerowaną powierzchnią: wiarygodną, ale niezmierzoną. Wyłącz *Domknij tył głowy* (albo użyj `--open-back`), aby
-  zostawić tylko zmierzoną powierzchnię.
+  zostawić go otwartym; małe dziury są łatane w obu przypadkach.
 - Niektóre założenia po stronie kamery zmierzono na danych syntetycznych i trzeba je potwierdzić z prawdziwą D455:
   że wyrównana głębia z librealsense nie ma dystorsji obiektywu, a kolor ma, oraz jak bardzo kąty głowy z Apple
   Vision odchylają się w stronę linii widzenia, gdy twarz jest poza środkiem obrazu.
-- Włosy, okulary, bardzo ciemne lub błyszczące powierzchnie dają mało głębi stereo albo wcale.
+- Włosy, okulary, bardzo ciemne lub błyszczące powierzchnie dają mało głębi stereo albo nie dają jej wcale.
 - Kąty pozy głowy z Apple Vision mogą się mylić o kilka stopni dla niektórych twarzy; skan to kompensuje, mierząc cele
   względem Twojej pozycji na wprost, a rejestracja poprawia pozy.
 - Aplikacja ma podpis ad hoc i nie jest notaryzowana.
@@ -438,7 +460,7 @@ i High Density oraz disparity shift 0 i 50 na płaskiej ścianie i na skórze.
 | [PoissonRecon](https://github.com/mkazhdan/PoissonRecon) | powierzchnia screened Poisson (metoda alternatywna) | implementacja referencyjna |
 | [xatlas](https://github.com/jpcy/xatlas) | atlas UV | solidne tworzenie i pakowanie wysp UV |
 | [meshoptimizer](https://github.com/zeux/meshoptimizer) 1.3 | opcjonalna decymacja | szybkie upraszczanie z zachowaniem jakości |
-| [stb](https://github.com/nothings/stb) | zapis PNG | jeden plik, bez zależności |
+| Apple ImageIO | zapis PNG (atlas tekstury, obrazy zestawu danych) | część macOS; ok. 2× szybszy niż stb_image_write na atlasie 4096² |
 
 Marching cubes, ICP, graf póz, fuzja TSDF, czyszczenie siatki i mieszanie tekstur to nasz własny kod w
 `Sources/FaceReconCore` (C++17 / Objective‑C++ / Metal). Licencje: [NOTICE](NOTICE) i `third_party/*/`; pakiet

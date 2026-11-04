@@ -835,7 +835,7 @@ distortion). The debug-build unit tests run the 13-keyframe 640×400 pipeline in
 * **The back of the head is not observed** by the guided-scan poses (|yaw| ≤ 45°). `closeHead` (default) closes it
   with a synthesized surface ("Closing the head"): plausible, not measured — 40 % of the closed head's surface, a
   flat cap at the chin crop, and accuracy figures only for `ReconMesh.measuredSurface`. Tests that compare a whole
-  closed mesh with a ground truth measure the guess (3.5 mm mean on the synthetic head, 25–55 mm on the cap inside
+  closed mesh with a ground truth measure the guess (3.5–3.7 mm mean on the synthetic head, 25–55 mm on the cap inside
   the true neck). A measured back needs back or over-the-shoulder views from the scan module.
 * **The closing is star-shaped** around the fitted head center: where the measured border is not (an ear's rim on
   the loop), the closing meets it with a crease rather than following it; small pinches remain where the flat cap

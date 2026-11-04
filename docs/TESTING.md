@@ -30,8 +30,9 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
   not set); the playback ones also need `build/helper/tests/make-test-recording` (`-DIFS_HELPER_TESTS=ON`).
   `IFS_HELPER` is the variable `ifscan` and the recording tests use.
 * C++ capture engine tests of the helper (synthetic recordings, no camera): build the helper with
-  `-DIFS_HELPER_TESTS=ON`, then `ctest --test-dir build/helper --output-on-failure` (one ctest entry running the 25
-  `capture-tests`, ~25 s; the benchmark is skipped unless run as `build/helper/tests/capture-tests bench`).
+  `-DIFS_HELPER_TESTS=ON`, then `ctest --test-dir build/helper --output-on-failure` (one ctest entry running the 28
+  `capture-tests`, ~25 s; 27 run by default, because the benchmark is skipped unless run as
+  `build/helper/tests/capture-tests bench`).
 * The SDK bookkeeping of the build scripts (moving between versions of `patches/`, the SDK's input stamp):
   `scripts/test-build-scripts.sh`, against a stand-in librealsense in a temporary folder (no network, ~10 s).
 * Do not run anything with `sudo` for tests; only the live camera needs administrator rights.
@@ -44,14 +45,16 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
 | `ReconKitTests/SyntheticScanTests` | synthetic ground truth: depth equals an independent brute-force ray cast of the ground-truth mesh, back-projected depth lies on the surface, noise statistics, invalid pixels at silhouettes, `HeadPose` sign conventions, determinism, closed outward mesh |
 | `ReconKitTests/CLIArgumentTests`, `CLIToolTests` | `ifscan` parsing (32 invalid command lines), commands run in-process, exit codes, outputs checked before any work (unwritable paths, `--save-dataset` onto the input), ground-truth evaluation of a scan that does not start with the frontal pose (world frames aligned), `synthetic-camera` stopping at `--time-limit`, OBJ dialects |
 | `ReconKitTests/EndToEndSyntheticTests` | synthetic 1280×800 scan → `ReconstructionPipeline` (decimated to 60k triangles before texturing) → rotation error mean < 1°, worst frame < 1.5°, head misalignment < 5 mm, surface distance of the measured part (`ReconMesh.measuredSurface`: without the synthesized closing of the back of the head) mean < 1 mm and p95 < 2.5 mm, export frame upright; the same through `ifscan reconstruct`, and the exported OBJ measured through `--report` matches the report's whole-mesh distance. Enabled by `CoreAvailability` (the core is integrated); recordings from `IFS_TEST_RECORDINGS` |
-| `IntelFaceScanAppTests` | the app executable (`@testable import`): `AppModel` lifecycle with the fake-camera helper (skipped without `build/helper/IntelFaceScanHelper`), settings mapping and loading older stored settings, English/Polish strings and Polish plurals, result export success and failure paths, the SceneKit preview rendered offscreen; `IFS_APP_FULL_SCAN=1` runs the full guided synthetic scan, reconstruction and OBJ export through `AppModel`. `IntelFaceScan --render-snapshots <dir>` renders the UI's screens to PNG (add `-AppleLanguages '(pl)'` for Polish) |
+| `IntelFaceScanAppTests` | the app executable (`@testable import`): `AppModel` lifecycle with the fake-camera helper (skipped without `build/helper/IntelFaceScanHelper`), settings mapping and loading older stored settings, English/Polish strings, report notes and Polish plurals, result export success and failure paths, the SceneKit preview rendered offscreen; `IFS_APP_FULL_SCAN=1` runs the full guided synthetic scan, reconstruction and OBJ export through `AppModel`. A debug build renders the UI's screens to PNG: `$(swift build --show-bin-path)/IntelFaceScan --render-snapshots <dir>` (add `-AppleLanguages '(pl)'` for Polish); release builds, including the bundled app, ignore the option |
 
 The other suites belong to the modules' work streams: `CameraKitTests` (wire format, JSON, the helper in fake-camera
 mode end to end, session lifecycle, frame broadcasting, playback backpressure, the helper's security checks),
 `ScanKitTests/Guidance*` (head tracker, masks, quality, scan controller), `FaceReconCoreTests/Recon*`, `Mesh*`,
 `Texture*`, `ExportFile*` and `ReconKitTests/Pipeline*` (with the registration check and robustness to real-data
-imperfections), `MeshProcessing*`, `Export*`, `TextureBake*` (registration, fusion, mesh processing, texturing,
-export).
+imperfections), `ReconLensDistortion*` (undistorting keyframes once before reconstruction), `ReconInitialPose*`
+(initial rotations with Vision's line of sight taken out), `MeshProcessing*`, `MeshClosing*` (closing the head into a
+watertight bust that keeps the measured surface), `MeshSynthesizedTexture*` (interpolated colors on synthesized
+surface), `Export*`, `TextureBake*` (registration, fusion, mesh processing, texturing, export).
 
 `CoreAvailability` (SyntheticData) probes the core with arguments a real implementation rejects without side
 effects and reports which stages still return `FR_ERR_NOT_IMPLEMENTED`; use it for any test that needs a stage
@@ -146,8 +149,8 @@ $IFSCAN eval /tmp/head.obj --gt /tmp/head.ifsdataset/ground_truth.obj --report /
   `--voxel-mm`, `--method tsdf|poisson`, `--keep-shoulders`, `--open-back` (leave the unscanned back of the head
   and the neck open instead of closing them with a synthesized surface), `--icp colored|geometric` (default geometric =
   point-to-plane), `--triangles` (decimate before texturing; UV unwrapping and baking the full-resolution
-  0.75 mm head mesh of `ifscan synth`, ~500k triangles, take ~16 s of its ~18 s reconstruction in a release
-  build), `--texture-size`, `--save-dataset` (not onto the input), `--helper`, `--report`, `-q`,
+  0.75 mm head mesh of `ifscan synth`, ~550k triangles with the closed back of the head (~500k with
+  `--open-back`), take ~16 s of its ~21 s reconstruction in a release build; closing the head adds ~5 s of cleanup), `--texture-size`, `--save-dataset` (not onto the input), `--helper`, `--report`, `-q`,
   `--time-limit` (synthetic-camera: stop the guided scan after this many seconds, default 600, and reconstruct
   what it accepted; it would otherwise wait forever for a pose Vision never detects). Every
   output path is checked (folders created, writable) before the input is read, so a long scan is not lost at the

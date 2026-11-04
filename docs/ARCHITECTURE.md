@@ -52,7 +52,7 @@ IntelFaceScan does a 3D scan of a human head with an Intel RealSense D455 (USB�
 | Shared types | `Sources/CameraKit/CameraTypes.swift`, `CameraSource.swift`, `Sources/ScanKit/ScanTypes.swift`, `Sources/ReconKit/ReconTypes.swift`, `Sources/ReconKit/CoreBridge.swift`, `Sources/FaceReconCore/include/*.h`, `Sources/FaceReconCore/src/common/*` | Swift/C | shared (frozen) |
 | Guided scan (Vision, state machine, quality, coverage) | `Sources/ScanKit/Guidance/*` | Swift | ui-scan |
 | SwiftUI app (except the 3D viewer) | `Sources/IntelFaceScanApp/*` | Swift | ui-scan |
-| Registration, pose graph, TSDF (Metal), MC, Poisson | `Sources/FaceReconCore/src/{registration,fusion}/*`, `Sources/ReconKit/ReconstructionPipeline.swift`, `Sources/ReconKit/Registration*.swift`, `Sources/ReconKit/SegmentationHeadMask.swift`, `docs/RECONSTRUCTION.md` | C++/ObjC++/Swift | recon |
+| Registration, pose graph, TSDF (Metal), MC, Poisson | `Sources/FaceReconCore/src/{registration,fusion}/*`, `Sources/ReconKit/ReconstructionPipeline.swift`, `Sources/ReconKit/Registration*.swift`, `Sources/ReconKit/SegmentationHeadMask.swift`, `Sources/ReconKit/LensUndistortion.swift`, `docs/RECONSTRUCTION.md` | C++/ObjC++/Swift | recon |
 | Mesh cleanup, UV, texture, export, 3D viewer | `Sources/FaceReconCore/src/{mesh,texture,export}/*`, `Sources/ReconKit/{MeshProcessing,Texturing,MeshExport}.swift`, `Sources/IntelFaceScanApp/ModelViewer/*` | C++/Swift | mesh |
 | Datasets, synthetic data, eval, CLI, CI | `Sources/ScanKit/Dataset/*`, `Sources/SyntheticData/*`, `Sources/FaceReconCore/src/eval/*`, `Sources/ifscan/*`, `.github/workflows/*`, `scripts/test.sh`, `docs/TESTING.md` | Swift/C++ | tests |
 | Build, app bundle, DMG | `scripts/build.sh`, `scripts/bundle-app.sh`, `scripts/package.sh`, `scripts/dev-worktree-setup.sh`, `tools/release/*` | bash/C/Swift | platform |
@@ -72,11 +72,13 @@ Each work stream owns its tests under `Tests/<Module>Tests/` (file names prefixe
    the coverage map shows which head areas are covered.
 3. **Reconstruction** (`ReconstructionPipeline`):
    0. lens undistortion: keyframes whose color carries a distortion model (the D455's inverse Brown-Conrady) are
-      remapped once to a pinhole – color, mask, landmarks, face rectangle, and depth only where it follows the
-      distortion (on arm64 librealsense's align leaves aligned depth pinhole for inverse Brown-Conrady),
+      remapped once to a pinhole – color, mask, landmarks, face rectangle, and the depth only when it follows the
+      distortion (modified Brown-Conrady; librealsense's SIMD align, NEON on arm64, leaves a D455's aligned depth
+      pinhole for inverse Brown-Conrady),
    1. segmentation: person mask ∩ depth band around the face ∩ above the chin/neck cut (option: keep shoulders),
-   2. initial poses from the Vision head pose with its line-of-sight bias taken out (rotation) and landmark/mask
-      centroids (translation),
+   2. initial poses: a rigid fit of the frame's 3D face landmarks onto the reference keyframe's (rotation and
+      translation, accepted within 12° of the Vision head pose); where that fails, the Vision head pose with its
+      line-of-sight bias taken out (rotation) plus a landmark or head-mask centroid (translation),
    3. multi-scale point-to-plane ICP between neighboring keyframes (colored ICP optional; measured comparison in
       docs/RECONSTRUCTION.md),
    4. loop closures between overlapping poses (left↔front↔right, up/down↔front), pose graph optimization,
@@ -135,8 +137,9 @@ mask/000000.png    8-bit head mask (optional)
 Swift package (`swift build -c release`) → `build/IntelFaceScan.app` (`scripts/bundle-app.sh`: helper in
 `Contents/Helpers`, `librealsense2.X.Y.dylib` in `Contents/Frameworks`, `ifscan` in `Contents/MacOS`, NOTICE and the
 third-party licenses in `Contents/Resources`, ad-hoc signature). It prints the time of each step: from a fresh clone
-on an M3 Ultra (28 cores, Command Line Tools only) 122–153 s in five fresh-clone builds – submodules 19–21 s,
-librealsense 45–63 s, helper 3–5 s, Swift release build 62–68 s, bundle 2–8 s; a second run without changes takes
+on an M3 Ultra (28 cores, Command Line Tools only) 122–153 s in five fresh-clone builds – submodules 0–21 s (about
+20 s when `scripts/build.sh` fetches them, 0–1 s after `git clone --recurse-submodules`, which then takes those 20 s
+itself), librealsense 45–63 s, helper 3–5 s, Swift release build 62–85 s, bundle 2–8 s; a second run without changes takes
 3 s, or about a minute when SwiftPM 6.4's build backend decides to recompile every module.
 
 Requirements: an Apple Silicon Mac, the Command Line Tools (`xcode-select --install`) or Xcode 27 with the macOS
