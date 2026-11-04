@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <libproc.h>
 #include <pwd.h>
 #include <string>
 #include <unistd.h>
@@ -37,6 +38,19 @@ void ensure_standard_descriptors()
 
 void close_inherited_descriptors()
 {
+    // The kernel's list of this process's descriptors: a loop up to the soft RLIMIT_NOFILE alone misses descriptors
+    // the parent opened before it lowered the limit (they stay open and usable above it).
+    const int needed = ::proc_pidinfo( ::getpid(), PROC_PIDLISTFDS, 0, nullptr, 0 );
+    if( needed > 0 )
+    {
+        std::vector< proc_fdinfo > fds( size_t( needed ) / sizeof( proc_fdinfo ) + 16 );
+        const int got = ::proc_pidinfo( ::getpid(), PROC_PIDLISTFDS, 0, fds.data(),
+                                        int( fds.size() * sizeof( proc_fdinfo ) ) );
+        for( size_t i = 0, n = got > 0 ? size_t( got ) / sizeof( proc_fdinfo ) : 0; i < n; ++i )
+            if( fds[i].proc_fd > STDERR_FILENO )
+                ::close( fds[i].proc_fd );
+    }
+    // And the classic sweep, in case the list could not be read.
     rlimit rl{};
     int limit = 4096;
     if( ::getrlimit( RLIMIT_NOFILE, &rl ) == 0 && rl.rlim_cur != RLIM_INFINITY )
