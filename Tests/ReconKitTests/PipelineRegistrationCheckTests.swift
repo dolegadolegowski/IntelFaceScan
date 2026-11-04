@@ -99,6 +99,15 @@ struct PipelineRegistrationCheckTests {
         }
     }
 
+    @Test func landmarksForAnotherFrameCountAreIgnored() throws {
+        let scan = PipelineTests.scan
+        let frames = try Self.frames(scan)
+        for landmarks in [[], Array(try Self.landmarks(scan).dropLast())] {
+            let check = try RegistrationCheck.verify(frames: frames, poses: scan.truth, landmarks: landmarks)
+            #expect(check.passed.allSatisfy { $0 } && check.landmarkFailed.count == frames.count)
+        }
+    }
+
     @Test func landmarkTermOnTheTexturedHead() throws {
         // SyntheticScan: 76 Vision-like landmarks with 1 px noise (also on occluded face parts), 1280x800.
         var o = SyntheticScan.Options()
@@ -118,6 +127,30 @@ struct PipelineRegistrationCheckTests {
               + "left #\(left) turned 4 deg \((check.landmarkResiduals[left] ?? .nan) * 1000) mm")
         #expect(!check.passed[left])
         #expect(check.passed.enumerated().allSatisfy { $0.offset == left || $0.element })
+    }
+
+    @Test(.enabled(if: CoreAvailability.reconstruction, "the core is a placeholder"))
+    func appleVisionLandmarksKeepEveryCorrectKeyframe() async throws {
+        // The landmarks and face rectangles of Apple Vision itself on the rendered head (lighting 0.6 as for the
+        // synthetic camera). Its landmarks drift with the view angle (left views of this scan 16-23 mm from the
+        // reference's at the true poses, against 1-2 mm for the projected model points), so the landmark term, when
+        // the pipeline used it, dropped both left views of this scan. The pipeline leaves it off.
+        var o = SyntheticCameraSource.defaultOptions
+        o.width = 1280
+        o.height = 800
+        o.seed = 5
+        o.poses = ScanPose.required
+        let result = SyntheticScan.make(o)
+        let tracker = HeadTracker(convention: .documented)
+        var keyframes: [Keyframe] = []
+        for var kf in result.capture.keyframes {
+            let observation = try #require(try tracker.analyze(kf.frame, segmentation: false), "no face in keyframe #\(kf.id)")
+            kf.landmarks = observation.landmarks
+            kf.faceRect = observation.faceRect
+            keyframes.append(kf)
+        }
+        let out = try await ReconstructionPipeline().run(ScanCapture(keyframes: keyframes))
+        #expect(out.report.usedFrames == keyframes.count, "\(out.report.notes)")
     }
 
     /// IFS_RECON_STUDY=1: the surface check and the landmark term against 2 and 4 degree rotations about the head

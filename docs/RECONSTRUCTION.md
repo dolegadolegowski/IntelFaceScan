@@ -17,7 +17,7 @@ frame 0 of the registration).
 | preparing | order keyframes front, up, down, left, right, diagonals (stable); drop frames with inconsistent image data; remove the color lens distortion (below) | Swift, `LensUndistortion.swift` |
 | segmentation | head masks per keyframe (below); at least 5 usable keyframes including a frontal one, otherwise `notEnoughKeyframes` / `core(stage: "validation")` | `SegmentationHeadMask.swift` |
 | registration | initial poses, `fr_register_frames` (clouds, pairwise ICP, loop closures) | `RegistrationInitialPoses.swift`, `fr_register_frames.cpp` |
-| globalOptimization | pose graph (reported by the core's progress), then a registration check that drops frames whose surface or face landmarks do not fit (below) | `fr_pose_graph.cpp`, `RegistrationCheck` |
+| globalOptimization | pose graph (reported by the core's progress), then a registration check that drops frames whose surface does not fit (below) | `fr_pose_graph.cpp`, `RegistrationCheck` |
 | fusion | robust bounds of the registered clouds + margin, then TSDF integration on Metal (CPU fallback), or screened Poisson | `fr_tsdf.cpp`, `tsdf_metal.mm`, `fr_poisson.cpp` |
 | meshing | marching cubes | `marching_cubes.cpp` |
 | cleanup | crop below the chin unless `keepShoulders`, then `MeshProcessing.clean` | pipeline + mesh module |
@@ -281,15 +281,16 @@ misregistered one was dropped (tests with a 3.6 mm offset of one frame and of a 
 fixed number of most similar views is not enough either: with four keyframes per pose those are all siblings, and
 the left groups of the 40-keyframe benchmark were never linked to the reference (test with four views per pose).
 
-**Face-landmark term.** The surface cannot see a frame rotated a few degrees about the head center, because the
-near-spherical skull slides along itself: 4° of yaw leaves the best pair at an RMSE of 1.0 mm, under the limit of
-about 1.4 mm. The face sits 8–10 cm in front of the head center, so its landmarks move 5–7 mm. The check takes the
-camera-frame 3D landmarks of the initial poses (depth median within 2 px). For each frame, the residual is the
-25th percentile of the distances between its landmarks and the reference's, both carried into the world. A low
-quantile, because Vision places the landmarks of occluded face parts on other surfaces in turned views. A frame with
-at least 8 landmark pairs and a residual above max(4 mm, 2.5 × the median frame's) neither passes nor links others,
-and the report names it separately ("face landmarks do not fit"). Measured (`PipelineRegistrationCheckTests`,
-`IFS_RECON_STUDY=1` `landmarkTermStudy`):
+**Face-landmark term (evaluated, off).** The surface cannot see a frame rotated a few degrees about the head center,
+because the near-spherical skull slides along itself: 4° of yaw leaves the best pair at an RMSE of 1.0 mm, under the
+limit of about 1.4 mm. The face sits 8–10 cm in front of the head center, so its landmarks move 5–7 mm.
+`RegistrationCheck.verify` can take the camera-frame 3D landmarks of the initial poses (depth median within 2 px).
+For each frame, the residual is the 25th percentile of the distances between its landmarks and the reference's,
+both carried into the world. A low quantile, because Vision places the landmarks of occluded face parts on other
+surfaces in turned views. A frame with at least 8 landmark pairs and a residual above max(4 mm, 2.5 × the median
+frame's) neither passes nor links others, and the report names it separately ("face landmarks do not fit").
+Measured with idealized landmarks (the projected model points; `PipelineRegistrationCheckTests`, `IFS_RECON_STUDY=1`
+`landmarkTermStudy`):
 
 | rotation about the head center | surface check | landmark residual |
 |---|---|---|
@@ -300,8 +301,15 @@ and the report names it separately ("face landmarks do not fit"). Measured (`Pip
 | **4° yaw or pitch** (5 views; textured head: left view) | **passes** | **5.23–7.16 mm (caught)**; 6.48 mm |
 | 4° roll about the viewing axis | passes | 1.91–2.77 mm (passes) |
 
-The relative limit keeps correct frames when the landmarks of a whole scan are noisier than the synthetic ones; real
-Vision landmarks have view-dependent biases that only recordings can measure.
+With the landmarks of Apple Vision itself (on the same rendered head, lighting 0.6, 1280×800; 7 scans, 5 or 9 poses
+× 2) the residuals of the *true* poses grow with the view angle: second frontal view 0.8–1.6 mm, up/down 2.4–11.3 mm,
+left/right 6.7–26.6 mm, diagonals 10.9–38.6 mm. The scan-wide relative limit then fails the most turned correct views
+(left views in 3 of 4 five-pose scans, both of them in 2; a down-left view in 1 of 3 nine-pose scans; the full
+pipeline dropped correct views in 3 of 6 scans, both left views in one), while it flagged at most 2 of 9 frames
+per scan turned by 4° about the head center. It neither catches the 4° case reliably nor keeps correct keyframes,
+so the pipeline leaves it off (`RegistrationCheck.landmarkTermEnabled`; `appleVisionLandmarksKeepEveryCorrectKeyframe`
+runs the pipeline on such a scan). Vision on a real face may be more consistent than on the rendered head; a limit
+per view angle, measured on recordings, would be the next step.
 
 ## Pose graph (`fr_pose_graph_*`)
 
@@ -659,7 +667,8 @@ scenario):
 | all combined, D455 color distortion, head 8 cm right, 4 cm down | colored | 0.93° / 1.83° | 4.29 mm | 0.61 / 2.32 mm |
 
 Every run keeps all 10 keyframes. Re-measured after the lens undistortion, the line-of-sight correction, the
-landmark term of the registration check and the ramped eye-line weights, against the same table
+landmark term of the registration check (since turned off; it dropped no frame in these runs) and the ramped
+eye-line weights, against the same table
 measured at 933c323 on the same machine: the point-to-plane rows of the scenarios that existed before moved by at
 most 0.01° and 0.02 mm, the colored rows by at most 0.02° and 0.05 mm, in both directions. The two new rows put the
 head off the optical axis and render the color through the D455 lens.
@@ -693,10 +702,9 @@ reference machine is an M4 Pro; this one is somewhat faster on GPU and CPU throu
 | **total** | **13.5** |
 
 This is inside the 60 s target; texturing dominates. The registration check was 0.15 s when it compared each frame
-with one view only; it now evaluates about 6 pairs per frame (its landmark term reuses the initial poses' landmarks
-and costs nothing measurable). Lens undistortion, when the keyframes carry distortion, adds about 15 ms for 10–18
-keyframes at 1280×800 (`ifscan reconstruct`, release; this benchmark has no distortion). The debug-build unit tests
-run the 13-keyframe 640×400 pipeline in 1–3 s plus texturing.
+with one view only; it now evaluates about 6 pairs per frame. Lens undistortion, when the keyframes carry
+distortion, adds about 15 ms for 10–18 keyframes at 1280×800 (`ifscan reconstruct`, release; this benchmark has no
+distortion). The debug-build unit tests run the 13-keyframe 640×400 pipeline in 1–3 s plus texturing.
 
 ## Known limits
 
@@ -706,9 +714,9 @@ run the 13-keyframe 640×400 pipeline in 1–3 s plus texturing.
   per-frame status, so the pipeline re-scores the registered clouds (`RegistrationCheck`, below) and leaves failing
   frames out of fusion.
 * **Registration check blind spot.** An error that rotates a frame about the head center mostly slides the
-  near-spherical skull along itself; the surface check does not see a few degrees of it. The landmark term catches
-  about 4° of yaw or pitch, not roll about the viewing axis (the face landmarks lie within ~5 cm of that axis), and
-  not less than ~3° (landmark noise). The pose graph and the edge rejection are the defense there.
+  near-spherical skull along itself; the surface check does not see a few degrees of it. A face-landmark term catches
+  about 4° of yaw or pitch with idealized landmarks, but Apple Vision's landmarks drift too much with the view angle
+  ("Registration check"), so it is off. The pose graph and the edge rejection are the defense there.
 * **Export orientation.** Yaw and pitch come from the mean of all keyframes' Vision head poses carried into the
   world (outliers more than 10° off ignored), with the line of sight taken out ("Initial poses"). Roll comes from the
   reference eye line in the image. For a face off the optical axis, perspective moves the image midpoint of symmetric

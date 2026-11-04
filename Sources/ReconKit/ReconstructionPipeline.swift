@@ -222,7 +222,8 @@ final class PipelineRun: @unchecked Sendable {
         // Frames whose registered surface does not fit their neighbors would smear the fusion.
         emit(.globalOptimization, 0.38, "checking registration")
         let check = try timed("registration check") {
-            try RegistrationCheck.verify(frames: regFrames, poses: poses, landmarks: initial.landmarks)
+            try RegistrationCheck.verify(frames: regFrames, poses: poses,
+                                         landmarks: RegistrationCheck.landmarkTermEnabled ? initial.landmarks : nil)
         }
         let used = (0 ..< usable.count).filter { check.passed[$0] }
         let landmarkDropped = (0 ..< usable.count).filter { !check.passed[$0] && check.landmarkFailed[$0] }

@@ -341,6 +341,13 @@ enum RegistrationCheck {
     static let minLandmarkLimit: Float = 0.004
     static let landmarkLimitFactor: Float = 2.5
     static let landmarkQuantile: Float = 0.25
+    /// Whether the pipeline uses the landmark term. Off: it catches 4 deg about the head center only with idealized
+    /// landmarks (the projected model points of SyntheticScan). With Apple Vision's landmarks on the rendered head,
+    /// the residuals of correct poses grow with the view angle (front 1 mm, up/down 2-11 mm, left/right 7-27 mm,
+    /// diagonals 11-39 mm), so the scan-wide relative limit failed correct left views at the true poses in 3 of 4
+    /// 5-pose scans (both of them in 2) and flagged at most 2 of 9 frames per scan turned by 4 deg
+    /// (docs/RECONSTRUCTION.md, "Registration check").
+    static let landmarkTermEnabled = false
 
     struct Outcome {
         var passed: [Bool]
@@ -364,6 +371,8 @@ enum RegistrationCheck {
     /// of yaw: RMSE 1.0 mm against a limit of ~1.4 mm). With `landmarks` (camera-frame 3D landmarks per frame), a
     /// face-feature term catches it: the face is 8-10 cm in front of the head center, so its landmarks move 5-7 mm.
     /// Frames whose landmarks, carried into the world, disagree with the reference's neither pass nor link others.
+    /// The pipeline leaves the term off (landmarkTermEnabled): Vision's landmarks are not consistent enough across
+    /// views.
     static func verify(frames: RGBDFrameSet, poses: [simd_float4x4], landmarks: [[SIMD3<Float>?]]? = nil) throws -> Outcome {
         let n = frames.count
         guard n > 1 else {
@@ -443,8 +452,10 @@ enum RegistrationCheck {
                 scores[k] = s
             }
         }
-        // Face features (relative limit: real Vision landmarks may be noisier than the synthetic ones).
-        let residuals = landmarks.map { landmarkResiduals($0, poses: poses) } ?? Array(repeating: nil, count: n)
+        // Face features (relative limit: real Vision landmarks may be noisier than the synthetic ones). Landmarks for
+        // another number of frames are ignored (the per-frame arrays below are indexed by frame).
+        let residuals = landmarks.flatMap { $0.count == n ? landmarkResiduals($0, poses: poses) : nil }
+            ?? Array(repeating: nil, count: n)
         let typical = residuals.dropFirst().compactMap { $0 }.sorted()
         let landmarkLimit = max(minLandmarkLimit, typical.isEmpty ? 0 : landmarkLimitFactor * typical[typical.count / 2])
         let landmarkFail = residuals.enumerated().map { $0.offset != 0 && ($0.element ?? 0) > landmarkLimit }
