@@ -45,7 +45,7 @@ private struct SourceSection: View {
             } label: {
                 Label(model.hasSource ? S.sources + "…" : S.sources, systemImage: "plus.circle")
             }
-            .disabled(model.isConnecting || model.screen == .scanning)
+            .disabled(!model.canOpenSource)
         }
     }
 

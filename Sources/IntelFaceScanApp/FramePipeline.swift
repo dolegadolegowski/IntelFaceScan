@@ -2,7 +2,8 @@
 //
 // Moves frames from the camera source to the Metal preview and to the face analysis (Vision + scan state
 // machine). Both consumers keep only the newest frame: a slow analysis never delays the preview, and neither
-// builds a backlog. Results are published to the main actor.
+// builds a backlog. Results are published to the main actor, coalesced to the newest one; the frame tasks never
+// wait for the main actor, so stop() finishes even while the main queue cannot run (see AppModel termination).
 
 import CameraKit
 import CoreGraphics
@@ -48,6 +49,12 @@ final class FramePipeline: @unchecked Sendable {
     private var tasks: [Task<Void, Never>] = []
     private var displayRate = RateCounter()
     private var analysisRate = RateCounter()
+    /// false while no screen shows the preview (scan summary, reconstruction, result): frames are dropped instead
+    /// of uploaded and analyzed, so the reconstruction does not compete with Vision for the CPU.
+    private var active = true
+    private var stopped = false
+    private var pendingResult: AnalysisResult?
+    private var deliveryScheduled = false
 
     init(source: CameraSource, renderer: PreviewRenderer?, controller: ScanController) {
         self.source = source
@@ -60,6 +67,12 @@ final class FramePipeline: @unchecked Sendable {
         lock.withLock { self.controller = controller }
     }
 
+    func setActive(_ active: Bool) {
+        lock.withLock { self.active = active }
+    }
+
+    var isActive: Bool { lock.withLock { active } }
+
     func start(onResult: @escaping @MainActor @Sendable (AnalysisResult) -> Void,
                onEnd: @escaping @MainActor @Sendable () -> Void) {
         let (analysisFrames, analysisInput) = AsyncStream.makeStream(of: CameraFrame.self,
@@ -67,13 +80,18 @@ final class FramePipeline: @unchecked Sendable {
         let frames = source.frames(bufferingNewest: 2)
         let distribute = Task.detached(priority: .userInitiated) { [weak self, renderer] in
             for await frame in frames {
-                if Task.isCancelled { break }
+                guard let self, !Task.isCancelled else { break }
+                let use = self.lock.withLock { () -> Bool in
+                    guard self.active, !self.stopped else { return false }
+                    self.displayRate.tick()
+                    return true
+                }
+                guard use else { continue }
                 renderer?.submit(frame)
-                self?.lock.withLock { self?.displayRate.tick() }
                 analysisInput.yield(frame)
             }
             analysisInput.finish()
-            if !Task.isCancelled { await onEnd() }
+            if !Task.isCancelled { Task { @MainActor in onEnd() } }
         }
         let analyze = Task.detached(priority: .userInitiated) { [weak self] in
             for await frame in analysisFrames {
@@ -89,20 +107,48 @@ final class FramePipeline: @unchecked Sendable {
                 let result = AnalysisResult(update: update,
                                             imageSize: CGSize(width: frame.color.width, height: frame.color.height),
                                             stats: stats, controllerID: ObjectIdentifier(controller))
-                await onResult(result)
+                self.deliver(result, to: onResult)
             }
         }
         lock.withLock { tasks = [distribute, analyze] }
     }
 
-    /// Stops both consumers and waits for them.
-    func stop() async {
+    /// Hands the newest result to the main actor: at most one hop is pending, a newer result replaces an
+    /// undelivered one (the scan state lives in the controller, an update is only what the UI shows).
+    private func deliver(_ result: AnalysisResult, to onResult: @escaping @MainActor @Sendable (AnalysisResult) -> Void) {
+        let schedule = lock.withLock { () -> Bool in
+            guard !stopped else { return false }
+            pendingResult = result
+            if deliveryScheduled { return false }
+            deliveryScheduled = true
+            return true
+        }
+        guard schedule else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let latest = self.lock.withLock { () -> AnalysisResult? in
+                self.deliveryScheduled = false
+                defer { self.pendingResult = nil }
+                return self.stopped ? nil : self.pendingResult
+            }
+            if let latest { onResult(latest) }
+        }
+    }
+
+    /// Stops both consumers without waiting; no result is delivered afterwards.
+    func cancel() {
         let running = lock.withLock { () -> [Task<Void, Never>] in
-            let t = tasks
-            tasks = []
-            return t
+            stopped = true
+            pendingResult = nil
+            return tasks
         }
         for task in running { task.cancel() }
+    }
+
+    /// Stops both consumers and waits for them (never for the main actor).
+    func stop() async {
+        cancel()
+        let running = lock.withLock { tasks }
         for task in running { await task.value }
     }
 }
