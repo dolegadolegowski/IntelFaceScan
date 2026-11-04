@@ -1961,8 +1961,9 @@ fr_status fr_mesh_fill_holes_ex( fr_mesh * mesh, const fr_fill_params * params, 
                     r.filled_area_m2 += float( stats.area );
                     r.folded_triangles += stats.folded;
                 }
-                else
+                else if( ! params->close_largest )
                 {
+                    // (With close_largest the closing pass below tries the loop again and counts it.)
                     r.rejected_holes += loop.v.size() <= max_edges;
                     ++r.open_loops;
                 }
@@ -1982,7 +1983,7 @@ fr_status fr_mesh_fill_holes_ex( fr_mesh * mesh, const fr_fill_params * params, 
             double longest = 0;
             for( const boundary_loop & loop : loops )
                 longest = std::max( longest, loop.length );
-            uint32_t closed = 0, open = 0, folded_now = 0;
+            uint32_t closed = 0, open = 0, rejected = 0, folded_now = 0;
             double area = 0;
             for( const boundary_loop & loop : loops )
             {
@@ -1998,7 +1999,10 @@ fr_status fr_mesh_fill_holes_ex( fr_mesh * mesh, const fr_fill_params * params, 
                     folded_now += stats.folded;
                 }
                 else
+                {
                     ++open;
+                    rejected += loop.length < longest && loop.length <= long_loop && loop.v.size() <= max_edges;
+                }
             }
             const bool last = ! closing || attempt == 4 || closed == 0;
             std::vector< uint8_t > remove( before_triangles, 0 );
@@ -2035,6 +2039,7 @@ fr_status fr_mesh_fill_holes_ex( fr_mesh * mesh, const fr_fill_params * params, 
                 r.filled_area_m2 += float( area );
                 r.folded_triangles += folded_now;
                 r.open_loops += open;
+                r.rejected_holes += rejected;
                 break;
             }
             // Undo the closings, drop those triangles (and the fringe they expose), and close again.

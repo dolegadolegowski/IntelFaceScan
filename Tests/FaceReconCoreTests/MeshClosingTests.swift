@@ -226,6 +226,30 @@ struct MeshClosingTests {
         #expect(mesh.synthesized == before)
     }
 
+    /// A hole that no patch can close (smoothing contracted it to a point: its border vertices coincide) stays open and
+    /// is counted once, also when the closing pass tries it a second time.
+    @Test func unfillableHoleIsCountedOnce() throws {
+        var mesh = try Self.openSphere(level: 4, cut: 0.05)
+        // Remove the fan of the vertex nearest to (0, -0.1, 0) and pull its ring onto it.
+        let center = mesh.positions.indices.min { simd_distance(mesh.positions[$0], [0, -0.1, 0]) < simd_distance(mesh.positions[$1], [0, -0.1, 0]) }!
+        var ring = Set<UInt32>()
+        var kept: [UInt32] = []
+        for t in 0 ..< mesh.triangleCount {
+            let tri = Array(mesh.indices[3 * t ..< 3 * t + 3])
+            if tri.contains(UInt32(center)) { ring.formUnion(tri) } else { kept += tri }
+        }
+        mesh.indices = kept
+        for v in ring { mesh.positions[Int(v)] = mesh.positions[center] }
+        #expect(MeshMeasure.boundaryLoops(mesh).count == 2)
+        for close in [false, true] {
+            var copy = mesh
+            let report = try Self.fill(&copy, close: close)
+            let open = close ? 1 : 2  // the hole, and without closing the cap
+            #expect(report.open_loops == open && report.rejected_holes == 1, "close \(close): open \(report.open_loops), rejected \(report.rejected_holes)")
+            #expect(MeshMeasure.boundaryLoops(copy).count == open)
+        }
+    }
+
     @Test func invalidParametersAreRejected() throws {
         var mesh = try Self.openSphere(level: 2, cut: 0.05)
         try mesh.withCoreMesh { m in
