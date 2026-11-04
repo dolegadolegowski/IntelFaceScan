@@ -49,14 +49,16 @@ const char *fr_last_error(void);
    running function then returns FR_ERR_CANCELLED. May be called from worker threads. */
 typedef int (*fr_progress_cb)(void *user, float fraction, const char *stage);
 
-/* Pinhole camera. Distortion coefficients are informational: RealSense D4xx color/depth streams have zero or
-   negligible distortion and the library treats the camera as an ideal pinhole. */
+/* Pinhole camera. The library treats every camera as an ideal pinhole and ignores model and coeffs, so callers pass
+   undistorted images: the D455 color stream has inverse Brown-Conrady distortion (k1 ~ -0.056, a few pixels at the
+   image edges), and ReconKit remaps each keyframe once to the pinhole camera with the same fx, fy, cx, cy before
+   reconstruction (LensUndistortion.swift; docs/RECONSTRUCTION.md, "Lens distortion"). */
 typedef struct fr_intrinsics {
     int32_t width, height;
     float fx, fy;   /* focal lengths in pixels */
     float cx, cy;   /* principal point in pixels */
     float coeffs[5];
-    int32_t model;  /* 0 none, 1 brown-conrady, 2 inverse brown-conrady (informational) */
+    int32_t model;  /* 0 none, 1 brown-conrady, 2 inverse brown-conrady (informational, ignored) */
 } fr_intrinsics;
 
 /* One RGB-D frame. The library never keeps these pointers beyond the call they are passed to. */

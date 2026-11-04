@@ -56,6 +56,20 @@ public enum SyntheticScan {
         public var landmarkNoisePx: Float = 1
         /// Cube-sphere tessellation of the head: 12 * meshResolution^2 triangles (128: ~197k).
         public var meshResolution = 128
+        /// Lens distortion of the color camera (e.g. LensDistortion.d455Color), nil = ideal pinhole. Color, head mask,
+        /// landmarks and face rectangle are rendered through it; the aligned depth follows it only where
+        /// librealsense's align does (LensDistortion.alignedDepthFollowsDistortion: modified Brown-Conrady) and stays
+        /// in the pinhole geometry otherwise, as the helper delivers a D455's inverse Brown-Conrady color stream.
+        /// Both images report the model and coefficients in their intrinsics, as librealsense does.
+        public var lensDistortion: LensDistortion? = nil
+        /// Head position relative to the default (nose near the image center), camera frame, meters (+X right,
+        /// +Y down): a person sitting off the optical axis.
+        public var headOffsetM: SIMD2<Float> = .zero
+        /// Line-of-sight effect of the simulated Vision head pose: Apple Vision measures the face relative to the line
+        /// of sight, so a face seen at angle a right of (below) the optical axis reads gain * a more yaw (less pitch).
+        /// Measured with Vision on the rendered head (docs/RECONSTRUCTION.md, "Initial poses"): yaw 0.75, pitch
+        /// 0.67, the medians of slopes from 0.14 to 1.45. (0, 0) = Vision without this effect.
+        public var visionLineOfSightGain = SIMD2<Float>(0.75, 0.67)
 
         public init() {}
     }
@@ -106,9 +120,11 @@ public enum SyntheticScan {
                 $0 + SIMD2(landmarkSigma * random.gaussian(), landmarkSigma * random.gaussian())
             }
             let faceRect = SyntheticScene.faceRect(landmarks: landmarks, width: options.width, height: options.height)
-            let e = options.headPoseErrorDeg
-            let estimate = HeadPose(yaw: planned.headPose.yaw + e * random.gaussian(),
-                                    pitch: planned.headPose.pitch + e * random.gaussian(),
+            // Vision reads the face relative to its line of sight, through the center of its face rectangle.
+            let lineOfSight = scene.lineOfSightDegrees(cameraFromWorld: cameraFromModel[i])
+            let e = options.headPoseErrorDeg, gain = options.visionLineOfSightGain
+            let estimate = HeadPose(yaw: planned.headPose.yaw + gain.x * lineOfSight.x + e * random.gaussian(),
+                                    pitch: planned.headPose.pitch - gain.y * lineOfSight.y + e * random.gaussian(),
                                     roll: planned.headPose.roll + e * random.gaussian(),
                                     confidence: 0.9 + 0.09 * random.uniform())
             var quality = SyntheticScene.quality(view: view, faceRect: faceRect)
@@ -151,21 +167,52 @@ public struct SyntheticView: Sendable {
 /// The synthetic head placed in front of a D455-like camera; renders arbitrary head poses.
 public final class SyntheticScene: @unchecked Sendable {
     public let options: SyntheticScan.Options
+    /// Color (and aligned depth) intrinsics, with the lens distortion model when there is one.
     public let intrinsics: Intrinsics
     /// Head center and rotation pivot (near the base of the neck), world frame.
     public let headCenter: SIMD3<Float>
     public let pivot: SIMD3<Float>
     let model: HeadModel
     let center: Vec3
+    /// The color lens (nil = pinhole) and its pixel rays.
+    let lens: LensDistortion?
+    let rays: RayTable?
 
     public init(options: SyntheticScan.Options = SyntheticScan.Options()) {
         self.options = options
-        intrinsics = SyntheticScene.intrinsics(width: options.width, height: options.height)
+        let pinhole = SyntheticScene.intrinsics(width: options.width, height: options.height)
+        lens = options.lensDistortion.flatMap { $0.isIdentity ? nil : $0 }
+        if let lens {
+            var k = pinhole
+            k.model = lens.model.rawValue
+            k.coeffs = lens.coeffs
+            intrinsics = k
+            rays = RayTable(intrinsics: pinhole, distortion: lens)
+        } else {
+            intrinsics = pinhole
+            rays = nil
+        }
         model = HeadModel.shared(resolution: options.meshResolution)
         // The face surface is ~8 cm in front of the head center; the nose sits near the image center.
-        center = Vec3(0, -0.03, options.distanceM + 0.08)
+        center = Vec3(options.headOffsetM.x, -0.03 + options.headOffsetM.y, options.distanceM + 0.08)
         headCenter = center.simd
-        pivot = SIMD3(0, center.y + 0.11, center.z + 0.02)
+        pivot = SIMD3(center.x, center.y + 0.11, center.z + 0.02)
+    }
+
+    /// Projects a camera-frame point into the color image, through the lens (rs2_project_point_to_pixel).
+    public func project(_ p: SIMD3<Float>) -> SIMD2<Float> {
+        lens.map { $0.project(p, intrinsics) } ?? intrinsics.project(p)
+    }
+
+    /// Angles (degrees; x toward the image right, y toward the bottom) of the line of sight through the center of
+    /// the noise-free face rectangle, in the ideal pinhole camera: what Apple Vision measures the head pose against.
+    public func lineOfSightDegrees(cameraFromWorld: simd_float4x4) -> SIMD2<Float> {
+        let pose = Rigid(cameraFromWorld) * worldFromLocal
+        let pinhole = model.landmarks.map { intrinsics.project(pose.apply($0).simd) }
+        let rect = SyntheticScene.faceRect(landmarks: pinhole, width: 1 << 20, height: 1 << 20)
+        let toDegrees: Float = 180 / .pi
+        return SIMD2(atan((Float(rect.midX) - intrinsics.ppx) / intrinsics.fx) * toDegrees,
+                     atan((Float(rect.midY) - intrinsics.ppy) / intrinsics.fy) * toDegrees)
     }
 
     /// D455 color intrinsics at 1280x800 scaled to the requested resolution (the principal point is slightly off
@@ -187,6 +234,9 @@ public final class SyntheticScene: @unchecked Sendable {
         Rigid(r: Mat3(m00: 1, m01: 0, m02: 0, m10: 0, m11: -1, m12: 0, m20: 0, m21: 0, m22: -1), t: center)
     }
 
+    /// Renders one view. With a lens distortion, color and mask come from a pass through the lens; the aligned depth
+    /// (and cleanDepth) from the same pass when librealsense's align follows the distortion, otherwise from a
+    /// pinhole pass, which equals the depth of the same scan without distortion.
     public func render(cameraFromWorld: simd_float4x4, frameIndex: UInt64, sequence: UInt64 = 0,
                        timestampMs: Double = 0) -> SyntheticView {
         var settings = RenderSettings(intrinsics: intrinsics)
@@ -198,7 +248,19 @@ public final class SyntheticScene: @unchecked Sendable {
         settings.backgroundDistance = options.backgroundDistanceM
         settings.seed = options.seed
         let pose = Rigid(cameraFromWorld) * worldFromLocal
-        let output = SyntheticRenderer.render(model: model, cameraFromLocal: pose, settings: settings, frameKey: frameIndex)
+        var output = SyntheticRenderer.render(model: model, cameraFromLocal: pose, settings: settings, frameKey: frameIndex)
+        if let lens {
+            var distorted = settings
+            distorted.distortion = lens
+            distorted.rays = rays
+            let view = SyntheticRenderer.render(model: model, cameraFromLocal: pose, settings: distorted, frameKey: frameIndex)
+            if lens.alignedDepthFollowsDistortion {
+                output = view
+            } else {
+                output.color = view.color
+                output.mask = view.mask
+            }
+        }
         let w = intrinsics.width, h = intrinsics.height
         let color = ColorImage(width: w, height: h, bytesPerRow: w * 3, pixels: output.color, intrinsics: intrinsics,
                                frameNumber: sequence, timestampMs: timestampMs)
@@ -214,10 +276,10 @@ public final class SyntheticScene: @unchecked Sendable {
         return SyntheticView(frame: frame, mask: output.mask, cleanDepth: output.cleanDepth, cameraFromWorld: cameraFromWorld)
     }
 
-    /// The 76 landmarks projected into the image (no detection noise).
+    /// The 76 landmarks projected into the color image, through the lens (no detection noise).
     public func landmarks(cameraFromWorld: simd_float4x4) -> [SIMD2<Float>] {
         let pose = Rigid(cameraFromWorld) * worldFromLocal
-        return model.landmarks.map { intrinsics.project(pose.apply($0).simd) }
+        return model.landmarks.map { project(pose.apply($0).simd) }
     }
 
     /// Landmarks in the world frame.

@@ -1,6 +1,7 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
 // ScanCapture -> registered, fused, cleaned, textured mesh. Stages (docs/RECONSTRUCTION.md):
+//   preparing      scan order, lens undistortion of every keyframe (the core works with an ideal pinhole)
 //   segmentation   per-keyframe head masks (depth band, face component, chin cut)
 //   registration   initial poses from Vision + landmarks, pairwise ICP, loop closures, pose graph (FaceReconCore)
 //   fusion         TSDF on the GPU (or screened Poisson), marching cubes
@@ -17,9 +18,17 @@ import simd
 
 public final class ReconstructionPipeline: Sendable {
     public let options: ReconstructionOptions
+    /// Lens undistortion of the keyframes (off only to measure what ignoring the distortion costs).
+    let undistortLens: Bool
 
     public init(options: ReconstructionOptions = ReconstructionOptions()) {
         self.options = options
+        undistortLens = true
+    }
+
+    init(options: ReconstructionOptions, undistortLens: Bool) {
+        self.options = options
+        self.undistortLens = undistortLens
     }
 
     public func run(_ capture: ScanCapture,
@@ -27,10 +36,12 @@ public final class ReconstructionPipeline: Sendable {
         if Task.isCancelled { throw ReconstructionError.cancelled }
         let cancellation = CancellationFlag()
         let options = self.options
+        let undistortLens = self.undistortLens
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ReconstructionResult, Error>) in
                 DispatchQueue.global(qos: .userInitiated).async {
                     let run = PipelineRun(options: options, progress: progress, cancellation: cancellation)
+                    run.undistortLens = undistortLens
                     do {
                         continuation.resume(returning: try run.execute(capture))
                     } catch {
@@ -69,6 +80,7 @@ final class PipelineRun: @unchecked Sendable {
     let progress: @Sendable (ReconstructionProgress) -> Void
     let cancellation: CancellationFlag
     private(set) var report = ReconstructionReport()
+    var undistortLens = true
 
     /// Lowest observation weight of a voxel that may become surface (1 = one frontal view at 0.6 m).
     static let minSurfaceWeight: Float = 0.25
@@ -112,17 +124,33 @@ final class PipelineRun: @unchecked Sendable {
 
     func execute(_ capture: ScanCapture) throws -> ReconstructionResult {
         let total = DispatchTime.now().uptimeNanoseconds
-        let keyframes = capture.keyframes
-        report.keyframes = keyframes.count
+        let captured = capture.keyframes
+        report.keyframes = captured.count
         report.method = options.method
-        emit(.preparing, 0, "\(keyframes.count) keyframes")
+        emit(.preparing, 0, "\(captured.count) keyframes")
 
         // Scan order (front first, stable within a pose), structurally valid frames only.
         let rank = Dictionary(uniqueKeysWithValues: ScanPose.allCases.enumerated().map { ($0.element, $0.offset) })
-        let ordered = keyframes.indices.sorted { (rank[keyframes[$0].scanPose] ?? 99, $0) < (rank[keyframes[$1].scanPose] ?? 99, $1) }
-        let valid = ordered.filter { Self.isStructurallyValid(keyframes[$0]) }
-        if valid.count < keyframes.count {
-            report.notes.append("\(keyframes.count - valid.count) keyframes with inconsistent image data skipped")
+        let ordered = captured.indices.sorted { (rank[captured[$0].scanPose] ?? 99, $0) < (rank[captured[$1].scanPose] ?? 99, $1) }
+        let valid = ordered.filter { Self.isStructurallyValid(captured[$0]) }
+        if valid.count < captured.count {
+            report.notes.append("\(captured.count - valid.count) keyframes with inconsistent image data skipped")
+        }
+        try checkCancelled()
+
+        // Lens distortion: every later stage (core clouds, TSDF, texture projection, landmarks) assumes a pinhole.
+        var keyframes = captured
+        if undistortLens {
+            let start = DispatchTime.now().uptimeNanoseconds
+            let undistorted = KeyframeUndistortion.undistort(captured, indices: valid)
+            keyframes = undistorted.keyframes
+            if !undistorted.removed.isEmpty {
+                report.durations["undistortion"] = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
+                report.notes.append("lens distortion removed: \(undistorted.removed.map(\.rawValue).joined(separator: ", "))")
+            }
+            if !undistorted.unknownModels.isEmpty {
+                report.notes.append("unknown lens distortion model \(undistorted.unknownModels.joined(separator: ", ")): treated as a pinhole")
+            }
         }
         try checkCancelled()
 
@@ -193,11 +221,16 @@ final class PipelineRun: @unchecked Sendable {
 
         // Frames whose registered surface does not fit their neighbors would smear the fusion.
         emit(.globalOptimization, 0.38, "checking registration")
-        let check = try timed("registration check") { try RegistrationCheck.verify(frames: regFrames, poses: poses) }
+        let check = try timed("registration check") {
+            try RegistrationCheck.verify(frames: regFrames, poses: poses,
+                                         landmarks: RegistrationCheck.landmarkTermEnabled ? initial.landmarks : nil)
+        }
         let used = (0 ..< usable.count).filter { check.passed[$0] }
-        if used.count < usable.count {
-            let dropped = (0 ..< usable.count).filter { !check.passed[$0] }.map { "#\(keyframes[usable[$0]].id)" }
-            report.notes.append("keyframes excluded after registration (surface does not fit): \(dropped.joined(separator: ", "))")
+        let landmarkDropped = (0 ..< usable.count).filter { !check.passed[$0] && check.landmarkFailed[$0] }
+        let surfaceDropped = (0 ..< usable.count).filter { !check.passed[$0] && !check.landmarkFailed[$0] }
+        for (frames, reason) in [(surfaceDropped, "surface does not fit"), (landmarkDropped, "face landmarks do not fit")] where !frames.isEmpty {
+            let names = frames.map { "#\(keyframes[usable[$0]].id)" }
+            report.notes.append("keyframes excluded after registration (\(reason)): \(names.joined(separator: ", "))")
         }
         guard used.count >= 5 else { throw ReconstructionError.notEnoughKeyframes(used.count) }
         report.usedFrames = used.count

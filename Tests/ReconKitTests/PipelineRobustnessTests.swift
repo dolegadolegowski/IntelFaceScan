@@ -34,9 +34,17 @@ struct ScanImperfections: Sendable {
     /// Vision head pose error (degrees, standard deviation per angle; SyntheticScan default 2).
     var visionErrorDeg: Float = 2
     var lighting: Float = 0.25
+    /// Color (= aligned depth) resolution.
+    var width = 1280
+    var height = 800
     /// Face distance and white depth noise (sigma at 1 m) of the renderer (SyntheticScan defaults 0.6 m, 2 mm).
     var distanceM: Float = 0.6
     var depthNoiseAt1m: Float = 0.002
+    /// Color lens distortion (SyntheticScan.Options.lensDistortion) and head position off the optical axis.
+    var lensDistortion: LensDistortion?
+    var headOffsetM: SIMD2<Float> = .zero
+    /// Line-of-sight gain of the simulated Vision pose (nil = SyntheticScan's default, measured on Apple Vision).
+    var visionLineOfSightGain: SIMD2<Float>?
 
     static let realistic: ScanImperfections = {
         var p = ScanImperfections()
@@ -178,14 +186,17 @@ enum RobustnessStudy {
 
     static func scan(_ p: ScanImperfections, seed: UInt64 = 1) -> SyntheticScanResult {
         var options = SyntheticScan.Options()
-        options.width = 1280
-        options.height = 800
+        options.width = p.width
+        options.height = p.height
         options.seed = seed
         options.headPoseErrorDeg = p.visionErrorDeg
         options.lighting = p.lighting
         options.dropoutRate = p.speckleRate
         options.distanceM = p.distanceM
         options.depthNoiseAt1m = p.depthNoiseAt1m
+        options.lensDistortion = p.lensDistortion
+        options.headOffsetM = p.headOffsetM
+        if let gain = p.visionLineOfSightGain { options.visionLineOfSightGain = gain }
         var result = SyntheticScan.make(options)
         var keyframes = result.capture.keyframes.enumerated().map { perturb($0.element, p, seed: seed &* 1000 &+ UInt64($0.offset)) }
         var truth = result.groundTruthPoses
@@ -206,13 +217,14 @@ enum RobustnessStudy {
         return options
     }
 
-    static func run(_ p: ScanImperfections, coloredICP: Bool = false, seed: UInt64 = 1,
+    /// - Parameter undistortLens: false skips the pipeline's lens undistortion (to measure what ignoring it costs).
+    static func run(_ p: ScanImperfections, coloredICP: Bool = false, seed: UInt64 = 1, undistortLens: Bool = true,
                     configure: (inout ReconstructionOptions) -> Void = { _ in }) async throws -> RobustnessOutcome {
         let scan = scan(p, seed: seed)
         var options = options
         options.useColoredICP = coloredICP
         configure(&options)
-        let result = try await ReconstructionPipeline(options: options).run(scan.capture)
+        let result = try await ReconstructionPipeline(options: options, undistortLens: undistortLens).run(scan.capture)
         // Used keyframes, in capture order (ReconstructionResult.cameraPoses); excluded ones are named in the notes.
         let excluded = Set(result.report.notes.filter { $0.hasPrefix("keyframes excluded") }
             .flatMap { $0.split(separator: "#").dropFirst().compactMap { Int($0.prefix { $0.isNumber }) } })
@@ -276,7 +288,11 @@ struct PipelineRobustnessTests {
         s = ScanImperfections(); s.name = "exposure ±20%"; s.gainJitter = 0.2; scenarios.append(s)
         s = ScanImperfections(); s.name = "frontal keyframes last"; s.frontalLast = true; scenarios.append(s)
         s = ScanImperfections(); s.name = "8% speckle holes"; s.speckleRate = 0.08; scenarios.append(s)
+        s = ScanImperfections(); s.name = "D455 color distortion, head 15 cm right, 6 cm down"; s.lensDistortion = .d455Color
+        s.headOffsetM = SIMD2(0.15, 0.06); scenarios.append(s)
         scenarios.append(.realistic)
+        s = .realistic; s.name = "all combined, D455 color distortion, head 8 cm right, 4 cm down"; s.lensDistortion = .d455Color
+        s.headOffsetM = SIMD2(0.08, 0.04); scenarios.append(s)
         if let only = ProcessInfo.processInfo.environment["IFS_RECON_STUDY_ONLY"] {
             scenarios = scenarios.filter { $0.name.contains(only) }
         }

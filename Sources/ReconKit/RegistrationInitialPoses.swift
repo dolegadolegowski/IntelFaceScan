@@ -22,7 +22,15 @@ enum InitialPoseEstimator {
         var kabschFrames: Int
         /// Frames with the Vision rotation and a landmark translation.
         var landmarkTranslationFrames: Int
+        /// Camera-frame 3D landmarks per frame (nil where a landmark has no depth on the head).
+        var landmarks: [[SIMD3<Float>?]] = []
     }
+
+    /// Apple Vision measures the head pose relative to the line of sight through the face, not the optical axis: a
+    /// face seen at angle a right of (below) the image center reads about gain * a more yaw (less pitch). Medians of
+    /// the slopes measured with Vision on the rendered synthetic head (yaw 0.25-1.45, pitch 0.14-1.31 over 7 head poses
+    /// and lateral offsets up to 12 cm at 0.6 m; docs/RECONSTRUCTION.md, "Initial poses").
+    static let lineOfSightGain = SIMD2<Float>(0.75, 0.67)
 
     /// Head rotation in the camera frame (ScanKit.HeadPose convention); non-finite angles count as 0.
     static func rotation(_ pose: HeadPose) -> simd_float3x3 {
@@ -31,9 +39,30 @@ enum InitialPoseEstimator {
         return simd_float3x3(clean.cameraFrameRotation)
     }
 
+    /// Head rotation in the camera frame from a keyframe's Vision head pose, with the line of sight through the
+    /// center of its face rectangle taken out (keyframe intrinsics: after undistortion, a pinhole).
+    static func rotation(_ kf: Keyframe, lineOfSightGain gain: SIMD2<Float> = lineOfSightGain) -> simd_float3x3 {
+        rotation(cameraFramePose(kf, lineOfSightGain: gain))
+    }
+
+    /// The keyframe's Vision head pose relative to the optical axis instead of the line of sight: yaw minus
+    /// gain * atan((u - cx) / fx), pitch plus gain * atan((v - cy) / fy), with (u, v) the face rectangle's center.
+    static func cameraFramePose(_ kf: Keyframe, lineOfSightGain gain: SIMD2<Float> = lineOfSightGain) -> HeadPose {
+        var pose = kf.headPose
+        let k = kf.frame.color.intrinsics
+        let rect = kf.faceRect.standardized
+        guard k.fx > 0, k.fy > 0, k.fx.isFinite, k.fy.isFinite, !rect.isNull, rect.width > 0, rect.height > 0,
+              rect.midX.isFinite, rect.midY.isFinite else { return pose }
+        let toDegrees: Float = 180 / .pi
+        pose.yaw -= gain.x * atan((Float(rect.midX) - k.ppx) / k.fx) * toDegrees
+        pose.pitch += gain.y * atan((Float(rect.midY) - k.ppy) / k.fy) * toDegrees
+        return pose
+    }
+
     /// Initial world_from_camera per keyframe; world = camera frame of keyframes[reference].
-    static func estimate(keyframes: [Keyframe], segments: [SegmentedKeyframe], reference: Int) -> Result {
-        let rRef = rotation(keyframes[reference].headPose)
+    static func estimate(keyframes: [Keyframe], segments: [SegmentedKeyframe], reference: Int,
+                         lineOfSightGain gain: SIMD2<Float> = lineOfSightGain) -> Result {
+        let rRef = rotation(keyframes[reference], lineOfSightGain: gain)
         let centers = segments.map { headCenter($0) }
         let landmarks = zip(keyframes, segments).map { landmarkPoints($0.0, $0.1) }
         var poses: [simd_float4x4] = []
@@ -45,7 +74,7 @@ enum InitialPoseEstimator {
             }
             // A head point p (world) appears in frame i at R_i R_ref^T (p - c_ref) + c_i: world_from_camera_i has
             // rotation R_ref R_i^T.
-            let r = rRef * rotation(keyframes[i].headPose).transpose
+            let r = rRef * rotation(keyframes[i], lineOfSightGain: gain).transpose
             if let fit = landmarkKabsch(reference: landmarks[reference], frame: landmarks[i], visionRotation: r) {
                 poses.append(fit)
                 kabsch += 1
@@ -56,7 +85,7 @@ enum InitialPoseEstimator {
                 poses.append(simd_float4x4(rotation: r, translation: centers[reference] - r * centers[i]))
             }
         }
-        return Result(worldFromCamera: poses, kabschFrames: kabsch, landmarkTranslationFrames: translated)
+        return Result(worldFromCamera: poses, kabschFrames: kabsch, landmarkTranslationFrames: translated, landmarks: landmarks)
     }
 
     /// Approximate head center in the camera frame: centroid of the head-mask points pushed back along the ray.
@@ -237,14 +266,15 @@ struct HeadFrame {
     ///   - keyframes, poses: all registered keyframes with their world_from_camera poses. Each one's Vision head
     ///     rotation, carried into the world, is an independent estimate of the head orientation; their robust mean
     ///     is far less noisy than the reference keyframe's alone.
-    init(reference kf: Keyframe, segment s: SegmentedKeyframe, keyframes: [Keyframe], poses: [simd_float4x4]) {
+    init(reference kf: Keyframe, segment s: SegmentedKeyframe, keyframes: [Keyframe], poses: [simd_float4x4],
+         lineOfSightGain gain: SIMD2<Float> = InitialPoseEstimator.lineOfSightGain) {
         var estimates: [simd_quatf] = []
         for (k, pose) in zip(keyframes, poses) {
             let p = k.headPose
             guard p.yaw.isFinite, p.pitch.isFinite, p.roll.isFinite else { continue }
-            estimates.append(simd_quatf(pose.upperLeft3x3 * InitialPoseEstimator.rotation(p)))
+            estimates.append(simd_quatf(pose.upperLeft3x3 * InitialPoseEstimator.rotation(k, lineOfSightGain: gain)))
         }
-        let mean = HeadFrame.robustMean(estimates) ?? kf.headPose.cameraFrameRotation
+        let mean = HeadFrame.robustMean(estimates) ?? simd_quatf(InitialPoseEstimator.rotation(kf, lineOfSightGain: gain))
         // Yaw and pitch from where the mean face points; roll from the reference eye line when available.
         let f = mean.act(SIMD3<Float>(0, 0, -1))
         let yaw = atan2(f.x, -f.z), pitch = asin(min(1, max(-1, -f.y)))
@@ -306,6 +336,28 @@ enum RegistrationCheck {
     /// Views farther apart than this overlap too little to be compared.
     static let maxPairAngle: Float = 60 * .pi / 180
     static let minFitness: Float = 0.25
+    /// Landmark term: a frame fails when its landmark residual exceeds max(minLandmarkLimit, landmarkLimitFactor x
+    /// the median frame's). The residual is the landmarkQuantile of its landmarks' distances to the reference's.
+    static let minLandmarkLimit: Float = 0.004
+    static let landmarkLimitFactor: Float = 2.5
+    static let landmarkQuantile: Float = 0.25
+    /// Whether the pipeline uses the landmark term. Off: it catches 4 deg about the head center only with idealized
+    /// landmarks (the projected model points of SyntheticScan). With Apple Vision's landmarks on the rendered head,
+    /// the residuals of correct poses grow with the view angle (front 1 mm, up/down 2-11 mm, left/right 7-27 mm,
+    /// diagonals 11-39 mm), so the scan-wide relative limit failed correct left views at the true poses in 3 of 4
+    /// 5-pose scans (both of them in 2) and flagged at most 2 of 9 frames per scan turned by 4 deg
+    /// (docs/RECONSTRUCTION.md, "Registration check").
+    static let landmarkTermEnabled = false
+
+    struct Outcome {
+        var passed: [Bool]
+        /// Best surface pair per frame.
+        var scores: [FrameScore]
+        /// Landmark residual per frame (meters; nil for frame 0 and without enough landmarks).
+        var landmarkResiduals: [Float?]
+        /// Frames that fail the landmark term (whatever their surface fit).
+        var landmarkFailed: [Bool]
+    }
 
     /// Scores every frame's registered cloud against the most similar view of its own pose group and of every other
     /// pose group within maxPairAngle. A pair fits when the surfaces overlap (fitness) with an RMSE close to the
@@ -314,9 +366,19 @@ enum RegistrationCheck {
     /// group fits itself (its frames are each other's most similar views) and passed, while a correct frame whose
     /// most similar view was the misregistered one was dropped. The comparisons across pose groups are what link a
     /// group to the reference.
-    static func verify(frames: RGBDFrameSet, poses: [simd_float4x4]) throws -> (passed: [Bool], scores: [FrameScore]) {
+    ///
+    /// The surface cannot see a rotation about the head center: the near-spherical skull slides along itself (4 deg
+    /// of yaw: RMSE 1.0 mm against a limit of ~1.4 mm). With `landmarks` (camera-frame 3D landmarks per frame), a
+    /// face-feature term catches it: the face is 8-10 cm in front of the head center, so its landmarks move 5-7 mm.
+    /// Frames whose landmarks, carried into the world, disagree with the reference's neither pass nor link others.
+    /// The pipeline leaves the term off (landmarkTermEnabled): Vision's landmarks are not consistent enough across
+    /// views.
+    static func verify(frames: RGBDFrameSet, poses: [simd_float4x4], landmarks: [[SIMD3<Float>?]]? = nil) throws -> Outcome {
         let n = frames.count
-        guard n > 1 else { return (Array(repeating: true, count: n), Array(repeating: FrameScore(fitness: 1, rmse: 0), count: n)) }
+        guard n > 1 else {
+            return Outcome(passed: Array(repeating: true, count: n), scores: Array(repeating: FrameScore(fitness: 1, rmse: 0), count: n),
+                           landmarkResiduals: Array(repeating: nil, count: n), landmarkFailed: Array(repeating: false, count: n))
+        }
         var cloudParams = fr_cloud_params()
         fr_cloud_params_default(&cloudParams)
         cloudParams.stride = 2
@@ -390,16 +452,40 @@ enum RegistrationCheck {
                 scores[k] = s
             }
         }
+        // Face features (relative limit: real Vision landmarks may be noisier than the synthetic ones). Landmarks for
+        // another number of frames are ignored (the per-frame arrays below are indexed by frame).
+        let residuals = landmarks.flatMap { $0.count == n ? landmarkResiduals($0, poses: poses) : nil }
+            ?? Array(repeating: nil, count: n)
+        let typical = residuals.dropFirst().compactMap { $0 }.sorted()
+        let landmarkLimit = max(minLandmarkLimit, typical.isEmpty ? 0 : landmarkLimitFactor * typical[typical.count / 2])
+        let landmarkFail = residuals.enumerated().map { $0.offset != 0 && ($0.element ?? 0) > landmarkLimit }
         var passed = [Bool](repeating: false, count: n)
         passed[0] = true
         var stack = [0]
         while let k = stack.popLast() {
-            for j in links[k] where !passed[j] {
+            for j in links[k] where !passed[j] && !landmarkFail[j] {
                 passed[j] = true
                 stack.append(j)
             }
         }
-        return (passed, scores)
+        return Outcome(passed: passed, scores: scores, landmarkResiduals: residuals, landmarkFailed: landmarkFail)
+    }
+
+    /// Per frame, a low quantile of the distances between its world-frame landmarks and the reference's (frame 0),
+    /// over landmarks with depth in both; nil with fewer than 8. A low quantile: Vision places the landmarks of
+    /// occluded face parts on other surfaces in turned views.
+    static func landmarkResiduals(_ landmarks: [[SIMD3<Float>?]], poses: [simd_float4x4]) -> [Float?] {
+        guard let reference = landmarks.first else { return [] }
+        return landmarks.indices.map { i -> Float? in
+            guard i > 0, i < poses.count, landmarks[i].count == reference.count else { return nil }
+            var d: [Float] = []
+            for (a, b) in zip(reference, landmarks[i]) {
+                if let a, let b { d.append(simd_length(InitialPoseEstimator.transform(poses[0], a) - InitialPoseEstimator.transform(poses[i], b))) }
+            }
+            guard d.count >= 8 else { return nil }
+            d.sort()
+            return d[Int(Float(d.count - 1) * landmarkQuantile)]
+        }
     }
 
     /// Axis-aligned bounds of the registered frames (robust percentiles) plus a margin, in the world frame.

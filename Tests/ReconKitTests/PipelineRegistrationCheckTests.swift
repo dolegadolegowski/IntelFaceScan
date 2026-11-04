@@ -5,6 +5,7 @@ import Foundation
 @testable import ReconKit
 import ScanKit
 import simd
+import SyntheticData
 import Testing
 
 @Suite("Pipeline registration check")
@@ -65,5 +66,117 @@ struct PipelineRegistrationCheckTests {
         let check = try RegistrationCheck.verify(frames: try Self.frames(scan), poses: poses)
         #expect(!check.passed[7] && !check.passed[8], "\(check.scores.map { ($0.fitness, $0.rmse * 1000) })")
         #expect(check.passed.enumerated().allSatisfy { [7, 8].contains($0.offset) || $0.element })
+    }
+
+    /// The scan's camera-frame 3D landmarks, as the pipeline computes them for the initial poses.
+    static func landmarks(_ scan: SynthScan) throws -> [[SIMD3<Float>?]] {
+        try scan.capture.keyframes.map { kf in
+            InitialPoseEstimator.landmarkPoints(kf, try #require(HeadSegmentation.segment(kf, keepShoulders: false)))
+        }
+    }
+
+    /// A rotation of `degrees` about `axis` through the head center (world frame), applied to a frame's pose.
+    static func rotationAboutHead(_ scan: SynthScan, degrees: Float, axis: SIMD3<Float>) -> simd_float4x4 {
+        let c = scan.center.simd
+        let r = simd_float3x3(simd_quatf(angle: degrees * .pi / 180, axis: simd_normalize(axis)))
+        return simd_float4x4(rotation: r, translation: c - r * c)
+    }
+
+    @Test func rotationAboutTheHeadCenterIsCaughtByTheLandmarks() throws {
+        let scan = PipelineTests.scan
+        let frames = try Self.frames(scan), landmarks = try Self.landmarks(scan)
+        let correct = try RegistrationCheck.verify(frames: frames, poses: scan.truth, landmarks: landmarks)
+        #expect(correct.passed.allSatisfy { $0 }, "\(correct.landmarkResiduals)")
+        for (frame, axis) in [(7, SIMD3<Float>(0, 1, 0)), (3, SIMD3<Float>(1, 0, 0))] {
+            var poses = scan.truth
+            poses[frame] = Self.rotationAboutHead(scan, degrees: 4, axis: axis) * poses[frame]
+            // The surface alone slides along the near-spherical skull and passes the frame ...
+            #expect(try RegistrationCheck.verify(frames: frames, poses: poses).passed[frame])
+            // ... the face landmarks (5-7 mm off) do not.
+            let check = try RegistrationCheck.verify(frames: frames, poses: poses, landmarks: landmarks)
+            #expect(!check.passed[frame] && check.landmarkFailed[frame], "#\(frame): \(check.landmarkResiduals)")
+            #expect(check.passed.enumerated().allSatisfy { $0.offset == frame || $0.element })
+        }
+    }
+
+    @Test func landmarksForAnotherFrameCountAreIgnored() throws {
+        let scan = PipelineTests.scan
+        let frames = try Self.frames(scan)
+        for landmarks in [[], Array(try Self.landmarks(scan).dropLast())] {
+            let check = try RegistrationCheck.verify(frames: frames, poses: scan.truth, landmarks: landmarks)
+            #expect(check.passed.allSatisfy { $0 } && check.landmarkFailed.count == frames.count)
+        }
+    }
+
+    @Test func landmarkTermOnTheTexturedHead() throws {
+        // SyntheticScan: 76 Vision-like landmarks with 1 px noise (also on occluded face parts), 1280x800.
+        var o = SyntheticScan.Options()
+        o.width = 1280
+        o.height = 800
+        o.meshResolution = 96
+        let result = SyntheticScan.make(o)
+        let scan = SynthScan(capture: result.capture, truth: result.groundTruthPoses, center: P3(result.headCenter))
+        let frames = try Self.frames(scan), landmarks = try Self.landmarks(scan)
+        let correct = try RegistrationCheck.verify(frames: frames, poses: scan.truth, landmarks: landmarks)
+        #expect(correct.passed.allSatisfy { $0 }, "\(correct.landmarkResiduals)")
+        let left = try #require(scan.capture.keyframes.firstIndex { $0.scanPose == .left })
+        var poses = scan.truth
+        poses[left] = Self.rotationAboutHead(scan, degrees: 4, axis: SIMD3(0, 1, 0)) * poses[left]
+        let check = try RegistrationCheck.verify(frames: frames, poses: poses, landmarks: landmarks)
+        print("landmark term (textured head): residuals correct \(correct.landmarkResiduals.map { $0.map { $0 * 1000 } }), "
+              + "left #\(left) turned 4 deg \((check.landmarkResiduals[left] ?? .nan) * 1000) mm")
+        #expect(!check.passed[left])
+        #expect(check.passed.enumerated().allSatisfy { $0.offset == left || $0.element })
+    }
+
+    @Test(.enabled(if: CoreAvailability.reconstruction, "the core is a placeholder"))
+    func appleVisionLandmarksKeepEveryCorrectKeyframe() async throws {
+        // The landmarks and face rectangles of Apple Vision itself on the rendered head (lighting 0.6 as for the
+        // synthetic camera). Its landmarks drift with the view angle (left views of this scan 16-23 mm from the
+        // reference's at the true poses, against 1-2 mm for the projected model points), so the landmark term, when
+        // the pipeline used it, dropped both left views of this scan. The pipeline leaves it off.
+        var o = SyntheticCameraSource.defaultOptions
+        o.width = 1280
+        o.height = 800
+        o.seed = 5
+        o.poses = ScanPose.required
+        let result = SyntheticScan.make(o)
+        let tracker = HeadTracker(convention: .documented)
+        var keyframes: [Keyframe] = []
+        for var kf in result.capture.keyframes {
+            let observation = try #require(try tracker.analyze(kf.frame, segmentation: false), "no face in keyframe #\(kf.id)")
+            kf.landmarks = observation.landmarks
+            kf.faceRect = observation.faceRect
+            keyframes.append(kf)
+        }
+        let out = try await ReconstructionPipeline().run(ScanCapture(keyframes: keyframes))
+        #expect(out.report.usedFrames == keyframes.count, "\(out.report.notes)")
+    }
+
+    /// IFS_RECON_STUDY=1: the surface check and the landmark term against 2 and 4 degree rotations about the head
+    /// center, per axis (docs/RECONSTRUCTION.md, "Registration check").
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["IFS_RECON_STUDY"] == "1", "set IFS_RECON_STUDY=1"))
+    func landmarkTermStudy() throws {
+        let scan = PipelineTests.scan
+        let frames = try Self.frames(scan), landmarks = try Self.landmarks(scan)
+        var lines: [String] = []
+        let correct = try RegistrationCheck.verify(frames: frames, poses: scan.truth, landmarks: landmarks)
+        lines.append("correct: passed \(correct.passed.filter { $0 }.count)/\(correct.passed.count), residuals (mm) "
+                     + correct.landmarkResiduals.map { $0.map { String(format: "%.2f", $0 * 1000) } ?? "-" }.joined(separator: " "))
+        for (frame, name) in [(7, "left"), (3, "up"), (5, "down"), (9, "right"), (11, "up-left")] {
+            for (axisName, axis) in [("yaw", SIMD3<Float>(0, 1, 0)), ("pitch", SIMD3<Float>(1, 0, 0)), ("roll", SIMD3<Float>(0, 0, 1))] {
+                for degrees: Float in [2, 4] {
+                    var poses = scan.truth
+                    poses[frame] = Self.rotationAboutHead(scan, degrees: degrees, axis: axis) * poses[frame]
+                    let surface = try RegistrationCheck.verify(frames: frames, poses: poses)
+                    let both = try RegistrationCheck.verify(frames: frames, poses: poses, landmarks: landmarks)
+                    lines.append(String(format: "%@ #%d %@ %.0f°: surface rmse %.2f mm passed %@; landmark residual %.2f mm, passed %@",
+                                        name, frame, axisName, degrees, surface.scores[frame].rmse * 1000,
+                                        surface.passed[frame] ? "yes" : "no", (both.landmarkResiduals[frame] ?? .nan) * 1000,
+                                        both.passed[frame] ? "yes" : "no"))
+                }
+            }
+        }
+        print("landmark term:\n" + lines.joined(separator: "\n"))
     }
 }

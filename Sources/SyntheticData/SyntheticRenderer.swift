@@ -3,11 +3,13 @@
 // CPU renderer for the synthetic head: z-buffer visibility on all cores, then per-pixel ray casting against the
 // visible triangle (so depth equals the exact ray/mesh intersection at the pixel center), solid texture shading,
 // and a D455-like depth model: invalid pixels at grazing angles, at depth discontinuities and as random speckle,
-// Gaussian noise with sigma = noise(1 m) * z^2, quantization to the depth unit.
+// Gaussian noise with sigma = noise(1 m) * z^2, quantization to the depth unit. With a lens distortion, vertices
+// are projected and pixel rays cast through the distortion model (rs2_project_point_to_pixel and its inverse).
 
 import CameraKit
 import Dispatch
 import Foundation
+import ReconKit
 
 struct RenderSettings: Sendable {
     var intrinsics: Intrinsics
@@ -25,6 +27,38 @@ struct RenderSettings: Sendable {
     var minDepth: Float = 0.1
     var maxDepth: Float = 6.5
     var seed: UInt64 = 1
+    /// Lens distortion of the rendered image (nil = ideal pinhole) and its per-pixel rays (rayTable).
+    var distortion: LensDistortion?
+    var rays: RayTable?
+}
+
+/// Normalized ray direction (x / z, y / z) of every pixel center of a distorted image (the inverse distortion,
+/// iterative, computed once per camera).
+struct RayTable: Sendable {
+    var x: [Float]
+    var y: [Float]
+
+    init(intrinsics k: Intrinsics, distortion: LensDistortion) {
+        let w = k.width, h = k.height
+        var xs = [Float](repeating: 0, count: w * h), ys = xs
+        let fx = k.fx, fy = k.fy, cx = k.ppx, cy = k.ppy
+        xs.withUnsafeMutableBufferPointer { xb in
+            ys.withUnsafeMutableBufferPointer { yb in
+                let px = xb.baseAddress!, py = yb.baseAddress!
+                parallelChunks(h, minChunk: 4) { rows in
+                    for y in rows {
+                        for x in 0 ..< w {
+                            let n = distortion.undistort(x: (Float(x) - cx) / fx, y: (Float(y) - cy) / fy)
+                            px[y * w + x] = n.x
+                            py[y * w + x] = n.y
+                        }
+                    }
+                }
+            }
+        }
+        x = xs
+        y = ys
+    }
 }
 
 struct RenderOutput: Sendable {
@@ -44,6 +78,8 @@ enum SyntheticRenderer {
         let cx = settings.intrinsics.ppx, cy = settings.intrinsics.ppy
         let vertexCount = model.vertexCount, triangleCount = model.triangleCount
         let near: Float = 0.02
+        let lens = settings.distortion.flatMap { $0.isIdentity ? nil : $0 }
+        let rays = lens == nil ? nil : (settings.rays ?? RayTable(intrinsics: settings.intrinsics, distortion: lens!))
 
         var camera = [Float](repeating: 0, count: vertexCount * 3)
         var screen = [Float](repeating: 0, count: vertexCount * 2)
@@ -85,8 +121,16 @@ enum SyntheticRenderer {
                     let p = pose.apply(Vec3(local[3 * i], local[3 * i + 1], local[3 * i + 2]))
                     cam[3 * i] = p.x; cam[3 * i + 1] = p.y; cam[3 * i + 2] = p.z
                     if p.z > near {
-                        scr[2 * i] = fx * p.x / p.z + cx
-                        scr[2 * i + 1] = fy * p.y / p.z + cy
+                        if let lens {
+                            // Triangles cover ~1-3 pixels: straight edges between distorted vertices are exact
+                            // enough for visibility; depth and shading come from the per-pixel rays.
+                            let d = lens.distort(x: p.x / p.z, y: p.y / p.z)
+                            scr[2 * i] = fx * d.x + cx
+                            scr[2 * i + 1] = fy * d.y + cy
+                        } else {
+                            scr[2 * i] = fx * p.x / p.z + cx
+                            scr[2 * i + 1] = fy * p.y / p.z + cy
+                        }
                     }
                     i += 1
                 }
@@ -171,13 +215,24 @@ enum SyntheticRenderer {
             let r = pose.r
             let colorKey = SplitMix64.mix(settings.seed ^ 0xC0_102) ^ frameKey
             let background = settings.backgroundDistance
+            // Interleaved (x, y) rays of a distorted image as a raw buffer (array access is slow in debug builds).
+            let rayBuffer: UnsafeMutablePointer<Float>? = rays.map { table in
+                let buffer = UnsafeMutablePointer<Float>.allocate(capacity: 2 * pixelCount)
+                for k in 0 ..< pixelCount { buffer[2 * k] = table.x[k]; buffer[2 * k + 1] = table.y[k] }
+                return buffer
+            }
+            defer { rayBuffer?.deallocate() }
             parallelChunks(height, minChunk: 4) { rows in
                 var y = rows.lowerBound
                 while y < rows.upperBound {
                     var x = 0
                     while x < width {
                         let i = y * width + x
-                        let dx = (Float(x) - cx) / fx, dy = (Float(y) - cy) / fy
+                        var dx = (Float(x) - cx) / fx, dy = (Float(y) - cy) / fy
+                        if let rayBuffer {
+                            dx = rayBuffer[2 * i]
+                            dy = rayBuffer[2 * i + 1]
+                        }
                         let rayLength = (dx * dx + dy * dy + 1).squareRoot()
                         var red: Float = 0.08, green: Float = 0.08, blue: Float = 0.09
                         let t = Int(tri[i])
