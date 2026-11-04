@@ -1,6 +1,8 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
-// PLACEHOLDER (owner: platform module) - the live RealSense camera through the privileged helper.
+// The live RealSense camera through the privileged helper (docs/HELPER.md). connect() shows the macOS administrator
+// prompt once per helper; shutdown() makes the helper stop the streams, hand the camera back to macOS (it works as a
+// webcam again) and exit.
 
 import CoreGraphics
 import Foundation
@@ -8,22 +10,65 @@ import Foundation
 public final class LiveCameraSource: CameraSource, @unchecked Sendable {
     public let kind: CameraSourceKind = .live
     public let helperURL: URL
+    private let session: HelperCameraSession
 
     public init(helperURL: URL = CameraSources.bundledHelperURL) {
         self.helperURL = helperURL
+        session = HelperCameraSession(mode: .live, helperURL: helperURL)
     }
 
-    public func connect() async throws -> DeviceInfo { throw CameraError.unsupported("LiveCameraSource not implemented yet") }
-    public func configure(_ configuration: CaptureConfiguration) async throws { throw CameraError.notConnected }
-    public func setFilters(_ filters: FilterConfiguration) async throws { throw CameraError.notConnected }
-    public func start() async throws { throw CameraError.notConnected }
-    public func stop() async throws {}
-    public func setOption(sensor: SensorKind, name: String, value: Float) async throws { throw CameraError.notConnected }
-    public func setAutoExposureROI(_ rect: CGRect, distanceMeters: Float?) async throws { throw CameraError.notConnected }
-    public func startRecording(to url: URL) async throws { throw CameraError.notConnected }
-    public func stopRecording() async throws -> Int64 { throw CameraError.notConnected }
-    public func hardwareReset() async throws { throw CameraError.notConnected }
-    public func frames(bufferingNewest: Int) -> AsyncStream<CameraFrame> { AsyncStream { $0.finish() } }
-    public func events() -> AsyncStream<CameraEvent> { AsyncStream { $0.finish() } }
-    public func shutdown() async {}
+    /// Starts the helper (administrator prompt; CameraError.authorizationCancelled when the user cancels it) and
+    /// returns the device. When the helper runs but no camera is connected the error comes from the helper, and a later
+    /// connect() asks again without a new prompt.
+    public func connect() async throws -> DeviceInfo { try await session.connect() }
+    public func configure(_ configuration: CaptureConfiguration) async throws { try await session.configure(configuration) }
+    public func setFilters(_ filters: FilterConfiguration) async throws { try await session.setFilters(filters) }
+    public func start() async throws { try await session.start() }
+    public func stop() async throws { try await session.stop() }
+    public func setOption(sensor: SensorKind, name: String, value: Float) async throws {
+        try await session.setOption(sensor: sensor, name: name, value: value)
+    }
+    public func setAutoExposureROI(_ rect: CGRect, distanceMeters: Float?) async throws {
+        try await session.setAutoExposureROI(rect, distanceMeters: distanceMeters)
+    }
+    /// `url` is created (truncated) by the app; ".bag" records a rosbag, anything else ".db3".
+    public func startRecording(to url: URL) async throws { try await session.startRecording(to: url) }
+    public func stopRecording() async throws -> Int64 { try await session.stopRecording() }
+    public func hardwareReset() async throws { try await session.hardwareReset() }
+    public func frames(bufferingNewest: Int) -> AsyncStream<CameraFrame> {
+        session.frames.subscribe(bufferingNewest: bufferingNewest)
+    }
+    public func events() -> AsyncStream<CameraEvent> { session.events.subscribe(bufferingNewest: 256) }
+
+    /// Asks the helper to release the camera and exit; waits for it (at most `timeout`, which covers handing the
+    /// camera back to macOS). Safe from applicationShouldTerminate: nothing here runs on the main thread.
+    public func shutdown() async { await session.shutdown(timeout: 20) }
+    public func shutdown(timeout: TimeInterval) async { await session.shutdown(timeout: timeout) }
+    /// Blocking variant for code that cannot await (e.g. applicationWillTerminate). Never call it from a task that
+    /// the helper session itself needs; it only waits on its own threads.
+    public func shutdownAndWait(timeout: TimeInterval = 20) { session.shutdownBlocking(timeout: timeout) }
+
+    public var isConnected: Bool { session.isConnected }
+    /// What the running helper reported when it connected.
+    public var helperHello: HelperHello? { session.hello }
+
+    /// Recovery: re-enumerates RealSense cameras that a crashed helper left detached from macOS
+    /// (`IntelFaceScanHelper --release -w`, administrator prompt). Returns the tool's output.
+    public static func releaseCameraToSystem(helperURL: URL = CameraSources.bundledHelperURL) async throws -> String {
+        let helper = FileManager.default.isExecutableFile(atPath: helperURL.path)
+            ? helperURL : (CameraSources.locateHelper() ?? helperURL)
+        try HelperLauncher.checkExecutable(helper)
+        let handle = HelperLauncher.launchPrivileged(helper: helper, arguments: ["--release", "-w"])
+        return try await HelperCameraSession.blocking {
+            // The prompt waits for the user; the release itself takes seconds.
+            guard handle.waitForExit(timeout: 3600) else {
+                throw CameraError.timeout("releasing the camera")
+            }
+            if let error = handle.launchError { throw error }
+            if let status = handle.exitStatus, status != 0 {
+                throw CameraError.commandFailed("Releasing the camera failed (status \(status)): \(handle.diagnostics)")
+            }
+            return handle.diagnostics
+        }
+    }
 }
