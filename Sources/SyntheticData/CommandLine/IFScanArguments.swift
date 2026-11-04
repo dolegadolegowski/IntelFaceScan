@@ -8,7 +8,8 @@
 //                [--distance 0.6] [--poses front,up,down,left,right] [--no-background] [--lighting 0.25]
 //                [--mesh-resolution 128] [--gt-mesh gt.obj]
 //   ifscan reconstruct <input.ifsdataset | recording.db3 | recording.bag> -o head.obj [--ply head.ply]
-//                [--voxel-mm 0.75] [--method tsdf|poisson] [--keep-shoulders] [--save-dataset out.ifsdataset]
+//                [--voxel-mm 0.75] [--method tsdf|poisson] [--keep-shoulders] [--icp colored|geometric]
+//                [--save-dataset out.ifsdataset]
 //                [--triangles N] [--texture-size 4096] [--helper <IntelFaceScanHelper>] [--report report.json] [--quiet]
 //   ifscan eval <mesh.obj> --gt <gt.obj> [--samples 200000] [--report report.json] [--symmetric] [--json]
 //   ifscan info <file> [--json] [--helper <IntelFaceScanHelper>]
@@ -59,6 +60,8 @@ public struct ReconstructCommand: Equatable, Sendable {
     public var voxelMM: Float = 0.75
     public var method: SurfaceMethod = .tsdf
     public var keepShoulders = false
+    /// Colored ICP (geometry + photometric term) or point-to-plane only.
+    public var coloredICP = false
     /// Decimate to this many triangles before texturing (nil = full resolution).
     public var targetTriangles: Int?
     public var textureSize = 4096
@@ -141,6 +144,8 @@ public enum IFScanArguments {
               --voxel-mm <mm>            TSDF voxel size (default 0.75)
               --method <tsdf|poisson>    Surface reconstruction (default tsdf)
               --keep-shoulders           Keep neck and shoulders instead of cutting below the chin
+              --icp <colored|geometric>  Registration: colored ICP or point-to-plane only (default
+                                         geometric)
               --triangles <n>            Decimate to n triangles before texturing (default: full resolution)
               --texture-size <px>        Texture atlas size (default 4096)
               --save-dataset <dir>       Save the accepted keyframes as a dataset
@@ -248,7 +253,7 @@ public enum IFScanArguments {
     private static func parseReconstruct(_ arguments: [String]) throws -> IFScanCommand {
         let specs = [Spec(name: "output", short: "o", takesValue: true), Spec(name: "ply", short: nil, takesValue: true),
                      Spec(name: "voxel-mm", short: nil, takesValue: true), Spec(name: "method", short: nil, takesValue: true),
-                     Spec(name: "keep-shoulders", short: nil, takesValue: false),
+                     Spec(name: "keep-shoulders", short: nil, takesValue: false), Spec(name: "icp", short: nil, takesValue: true),
                      Spec(name: "triangles", short: nil, takesValue: true), Spec(name: "texture-size", short: nil, takesValue: true),
                      Spec(name: "save-dataset", short: nil, takesValue: true), Spec(name: "helper", short: nil, takesValue: true),
                      Spec(name: "report", short: nil, takesValue: true), Spec(name: "quiet", short: "q", takesValue: false)]
@@ -270,6 +275,13 @@ public enum IFScanArguments {
             c.method = value
         }
         c.keepShoulders = p.flags.contains("keep-shoulders")
+        if let icp = p.values["icp"] {
+            switch icp.lowercased() {
+            case "colored": c.coloredICP = true
+            case "geometric": c.coloredICP = false
+            default: throw ArgumentError("--icp: '\(icp)' is not colored or geometric")
+            }
+        }
         if p.values["triangles"] != nil { c.targetTriangles = try integer(p, "triangles", 0, in: 1_000 ... 50_000_000) }
         c.textureSize = try integer(p, "texture-size", c.textureSize, in: 256 ... 16384)
         c.saveDataset = p.values["save-dataset"]

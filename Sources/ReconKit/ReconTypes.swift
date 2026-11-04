@@ -20,7 +20,10 @@ public struct ReconstructionOptions: Codable, Sendable, Hashable {
     public var method: SurfaceMethod = .tsdf
     /// Keep neck/shoulders (from the frontal views) instead of cutting below the chin.
     public var keepShoulders: Bool = false
-    public var useColoredICP: Bool = true
+    /// Colored ICP (geometry + photometric term at the finest level) instead of point-to-plane only. Off by default:
+    /// with the head turning under fixed room lights the skin color is view dependent, and on the synthetic guided
+    /// scans point-to-plane is 10-40x more accurate (docs/RECONSTRUCTION.md, "Colored versus point-to-plane ICP").
+    public var useColoredICP: Bool = false
     /// Pose graph with loop closures between poses (left<->front<->right, up/down<->front).
     public var globalOptimization: Bool = true
     public var useGPU: Bool = true

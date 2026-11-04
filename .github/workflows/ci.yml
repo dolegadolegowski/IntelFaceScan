@@ -92,8 +92,12 @@ jobs:
         run: |
           set -euo pipefail
           cmake -S helper -B build/helper -DCMAKE_BUILD_TYPE=Release \
-            -DIFS_SDK_DIR="$PWD/build/sdk/install" -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
+            -DIFS_SDK_DIR="$PWD/build/sdk/install" -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" \
+            -DIFS_HELPER_TESTS=ON
           cmake --build build/helper -j "$(sysctl -n hw.ncpu)"
+
+      - name: Run the capture engine tests (synthetic recordings, no camera)
+        run: ctest --test-dir build/helper --output-on-failure
 
       - name: Build the Swift package
         run: swift build

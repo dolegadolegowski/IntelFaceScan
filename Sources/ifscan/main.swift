@@ -6,7 +6,8 @@
 //
 //   ifscan synth -o out.ifsdataset [--width --height --frames-per-pose --noise --seed --gt-mesh gt.obj]
 //   ifscan reconstruct <input.ifsdataset | recording.db3 | recording.bag> -o head.obj [--ply head.ply]
-//          [--voxel-mm 0.75] [--method tsdf|poisson] [--keep-shoulders] [--save-dataset out.ifsdataset]
+//          [--voxel-mm 0.75] [--method tsdf|poisson] [--keep-shoulders] [--icp colored|geometric]
+//          [--save-dataset out.ifsdataset]
 //          [--helper <IntelFaceScanHelper>] [--report report.json]
 //   ifscan eval <mesh.obj> --gt <gt.obj> [--samples N]
 //   ifscan info <file>

@@ -38,3 +38,10 @@ target_link_libraries(IntelFaceScanHelper PRIVATE realsense2::realsense2 "-frame
 set_target_properties(IntelFaceScanHelper PROPERTIES
     BUILD_RPATH "${IFS_SDK_DIR}/lib"
     INSTALL_RPATH "@executable_path/../Frameworks")
+
+# Capture engine tests and the synthetic recording generator (no camera needed): -DIFS_HELPER_TESTS=ON
+option(IFS_HELPER_TESTS "Build the capture tests and make-test-recording" OFF)
+if(IFS_HELPER_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

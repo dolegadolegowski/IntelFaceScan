@@ -381,6 +381,33 @@ rotation error ≤ 0.13°. Edge RMSE is 0.6 mm, which is the noise level.
 The perturbations are per frame, so relative errors between two frames are up to twice these values. Colored ICP
 is about 40 % more accurate on the smooth synthetic head, where geometry alone leaves sliding directions.
 
+### Colored versus point-to-plane ICP (default: point-to-plane)
+
+The capture-range table above uses this module's own test head, whose color is identical from every view. The
+textured head of `SyntheticData` (`ifscan synth`) also renders view-dependent shading from a light at the camera
+(`--lighting`), which is what a real head turning under fixed room lights looks like. Full pipeline (`ifscan
+reconstruct --icp colored|geometric`, Vision-free initial poses from the dataset, TSDF 0.75 mm, 1280×800, noise
+2 mm at 1 m), errors against the ground truth:
+
+| scan | lighting | ICP | rotation error mean / max | head misalignment mean / max | surface distance mean / p95 |
+|---|---|---|---|---|---|
+| 5 poses × 2 | 0.6 | colored | 2.68° / 8.38° | 6.8 / 19.3 mm | 1.58 / 4.47 mm |
+| 5 poses × 2 | 0.6 | point-to-plane | **0.06° / 0.12°** | **0.14 / 0.25 mm** | **0.13 / 0.39 mm** |
+| 9 poses × 2 | 0.6 | colored | 2.50° / 4.71° | 6.8 / 12.7 mm | 1.99 / 4.98 mm |
+| 9 poses × 2 | 0.6 | point-to-plane | **0.08° / 0.15°** | **0.19 / 0.35 mm** | **0.09 / 0.25 mm** |
+| 5 poses × 2 | 0.25 | colored | 0.73° / 1.29° | 2.2 / 3.8 mm | 0.51 / 1.69 mm |
+| 5 poses × 2 | 0.25 | point-to-plane | **0.06° / 0.12°** | **0.14 / 0.25 mm** | **0.13 / 0.39 mm** |
+| 9 poses × 2 | 0 (flat) | colored | 0.38° / 0.81° | 1.3 / 2.8 mm | 0.27 / 0.61 mm |
+| 9 poses × 2 | 0 (flat) | point-to-plane | **0.08° / 0.15°** | **0.19 / 0.35 mm** | **0.09 / 0.25 mm** |
+
+The photometric term pulls frames toward wherever the shading looks alike, and its error grows with the shading
+strength. Even with flat albedo it is worse here: the procedural skin texture has much finer detail than this
+module's test head. A real D455 adds two more reasons: color and aligned depth disagree by up to about a pixel
+(factory calibration), and auto exposure changes per view. A head is not a sliding-prone surface (nose, eye
+sockets, ears), so point-to-plane is well constrained. `ReconstructionOptions.useColoredICP` therefore defaults to
+`false`; colored ICP stays available (`--icp colored`) for scans of smooth, strongly textured surfaces. To be
+re-checked on real recordings.
+
 **40-keyframe scan.** In the 1280×800 benchmark scan, the worst frame is 0.75 mm off (the left group) and the
 median is about 0.25 mm.
 

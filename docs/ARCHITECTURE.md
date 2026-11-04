@@ -73,7 +73,8 @@ Each work stream owns its tests under `Tests/<Module>Tests/` (file names prefixe
 3. **Reconstruction** (`ReconstructionPipeline`):
    1. segmentation: person mask ∩ depth band around the face ∩ above the chin/neck cut (option: keep shoulders),
    2. initial poses from the Vision head pose (rotation) and landmark/mask centroids (translation),
-   3. sequential colored ICP (point-to-plane fallback) between neighboring keyframes,
+   3. multi-scale point-to-plane ICP between neighboring keyframes (colored ICP optional; measured comparison in
+      docs/RECONSTRUCTION.md),
    4. loop closures between overlapping poses (left↔front↔right, up/down↔front), pose graph optimization,
    5. TSDF fusion on the GPU (Metal), voxel 0.5–1 mm chosen from the measured noise, marching cubes;
       screened Poisson as the alternative (compared in docs/RECONSTRUCTION.md),

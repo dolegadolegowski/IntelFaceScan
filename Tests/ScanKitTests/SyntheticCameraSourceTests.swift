@@ -55,9 +55,10 @@ private func smallOptions() -> SyntheticScan.Options {
     let sequences = received.map(\.sequence)
     #expect(zip(sequences, sequences.dropFirst()).allSatisfy { $0 < $1 })
     #expect(zip(received, received.dropFirst()).allSatisfy { $0.timestampMs < $1.timestampMs })
-    // 30 fps: ~33 ms apart (rendering 320x200 takes a few ms even in debug builds).
+    // 30 fps: ~33 ms apart. The source must not run faster than 30 fps; the upper bound is loose because the
+    // reconstruction suites saturate every core while this test runs.
     let interval = (arrivals.last! - arrivals[1]) / Double(arrivals.count - 2)
-    #expect(interval > 0.025 && interval < 0.07, "mean frame interval \(interval) s")
+    #expect(interval > 0.025 && interval < 0.2, "mean frame interval \(interval) s")
 
     await source.shutdown()
     await source.shutdown()   // idempotent

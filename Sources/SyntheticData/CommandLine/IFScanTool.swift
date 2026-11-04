@@ -201,6 +201,7 @@ public enum IFScanTool {
         options.voxelSizeMM = c.voxelMM
         options.method = c.method
         options.keepShoulders = c.keepShoulders
+        options.useColoredICP = c.coloredICP
         options.targetTriangles = c.targetTriangles
         options.textureSize = c.textureSize
         let progress = ProgressPrinter(enabled: !c.quiet, io: io)

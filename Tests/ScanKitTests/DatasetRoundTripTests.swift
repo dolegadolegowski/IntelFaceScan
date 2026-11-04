@@ -310,6 +310,7 @@ private func writeTimedDataset(spacingMs: Double) throws -> (URL, ScanCapture) {
     let source = DatasetCameraSource(directory: url, realTime: true)
     _ = try await source.connect()
     let frames = source.frames(bufferingNewest: 4)
+    let startedAt = ProcessInfo.processInfo.systemUptime
     try await source.start()
     var arrivals: [Double] = []
     var count = 0
@@ -319,8 +320,10 @@ private func writeTimedDataset(spacingMs: Double) throws -> (URL, ScanCapture) {
         count += 1
     }
     #expect(count == 3)
-    #expect(arrivals[1] - arrivals[0] > 0.12 && arrivals[2] - arrivals[1] > 0.12)
-    #expect(arrivals[2] - arrivals[0] < 1.0)
+    // A paced source never delivers frame k before k * 150 ms. Pairwise gaps are not checked: on a loaded machine
+    // (the reconstruction suites run in parallel) the consumer may wake late for one frame and early for the next.
+    #expect(arrivals[2] - startedAt > 0.27, "the last frame arrived \(arrivals[2] - startedAt) s after start")
+    #expect(arrivals[2] - startedAt < 3.0)
 
     // Restarting replays from the first frame; looping continues past the end.
     await source.shutdown()

@@ -57,16 +57,20 @@ struct PipelineTests {
         }
         #expect(worst < 0.0015, "worst head misalignment \(worst * 1000) mm")
 
-        // Surface accuracy: vertices against the true head along their normals.
+        // Surface accuracy: vertices against the true head along their normals. Cleanup caps the neck cut with a
+        // filled patch (about 13% of the vertices) that is not on the true surface, so only vertices above the cut
+        // (canonical chin at y = +0.098) are sampled.
         let mesh = result.mesh
         var distances: [Double] = []
-        for i in stride(from: 0, to: mesh.vertexCount, by: 7) {
+        var sampled = 0
+        for i in stride(from: 0, to: mesh.vertexCount, by: 7) where Double(mesh.positions[i].y) - Self.scan.center.y < 0.07 {
+            sampled += 1
             if let d = distanceToHead(P3(mesh.positions[i]), normal: P3(mesh.normals[i]), center: Self.scan.center) {
                 distances.append(d)
             }
         }
         distances.sort()
-        #expect(distances.count > mesh.vertexCount / 8)
+        #expect(distances.count > sampled * 9 / 10, "\(distances.count) of \(sampled) sampled vertices on the true surface")
         let mean = distances.reduce(0, +) / Double(distances.count)
         let p90 = distances[distances.count * 9 / 10]
         print("surface error: mean \(mean * 1000) mm, p90 \(p90 * 1000) mm over \(distances.count) vertices")
