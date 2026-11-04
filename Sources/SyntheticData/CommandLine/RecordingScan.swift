@@ -2,7 +2,8 @@
 //
 // Runs the guided scan offline over a .db3/.bag recording: the helper plays the file (as the user, no password,
 // every frame, no real-time pacing), the frames go through the same post-processing as live, and ScanController
-// (ScanConfiguration.offline) accepts keyframes exactly as it would in the app.
+// (ScanConfiguration.offline) accepts keyframes exactly as it would in the app. The same loop also runs over any
+// other CameraSource (ifscan reconstruct synthetic-camera: the animated synthetic head in real time).
 
 import CameraKit
 import Foundation
@@ -16,11 +17,20 @@ public enum RecordingScan {
         /// true when the guided scan reached .finished (all poses captured) before the recording ended.
         public var completed: Bool
         public var failure: String?
+        /// Per scan pose: how often each rejection reason (or "turning" = not at the target yet) held a frame back.
+        public var rejections: [ScanPose: [String: Int]] = [:]
     }
 
     public static func run(recording: URL, helper: URL, configuration: ScanConfiguration,
                            log: @escaping @Sendable (String) -> Void) async throws -> Result {
-        let source = PlaybackCameraSource(file: recording, helperURL: helper, realTime: false)
+        try await run(source: PlaybackCameraSource(file: recording, helperURL: helper, realTime: false),
+                      label: recording.lastPathComponent, adoptRecordedProfiles: true, configuration: configuration, log: log)
+    }
+
+    /// Runs the guided scan over any camera source until every pose is captured or the source ends (playback
+    /// finished, helper exited, disconnected). `adoptRecordedProfiles` keeps the source's own stream profiles.
+    public static func run(source: CameraSource, label: String, adoptRecordedProfiles: Bool, configuration: ScanConfiguration,
+                           log: @escaping @Sendable (String) -> Void) async throws -> Result {
         let device: DeviceInfo
         do {
             device = try await source.connect()
@@ -32,10 +42,10 @@ public enum RecordingScan {
         // Keep the recording's own stream profiles; the rest (preset-independent filters, alignment) is the
         // face-scan configuration, like a live scan.
         var capture = CaptureConfiguration.faceScanD455
-        if let color = device.profiles.first(where: { $0.stream == "color" && $0.width > 0 }) {
+        if adoptRecordedProfiles, let color = device.profiles.first(where: { $0.stream == "color" && $0.width > 0 }) {
             capture.color = StreamSettings(width: color.width, height: color.height, fps: color.fps)
         }
-        if let depth = device.profiles.first(where: { $0.stream == "depth" && $0.width > 0 }) {
+        if adoptRecordedProfiles, let depth = device.profiles.first(where: { $0.stream == "depth" && $0.width > 0 }) {
             capture.depth = StreamSettings(width: depth.width, height: depth.height, fps: depth.fps)
         }
         do {
@@ -62,6 +72,17 @@ public enum RecordingScan {
                     monitor.begin()
                     let update = await controller.process(frame)
                     monitor.end()
+                    if case .capturing(let pose) = update.phase, !update.acceptedKeyframe {
+                        let reason: String?
+                        if let rejection = update.rejection {
+                            reason = rejection.rawValue
+                        } else if case .turn = update.instructionKind {
+                            reason = "turning"
+                        } else {
+                            reason = nil   // holding the pose, or waiting between keyframes
+                        }
+                        if let reason { monitor.reject(pose, reason) }
+                    }
                     if update.phase == .finished {
                         monitor.complete()
                         return
@@ -98,17 +119,17 @@ public enum RecordingScan {
         try? await source.stop()
         await source.shutdown()
         var result = controller.finish()
-        result.notes["source"] = recording.lastPathComponent
+        result.notes["source"] = label
         if result.device == nil { result.device = device }
         if result.configuration == nil { result.configuration = capture }
         let state = monitor.state
         return Result(capture: result, device: device, framesProcessed: state.frames, completed: state.completed,
-                      failure: state.failure)
+                      failure: state.failure, rejections: state.rejections)
     }
 
     private final class Monitor: @unchecked Sendable {
         struct State { var frames = 0; var busy = false; var lastActivity = ProcessInfo.processInfo.systemUptime
-                       var completed = false; var failure: String? }
+                       var completed = false; var failure: String?; var rejections: [ScanPose: [String: Int]] = [:] }
         private let lock = NSLock()
         private var current = State()
 
@@ -122,6 +143,7 @@ public enum RecordingScan {
             }
         }
         func complete() { lock.withLock { current.completed = true } }
+        func reject(_ pose: ScanPose, _ reason: String) { lock.withLock { current.rejections[pose, default: [:]][reason, default: 0] += 1 } }
         func fail(_ reason: String) { lock.withLock { current.failure = reason } }
         func idle(for seconds: Double) -> Bool {
             lock.withLock { !current.busy && ProcessInfo.processInfo.systemUptime - current.lastActivity >= seconds }

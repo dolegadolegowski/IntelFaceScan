@@ -133,10 +133,12 @@ public enum IFScanArguments {
               --gt-mesh <file.obj>       Also write the ground-truth mesh here (millimeters, world frame)
             """
         case "reconstruct": return """
-            USAGE: ifscan reconstruct <input.ifsdataset | recording.db3 | recording.bag> -o <head.obj> [options]
+            USAGE: ifscan reconstruct <input.ifsdataset | recording.db3 | recording.bag | synthetic-camera> -o <head.obj>
+                   [options]
 
             Datasets go straight to the reconstruction. Recordings are played by the camera helper (as the user,
-            no password) through the guided-scan logic, exactly as in the app.
+            no password) through the guided-scan logic, exactly as in the app. The input 'synthetic-camera' scans
+            the animated synthetic head in real time (Vision + guided scan, the app's live flow without the UI).
 
             OPTIONS:
               -o, --output <file.obj>    OBJ to write (+ .mtl and .png when textured), millimeters

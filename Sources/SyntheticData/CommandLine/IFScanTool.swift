@@ -117,9 +117,15 @@ public enum IFScanTool {
 
     // MARK: - reconstruct
 
-    enum InputKind: String { case dataset, recording }
+    enum InputKind: String { case dataset, recording, syntheticCamera }
+
+    /// Input name that selects the animated synthetic head (SyntheticCameraSource) instead of a file.
+    static let syntheticCameraInput = "synthetic-camera"
 
     static func inputKind(_ url: URL) throws -> InputKind {
+        if url.lastPathComponent == syntheticCameraInput && !FileManager.default.fileExists(atPath: url.path) {
+            return .syntheticCamera
+        }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
             throw Failure(code: .noInput, message: "\(url.path): no such file or folder")
@@ -134,6 +140,15 @@ public enum IFScanTool {
         case "db3", "bag": return .recording
         default:
             throw Failure(code: .dataError, message: "\(url.lastPathComponent): expected an .ifsdataset folder or a .db3/.bag recording")
+        }
+    }
+
+    /// Why frames were held back, per pose (most frequent reasons first).
+    static func logRejections(_ scan: RecordingScan.Result, _ log: (String) -> Void) {
+        for pose in ScanPose.allCases {
+            guard let counts = scan.rejections[pose], !counts.isEmpty else { continue }
+            let text = counts.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+            log("  \(pose.rawValue): frames held back: \(text)")
         }
     }
 
@@ -174,6 +189,7 @@ public enum IFScanTool {
                 + (scan.completed ? " (all poses captured)" : ""))
             if let reason = scan.failure { notes.append("guided scan failed: \(reason)") }
             if !scan.completed { notes.append("the recording ended before every scan pose was captured") }
+            logRejections(scan, log)
             guard !capture.keyframes.isEmpty else {
                 var failure = Failure(code: .dataError,
                                       message: "the guided scan accepted no keyframes in \(scan.framesProcessed) frames of \(input.lastPathComponent)")
@@ -184,6 +200,26 @@ public enum IFScanTool {
                         + "ScanController (ScanKit) may also still be a placeholder in this build")
                 }
                 throw failure
+            }
+        case .syntheticCamera:
+            // The app's live flow without the UI: 30 fps frames of the animated head -> Vision -> ScanController.
+            log("Scanning the animated synthetic head in real time (Vision head pose, guided scan)")
+            var configuration = ScanConfiguration.offline
+            configuration.keepShoulders = c.keepShoulders
+            let scan: RecordingScan.Result
+            do {
+                scan = try await RecordingScan.run(source: SyntheticCameraSource(holdSeconds: 2.5), label: syntheticCameraInput,
+                                                   adoptRecordedProfiles: false, configuration: configuration, log: log)
+            } catch {
+                throw Failure(code: .unavailable, message: "synthetic camera failed: \(error.localizedDescription)")
+            }
+            capture = scan.capture
+            log("Guided scan: \(capture.keyframes.count) keyframes from \(scan.framesProcessed) frames"
+                + (scan.completed ? " (all poses captured)" : ""))
+            if let reason = scan.failure { notes.append("guided scan failed: \(reason)") }
+            logRejections(scan, log)
+            guard !capture.keyframes.isEmpty else {
+                throw Failure(code: .dataError, message: "the guided scan accepted no keyframes from the synthetic camera")
             }
         }
         timings["input"] = Date().timeIntervalSince(begin)

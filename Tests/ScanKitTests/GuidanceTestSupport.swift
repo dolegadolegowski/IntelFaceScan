@@ -134,10 +134,15 @@ struct SimulatedUser {
     var pitch: Float = 0
     var roll: Float = 0
     var speedDegPerSec: Float = 60
+    /// Fraction of each pose target the user actually turns to (a user who stops short: < 1).
+    var reach: Float = 1
+    /// Vision error model: observed = true * scale + bias.
+    var visionYawScale: Float = 1
+    var visionYawBias: Float = 0
 
     mutating func step(toward phase: ScanPhase, dt: Float) {
         guard case .capturing(let pose) = phase else { return }
-        let target = pose.target
+        let target = (yaw: pose.target.yaw * reach, pitch: pose.target.pitch * reach)
         let dy = target.yaw - yaw, dp = target.pitch - pitch
         let distance = (dy * dy + dp * dp).squareRoot()
         let maxStep = speedDegPerSec * dt
@@ -149,7 +154,7 @@ struct SimulatedUser {
     }
 
     func observation(faceRect: CGRect, confidence: Float = 0.95) -> HeadObservation {
-        HeadObservation(pose: HeadPose(yaw: yaw, pitch: pitch, roll: roll, confidence: confidence),
+        HeadObservation(pose: HeadPose(yaw: yaw * visionYawScale + visionYawBias, pitch: pitch, roll: roll, confidence: confidence),
                         faceRect: faceRect, landmarks: [SIMD2(Float(faceRect.midX), Float(faceRect.midY))],
                         personMask: nil)
     }

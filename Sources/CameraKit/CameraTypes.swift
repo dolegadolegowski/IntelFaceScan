@@ -105,6 +105,12 @@ public struct SensorOption: Codable, Sendable, Hashable {
     public var readOnly: Bool
     /// Value descriptions for enumerated options (e.g. visual presets), keyed by the value printed as integer.
     public var valueDescriptions: [String: String]?
+
+    public init(name: String, value: Float, min: Float, max: Float, step: Float, default: Float, readOnly: Bool = false,
+                valueDescriptions: [String: String]? = nil) {
+        self.name = name; self.value = value; self.min = min; self.max = max; self.step = step
+        self.default = `default`; self.readOnly = readOnly; self.valueDescriptions = valueDescriptions
+    }
 }
 
 public struct SensorInfo: Codable, Sendable, Hashable {
@@ -112,6 +118,10 @@ public struct SensorInfo: Codable, Sendable, Hashable {
     public var name: String
     public var kind: SensorKind
     public var options: [SensorOption]
+
+    public init(name: String, kind: SensorKind, options: [SensorOption] = []) {
+        self.name = name; self.kind = kind; self.options = options
+    }
 }
 
 public struct DeviceInfo: Codable, Sendable, Hashable {
@@ -133,8 +143,18 @@ public struct DeviceInfo: Codable, Sendable, Hashable {
     /// Visual preset names supported by the depth sensor.
     public var presets: [String]
     public var imu: Bool
-    /// "live" for a camera, "playback" for a recorded file.
+    /// "live" for a camera, "playback" for a recorded file or dataset, "fake" for the helper's synthetic camera,
+    /// "synthetic" for SyntheticCameraSource.
     public var source: String
+
+    public init(name: String, serial: String, firmware: String, recommendedFirmware: String? = nil, usbType: String,
+                productId: String, productLine: String, advancedMode: Bool, depthScale: Float, baselineMm: Float?,
+                sensors: [SensorInfo], profiles: [StreamProfile], presets: [String], imu: Bool, source: String) {
+        self.name = name; self.serial = serial; self.firmware = firmware; self.recommendedFirmware = recommendedFirmware
+        self.usbType = usbType; self.productId = productId; self.productLine = productLine
+        self.advancedMode = advancedMode; self.depthScale = depthScale; self.baselineMm = baselineMm
+        self.sensors = sensors; self.profiles = profiles; self.presets = presets; self.imu = imu; self.source = source
+    }
 }
 
 // MARK: - Capture configuration

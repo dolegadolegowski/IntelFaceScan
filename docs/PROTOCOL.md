@@ -25,13 +25,21 @@ ifs_wire_header (24 bytes, little endian) | JSON (json_bytes, UTF-8) | payload (
    * live: `do shell script "'<helper>' --socket '<path>' --uid <uid> --gid <gid> --parent-pid <pid>" with
      administrator privileges` (standard macOS password prompt),
    * playback: directly as the user: `<helper> --socket <path> --uid <uid> --parent-pid <pid> --playback <file>
-     [--no-real-time]`.
+     [--no-real-time]`,
+   * fake (development and tests, no camera, no librealsense calls): directly as the user, `--fake` instead of
+     `--playback <file>`; synthetic frames go through the same IPC code.
 3. The helper validates the socket path (absolute; parent directory owned by `uid`, mode `0700`, not a symlink),
    connects, and checks the peer with `LOCAL_PEERCRED`/`LOCAL_PEERPID`: the peer uid must be `uid` and the peer
    pid `parent-pid`. The app accepts exactly one connection and checks the peer: euid 0 (live) or its own uid
    (playback), and that the peer executable (`proc_pidpath`) is the bundled helper.
 4. The helper sends `HELLO`. Then the app sends commands; every command has a unique `request_id` and gets exactly
    one `REPLY`. `FRAMESET`, `EVENT` and `LOG` messages arrive at any time.
+   * Validation: a command without an unsigned integer `request_id`, a command with a payload, or a body that is
+     not a JSON object closes the connection. A field not listed for a command, or a field of the wrong type, is an
+     error `REPLY` (`unknown field 'x'`); so is an unknown command type. At most 1024 commands (16 MiB) may wait
+     in the helper's queue.
+   * `CONFIGURE` and `SET_FILTERS`: every key is required except `laser_power` (`null` or absent = maximum);
+     `align_to_color` must be `true`; `send_ir` requires `enable_ir`.
 5. End: the app sends `QUIT` (or closes the socket, or exits: the helper watches the socket and `parent-pid`).
    The helper stops the streams, destroys the librealsense context, re-enumerates the USB device so macOS
    re-attaches its drivers (same as `rs-macos-release`), sends `BYE` if the socket is still open, and exits.
@@ -43,7 +51,12 @@ ifs_wire_header (24 bytes, little endian) | JSON (json_bytes, UTF-8) | payload (
 ```json
 {"protocol": 1, "helper_version": "0.1.0", "sdk_version": "2.58.4", "pid": 4242, "euid": 0, "mode": "live"}
 ```
-`mode`: `"live"` or `"playback"`.
+`mode`: `"live"`, `"playback"` or `"fake"` (`DeviceInfo.source` is then `"fake"`).
+
+### BYE (helper → app)
+`{"reason": "the app asked the helper to quit"}` – last message before the helper exits; `reason` is human-readable
+text (QUIT, the app exited, a received signal, or why the connection broke). Sent only while the connection is
+intact.
 
 ### REPLY (helper → app)
 ```json
@@ -61,6 +74,11 @@ ifs_wire_header (24 bytes, little endian) | JSON (json_bytes, UTF-8) | payload (
 Events: `device_connected`, `device_disconnected`, `streaming_started`, `streaming_stopped`,
 `stream_restarted` (the firmware restarts depth when RGB is toggled during a depth stream), `recording_started`,
 `recording_finished` (`data.bytes`), `playback_finished`, `error`.
+
+`data` by event: `stream_restarted` `{stream: "depth"|"color", previous_frame, frame}`; `device_disconnected`
+`{serial, message}`; `device_connected` `{serial}`; `recording_started` `{format}`; `recording_finished` `{bytes}`;
+`error` `{message}`. `recording_started` and `recording_finished` are sent by the helper's IPC layer (only it knows
+how many bytes reached the app's file); the capture engine's events with these names are not forwarded.
 
 ### QUERY_DEVICE → `data`: DeviceInfo
 ```json
@@ -159,6 +177,9 @@ JSON metadata, then the planes back to back in the payload:
 ```
 * `color` and `depth_aligned` are always present while streaming; `depth` (`send_depth`) and `ir_left`
   (`send_ir`) are optional. `imu` is `null` without a motion module.
+* `metadata` may also contain `depth_gain`, `emitter_mode`, `depth_auto_exposure`, `depth_frame_counter`,
+  `color_gain`, `color_auto_exposure`, `color_white_balance`, `color_frame_counter` (when the firmware reports
+  them).
 * `rotation` is column-major (librealsense `rs2_extrinsics`), `translation` in meters.
 * Rows are `stride` bytes; Z16 is little-endian `uint16`, multiplied by `depth_scale` gives meters, 0 = no data.
 * Backpressure: the helper keeps at most 2 unsent framesets and drops the oldest; commands, replies and events are

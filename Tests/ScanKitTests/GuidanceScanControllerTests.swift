@@ -5,6 +5,7 @@
 import CameraKit
 import CoreGraphics
 import Foundation
+import simd
 import Testing
 @testable import ScanKit
 
@@ -362,6 +363,54 @@ import Testing
         #expect(abs(pitchDelta) < 0.5)
         #expect(sim.updates.last?.angularErrorDeg ?? 0 > 40)
         #expect(sim.updates.last?.poseIndex == 0)
+    }
+
+    @Test func poseDeltaUsesFrontOffsetAndOvershootWindow() {
+        func delta(_ pose: ScanPose, _ yaw: Float, _ pitch: Float, offset: SIMD2<Float> = .zero) -> SIMD2<Float> {
+            ScanController.poseDelta(pose: pose, current: SIMD2(yaw, pitch), frontOffset: offset, overshootDeg: 15)
+        }
+        func near(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Bool { simd_length(a - b) < 1e-4 }
+        // The front target ignores the offset (it defines it).
+        #expect(near(delta(.front, -4, 2, offset: SIMD2(-4, 2)), SIMD2(4, -2)))
+        // Vision reads this person's straight-ahead face as yaw -4: left at 38 is 42 degrees of turn.
+        #expect(near(delta(.left, 38, 0, offset: SIMD2(-4, 0)), SIMD2(3, 0)))
+        // Up to 15 degrees beyond the target counts as reached; the perpendicular error still counts.
+        #expect(near(delta(.right, -50, 0, offset: SIMD2(-4, 0)), .zero))
+        #expect(near(delta(.up, 5, 30), SIMD2(-5, 0)))
+        // Further than the window: turn back toward the front.
+        #expect(near(delta(.right, -70, 0), SIMD2(10, 0)))
+        // Not reached yet: the full remaining turn.
+        #expect(near(delta(.down, 0, -10), SIMD2(0, -15)))
+    }
+
+    @Test func biasedVisionAndShortTurnsStillCompleteTheScan() async {
+        // Vision reads 6 degrees to the right, and the user turns only 90% of each target: the left pose is 34.5
+        // degrees by Vision, 10.5 from the absolute target but 4.5 from the front-relative one.
+        func run(relative: Bool) async -> (ScanPhase?, Int) {
+            var configuration = ScanConfiguration.testOffline
+            configuration.targetsRelativeToFront = relative
+            let (controller, tracker) = makeController(configuration)
+            var sim = ScanSimulation()
+            sim.user.reach = 0.9
+            sim.user.visionYawBias = -6
+            await sim.run(controller, tracker: tracker, maxFrames: 900)
+            return (sim.updates.last?.phase, controller.finish().keyframes.count)
+        }
+        let relative = await run(relative: true)
+        #expect(relative.0 == .finished && relative.1 == 15)
+        let absolute = await run(relative: false)
+        #expect(absolute.0 == .capturing(.left), "the absolute target is out of reach")
+    }
+
+    @Test func overestimatedTurnsAreAccepted() async {
+        // Vision overestimates yaw by 20%: left reads 54 degrees, beyond the 8 degree tolerance but inside the
+        // overshoot window.
+        let (controller, tracker) = makeController()
+        var sim = ScanSimulation()
+        sim.user.visionYawScale = 1.2
+        await sim.run(controller, tracker: tracker, maxFrames: 900)
+        #expect(sim.updates.last?.phase == .finished)
+        #expect(controller.finish().keyframes.count == 15)
     }
 
     @Test func lowConfidenceCountsAsNoFace() async {

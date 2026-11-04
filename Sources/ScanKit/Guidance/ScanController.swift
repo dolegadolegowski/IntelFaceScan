@@ -7,6 +7,7 @@
 import CameraKit
 import CoreGraphics
 import Foundation
+import simd
 
 public struct ScanConfiguration: Sendable, Hashable {
     public var poses: [ScanPose] = ScanPose.required
@@ -14,6 +15,14 @@ public struct ScanConfiguration: Sendable, Hashable {
     public var framesPerPose: Int = 3
     /// Maximum angular distance (degrees) from a pose's target.
     public var angleTolerance: Float = 8
+    /// Targets of the other poses are relative to the person's own frontal pose (mean of the front keyframes):
+    /// Vision's yaw/pitch of a face looking straight at the camera is biased per person by a few degrees.
+    public var targetsRelativeToFront: Bool = true
+    /// Largest frontal offset (degrees) that is applied to the other targets.
+    public var maxFrontOffsetDeg: Float = 10
+    /// Turning further than a pose's target (away from the front) is accepted up to this many degrees beyond it:
+    /// more rotation only adds coverage.
+    public var overshootToleranceDeg: Float = 15
     /// The pose must be held (within tolerance, slow motion) this long before frames are accepted.
     public var holdSeconds: Double = 0.4
     /// Absolute minimum variance of Laplacian of the face (0 = off; the relative gate below adapts to the scene).
@@ -435,8 +444,8 @@ public final class ScanController: @unchecked Sendable {
             update.rejection = lowConfidence ? .lowConfidence : .noFace
             return .none
         }
-        let target = pose.target
-        let delta = SIMD2(target.yaw - smoothed.yaw, target.pitch - smoothed.pitch)
+        let delta = Self.poseDelta(pose: pose, current: SIMD2(smoothed.yaw, smoothed.pitch),
+                                   frontOffset: frontOffset(snapshot), overshootDeg: c.overshootToleranceDeg)
         let error = (delta.x * delta.x + delta.y * delta.y).squareRoot()
         update.targetDelta = delta
         update.angularErrorDeg = error
@@ -537,6 +546,39 @@ public final class ScanController: @unchecked Sendable {
         let keyframe = Keyframe(id: 0, frame: frame, scanPose: pose, headPose: smoothed, faceRect: face.faceRect,
                                 landmarks: face.landmarks, mask: mask, quality: quality)
         return .accept(keyframe)
+    }
+
+    /// Mean yaw/pitch of the accepted front keyframes (clamped), or zero.
+    private func frontOffset(_ state: SharedState) -> SIMD2<Float> {
+        guard configuration.targetsRelativeToFront else { return .zero }
+        let front = state.keyframes.filter { $0.scanPose == .front }
+        guard !front.isEmpty else { return .zero }
+        let sum = front.reduce(SIMD2<Float>.zero) { $0 + SIMD2($1.headPose.yaw, $1.headPose.pitch) }
+        let limit = max(0, configuration.maxFrontOffsetDeg)
+        return simd_clamp(sum / Float(front.count), SIMD2(repeating: -limit), SIMD2(repeating: limit))
+    }
+
+    /// Remaining turn (yaw, pitch degrees) from `current` to `pose`. The target is shifted by the person's frontal
+    /// offset; along the direction away from the front, anything from the target to `overshootDeg` beyond it counts
+    /// as reached (the along component is then 0, negative beyond that window).
+    static func poseDelta(pose: ScanPose, current: SIMD2<Float>, frontOffset: SIMD2<Float>, overshootDeg: Float) -> SIMD2<Float> {
+        let target = SIMD2(pose.target.yaw, pose.target.pitch)
+        let offset = pose == .front ? SIMD2<Float>.zero : frontOffset
+        let delta = target + offset - current
+        let magnitude = simd_length(target)
+        guard magnitude > 0, overshootDeg > 0 else { return delta }
+        let direction = target / magnitude
+        let along = simd_dot(current - offset, direction)          // how far the head turned toward the pose
+        let perpendicular = delta - simd_dot(delta, direction) * direction
+        let remaining: Float
+        if along < magnitude {
+            remaining = magnitude - along
+        } else if along <= magnitude + overshootDeg {
+            remaining = 0
+        } else {
+            remaining = magnitude + overshootDeg - along              // turned too far: turn back
+        }
+        return perpendicular + remaining * direction
     }
 
     private func commit(_ decision: Decision, update: inout ScanUpdate, generation: UInt64, t: Double) {

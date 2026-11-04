@@ -812,7 +812,9 @@ TEST_CASE( playback_restart_stop_and_pause )
     REQUIRE( col.wait_for_event( "playback_finished", 20s ) );
     double seconds = std::chrono::duration< double >( std::chrono::steady_clock::now() - t0 ).count();
     CHECK_MSG( seconds > 1.0 && seconds < 4.0, seconds );
-    CHECK( col.frameset_count() >= size_t( o.frames - 2 ) );
+    // Real-time playback drops frames when processing falls behind (the face-scan filters take ~33 ms per frameset
+    // on a 3-core CI runner); every-frame delivery is checked by the non-real-time tests.
+    CHECK_MSG( col.frameset_count() >= size_t( o.frames / 2 ), col.frameset_count() );
 
     // After the end, start() plays the file again from the beginning.
     col.clear();
