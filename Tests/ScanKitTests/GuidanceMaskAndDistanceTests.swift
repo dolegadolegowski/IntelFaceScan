@@ -1,0 +1,273 @@
+// License: Apache 2.0. See LICENSE file in root directory.
+//
+// Head mask construction, recommended working distance, coverage map, exposure ROI policy and screen directions.
+
+import CameraKit
+import CoreGraphics
+import Foundation
+import simd
+import Testing
+@testable import ScanKit
+
+@Suite struct GuidanceHeadMaskTests {
+    let factory = GuidanceFrameFactory()
+
+    private func observation(roll: Float = 0, personMask: Data? = nil, chinY: Float? = nil) -> HeadObservation {
+        var regions: FaceLandmarkRegions?
+        if let chinY {
+            let r = factory.faceRect
+            regions = FaceLandmarkRegions(faceContour: [SIMD2(Float(r.minX), Float(r.midY)),
+                                                        SIMD2(Float(r.midX), chinY),
+                                                        SIMD2(Float(r.maxX), Float(r.midY))])
+        }
+        return HeadObservation(pose: HeadPose(yaw: 0, pitch: 0, roll: roll), faceRect: factory.faceRect,
+                               landmarks: [], personMask: personMask, regions: regions)
+    }
+
+    private func pixel(_ mask: Data, _ x: Int, _ y: Int) -> UInt8 { mask[y * factory.width + x] }
+
+    @Test func ellipseFallbackWithDepthBand() {
+        let frame = factory.frame(sequence: 0, timestampMs: 0)
+        var parameters = HeadMaskParameters()
+        parameters.erosionRadius = 0
+        let mask = HeadMaskBuilder.build(width: factory.width, height: factory.height, observation: observation(),
+                                         depth: frame.alignedDepth, faceDistanceM: 0.62, parameters: parameters)
+        #expect(mask.count == factory.width * factory.height)
+        let face = factory.faceRect
+        #expect(pixel(mask, Int(face.midX), Int(face.midY)) == 255)            // face center
+        #expect(pixel(mask, Int(face.midX), Int(face.minY) - 5) == 255)        // forehead above the face rect
+        #expect(pixel(mask, 2, 2) == 0)                                          // background corner
+        // Every mask pixel has depth inside the band.
+        for y in 0 ..< factory.height {
+            for x in 0 ..< factory.width where pixel(mask, x, y) != 0 {
+                let d = frame.alignedDepth.meters(x: x, y: y)
+                #expect(d >= 0.50 && d <= 0.82)
+            }
+        }
+    }
+
+    @Test func depthBandExcludesBackgroundInsidePersonMask() {
+        // A person mask covering everything: only the depth band separates head from background.
+        let everything = Data(repeating: 255, count: factory.width * factory.height)
+        let frame = factory.frame(sequence: 0, timestampMs: 0)
+        let mask = HeadMaskBuilder.build(width: factory.width, height: factory.height,
+                                         observation: observation(personMask: everything),
+                                         depth: frame.alignedDepth, faceDistanceM: 0.62)
+        var headPixels = 0, backgroundPixels = 0
+        for y in 0 ..< factory.height {
+            for x in 0 ..< factory.width where pixel(mask, x, y) != 0 {
+                if factory.inHead(x, y) { headPixels += 1 } else { backgroundPixels += 1 }
+            }
+        }
+        #expect(headPixels > 1000)
+        #expect(backgroundPixels == 0)
+        // Without depth the person mask (within the region of interest, above the neck cut) is used as is.
+        let noDepth = HeadMaskBuilder.build(width: factory.width, height: factory.height,
+                                            observation: observation(personMask: everything), depth: nil, faceDistanceM: nil)
+        #expect(HeadMaskBuilder.count(noDepth) > HeadMaskBuilder.count(mask))
+    }
+
+    @Test func neckCutBelowChinUnlessShoulders() {
+        let everything = Data(repeating: 255, count: factory.width * factory.height)
+        let chinY: Float = 70
+        var parameters = HeadMaskParameters()
+        parameters.erosionRadius = 0
+        let cut = HeadMaskBuilder.build(width: factory.width, height: factory.height,
+                                        observation: observation(personMask: everything, chinY: chinY),
+                                        depth: nil, faceDistanceM: nil, parameters: parameters)
+        let cutLine = Int(chinY + Float(factory.faceRect.height) * parameters.neckMarginFraction)
+        let x = Int(factory.faceRect.midX)
+        #expect(pixel(cut, x, cutLine - 2) == 255)
+        #expect(pixel(cut, x, cutLine + 2) == 0)
+        #expect(pixel(cut, x, factory.height - 1) == 0)
+
+        parameters.keepShoulders = true
+        let shoulders = HeadMaskBuilder.build(width: factory.width, height: factory.height,
+                                              observation: observation(personMask: everything, chinY: chinY),
+                                              depth: nil, faceDistanceM: nil, parameters: parameters)
+        #expect(pixel(shoulders, x, cutLine + 2) == 255)
+        #expect(pixel(shoulders, x, factory.height - 1) == 255)
+    }
+
+    @Test func neckCutFollowsRoll() {
+        // Head tilted clockwise by 30 deg: the chin direction rotates toward -x, so points straight below the
+        // chin but far to the right of the tilted down-axis stay, while points along the axis are cut.
+        let down = HeadGeometry.downDirection(rollDegrees: 30)
+        #expect(abs(down.x + 0.5) < 1e-5 && abs(down.y - 0.866) < 1e-3)
+        let up = HeadGeometry.downDirection(rollDegrees: 0)
+        #expect(up == SIMD2(0, 1))
+        let obs = observation(roll: 30)
+        let chin = obs.chinPoint
+        let center = SIMD2(Float(factory.faceRect.midX), Float(factory.faceRect.midY))
+        #expect(simd_distance(chin, center + down * Float(factory.faceRect.height) / 2) < 1e-3)
+    }
+
+    @Test func erosionShrinksMask() {
+        let frame = factory.frame(sequence: 0, timestampMs: 0)
+        var parameters = HeadMaskParameters()
+        parameters.erosionRadius = 0
+        let raw = HeadMaskBuilder.build(width: factory.width, height: factory.height, observation: observation(),
+                                        depth: frame.alignedDepth, faceDistanceM: 0.62, parameters: parameters)
+        parameters.erosionRadius = 2
+        let eroded = HeadMaskBuilder.build(width: factory.width, height: factory.height, observation: observation(),
+                                           depth: frame.alignedDepth, faceDistanceM: 0.62, parameters: parameters)
+        #expect(HeadMaskBuilder.count(eroded) < HeadMaskBuilder.count(raw))
+        #expect(HeadMaskBuilder.count(eroded) > HeadMaskBuilder.count(raw) / 2)
+        for i in 0 ..< eroded.count where eroded[i] != 0 { #expect(raw[i] != 0) }
+    }
+
+    @Test func degenerateInputsGiveEmptyMasks() {
+        let empty = HeadObservation(pose: .frontal, faceRect: .zero, landmarks: [], personMask: nil)
+        #expect(HeadMaskBuilder.count(HeadMaskBuilder.build(width: 10, height: 10, observation: empty, depth: nil,
+                                                            faceDistanceM: nil)) == 0)
+        #expect(HeadMaskBuilder.build(width: 0, height: 10, observation: empty, depth: nil, faceDistanceM: nil).isEmpty)
+        // A person mask of the wrong size is ignored (ellipse fallback).
+        let wrongSize = observation(personMask: Data(repeating: 255, count: 7))
+        let mask = HeadMaskBuilder.build(width: factory.width, height: factory.height, observation: wrongSize,
+                                         depth: nil, faceDistanceM: nil)
+        #expect(pixel(mask, 2, 2) == 0)
+        #expect(pixel(mask, Int(factory.faceRect.midX), Int(factory.faceRect.midY)) == 255)
+    }
+}
+
+@Suite struct GuidanceWorkingDistanceTests {
+    private func device(name: String = "Intel RealSense D455", baseline: Float? = 95) -> DeviceInfo {
+        GuidanceDevice.make(name: name, baselineMm: baseline)
+    }
+
+    @Test func minZFormula() {
+        #expect(abs(WorkingDistance.minZ(depthFocalPx: 640, baselineMm: 95, disparityShift: 0) - 640 * 95 / 126 / 1000) < 1e-6)
+        #expect(abs(WorkingDistance.minZ(depthFocalPx: 640, baselineMm: 95, disparityShift: 74) - 640 * 95 / 200 / 1000) < 1e-6)
+        #expect(WorkingDistance.maxZ(depthFocalPx: 640, baselineMm: 95, disparityShift: 0) == nil)
+        #expect(abs((WorkingDistance.maxZ(depthFocalPx: 640, baselineMm: 95, disparityShift: 50) ?? 0) - 1.216) < 1e-4)
+        // D455 1280x720: 87 deg HFOV -> ~674 px.
+        let f = WorkingDistance.focalPx(width: 1280, horizontalFOVDegrees: 87)
+        #expect(abs(f - 674.4) < 0.5)
+    }
+
+    @Test func d455DefaultRange() {
+        let range = WorkingDistance.recommendedRange(device: device(), configuration: .faceScanD455)
+        // Min-Z ~0.51 m -> ~0.56 ... 0.71 m.
+        #expect(range.lowerBound >= 0.53 && range.lowerBound <= 0.58)
+        #expect(range.upperBound >= 0.68 && range.upperBound <= 0.75)
+        // Without any information the same defaults apply.
+        #expect(WorkingDistance.recommendedRange(device: nil, configuration: nil) == range)
+    }
+
+    @Test func lowerResolutionAndDisparityShiftMoveCloser() {
+        var vga = CaptureConfiguration.faceScanD455
+        vga.depth = StreamSettings(width: 848, height: 480, fps: 30)
+        let base = WorkingDistance.recommendedRange(device: device(), configuration: .faceScanD455)
+        let small = WorkingDistance.recommendedRange(device: device(), configuration: vga)
+        #expect(small.lowerBound < base.lowerBound - 0.1)
+
+        var shifted = CaptureConfiguration.faceScanD455
+        shifted.disparityShift = 100
+        let close = WorkingDistance.recommendedRange(device: device(), configuration: shifted)
+        let f = WorkingDistance.focalPx(width: 1280, horizontalFOVDegrees: 87)
+        let minZ = WorkingDistance.minZ(depthFocalPx: f, baselineMm: 95, disparityShift: 100)
+        #expect(abs(close.lowerBound - (minZ + 0.05)) < 0.006)
+        #expect(close.upperBound < base.lowerBound)
+
+        // A large shift caps the range inside the measurable [Min-Z, Max-Z].
+        shifted.disparityShift = 400
+        shifted.filters.threshold.enabled = false
+        let veryClose = WorkingDistance.recommendedRange(device: device(), configuration: shifted)
+        let nearZ = WorkingDistance.minZ(depthFocalPx: f, baselineMm: 95, disparityShift: 400)
+        let maxZ = WorkingDistance.maxZ(depthFocalPx: f, baselineMm: 95, disparityShift: 400) ?? 0
+        #expect(veryClose.upperBound < maxZ)
+        #expect(veryClose.lowerBound > nearZ)
+        #expect(veryClose.upperBound > veryClose.lowerBound)
+
+        // Contradictory: the threshold filter starts beyond Max-Z. Still a valid range, inside the geometry.
+        shifted.filters.threshold = .init(enabled: true, minM: 0.5, maxM: 1.2)
+        let contradictory = WorkingDistance.recommendedRange(device: device(), configuration: shifted)
+        #expect(contradictory.lowerBound >= nearZ - 0.01 && contradictory.upperBound <= maxZ + 0.01)
+    }
+
+    @Test func thresholdFilterAndDeviceDataLimitTheRange() {
+        var capture = CaptureConfiguration.faceScanD455
+        capture.filters.threshold = .init(enabled: true, minM: 0.2, maxM: 0.65)
+        let limited = WorkingDistance.recommendedRange(device: device(), configuration: capture)
+        #expect(limited.upperBound <= 0.60 + 1e-6)
+
+        // D435 (50 mm baseline) works much closer.
+        let d435 = WorkingDistance.recommendedRange(device: device(name: "Intel RealSense D435", baseline: nil),
+                                                    configuration: .faceScanD455)
+        #expect(d435.lowerBound < 0.35)
+        // A reported baseline wins over the model default.
+        let measured = WorkingDistance.recommendedRange(device: device(baseline: 50), configuration: .faceScanD455)
+        #expect(measured == d435)
+        // Real depth intrinsics win over the nominal field of view.
+        let k = Intrinsics(width: 640, height: 360, fx: 320, fy: 320, ppx: 320, ppy: 180)
+        let fromIntrinsics = WorkingDistance.recommendedRange(device: device(), configuration: .faceScanD455, depthIntrinsics: k)
+        let minZ = WorkingDistance.minZ(depthFocalPx: 640, baselineMm: 95, disparityShift: 0)
+        #expect(abs(fromIntrinsics.lowerBound - (minZ + 0.05)) < 0.006)
+    }
+
+    @Test func configurationHelper() {
+        var capture = CaptureConfiguration.faceScanD455
+        capture.disparityShift = 50
+        let c = ScanConfiguration().withRecommendedDistance(device: device(), captureConfiguration: capture)
+        #expect(c.distanceRangeM == WorkingDistance.recommendedRange(device: device(), configuration: capture))
+        #expect(ScanConfiguration().minValidDepthPoints(width: 640, height: 400) == 3000)
+        #expect(ScanConfiguration().minValidDepthPoints(width: 1280, height: 800) == 12_000)
+    }
+}
+
+@Suite struct GuidanceTypesTests {
+    @Test func screenDirectionHonorsMirroring() {
+        // Pose "left" (person turns to THEIR left): the nose moves toward the image right.
+        let raw = ScanGuidance.screenDirection(yawDelta: 45, pitchDelta: 0, mirrored: false)
+        #expect(raw == SIMD2(1, 0))
+        let mirrored = ScanGuidance.screenDirection(yawDelta: 45, pitchDelta: 0, mirrored: true)
+        #expect(mirrored == SIMD2(-1, 0))
+        let up = ScanGuidance.screenDirection(yawDelta: 0, pitchDelta: 25, mirrored: true)
+        #expect(up == SIMD2(0, -1))
+        #expect(ScanGuidance.screenDirection(yawDelta: 0, pitchDelta: 0, mirrored: false) == .zero)
+    }
+
+    @Test func coveredRegionIsOppositeToTurn() {
+        let p = ScanGuidance.coveredRegionPosition(yaw: 45, pitch: 0, mirrored: false)
+        #expect(p.x < 0)
+        #expect(ScanGuidance.coveredRegionPosition(yaw: 45, pitch: 0, mirrored: true).x > 0)
+        #expect(ScanGuidance.coveredRegionPosition(yaw: 0, pitch: 25, mirrored: false).y > 0)
+    }
+
+    @Test func coverageBins() {
+        #expect(CoverageMap.bin(yaw: -90, pitch: -60) == (0, 0))
+        #expect(CoverageMap.bin(yaw: 90, pitch: 60) == (CoverageMap.yawBins - 1, CoverageMap.pitchBins - 1))
+        #expect(CoverageMap.bin(yaw: 0.1, pitch: 0.1) == (6, 4))
+        let c = CoverageMap.binCenter(yawBin: 6, pitchBin: 4)
+        #expect(c.yaw == 7.5 && c.pitch == 7.5)
+        #expect(CoverageMap().values.allSatisfy { $0 == 0 })
+        let one = CoverageMap(keyframePoses: [HeadPose(yaw: 7.5, pitch: 7.5, roll: 0)], framesPerPose: 1)
+        #expect(abs(one.value(yawBin: 6, pitchBin: 4) - (1 - exp(-3))) < 1e-4)
+        #expect(one.value(yawBin: 0, pitchBin: 0) < 1e-3)
+        #expect(one.values.allSatisfy { $0 >= 0 && $0 <= 1 })
+    }
+
+    @Test func exposureROIIsThrottled() throws {
+        var policy = ExposureROIPolicy(minInterval: 1.0, maxOverlap: 0.7, expansion: 1.2)
+        let size = CGSize(width: 1280, height: 800)
+        let face = CGRect(x: 500, y: 200, width: 200, height: 250)
+        let firstROI = policy.roi(for: face, imageSize: size, now: 10)
+        let first = try #require(firstROI)
+        #expect(first.contains(face))
+        #expect(policy.roi(for: face.offsetBy(dx: 150, dy: 0), imageSize: size, now: 10.5) == nil)   // too soon
+        #expect(policy.roi(for: face.offsetBy(dx: 5, dy: 0), imageSize: size, now: 12) == nil)       // barely moved
+        #expect(policy.roi(for: face.offsetBy(dx: 150, dy: 0), imageSize: size, now: 12) != nil)
+        #expect(policy.roi(for: nil, imageSize: size, now: 20) == nil)
+        // Clipped to the image.
+        policy.reset()
+        let edgeROI = policy.roi(for: CGRect(x: 1200, y: 700, width: 200, height: 200), imageSize: size, now: 30)
+        let edge = try #require(edgeROI)
+        #expect(edge.maxX <= 1280 && edge.maxY <= 800)
+    }
+
+    @Test func instructionTextsExist() {
+        #expect(!ScanInstruction.turn(.left, yawDelta: 10, pitchDelta: 0).englishText.isEmpty)
+        for r in ScanRejection.allCases { #expect(!r.englishText.isEmpty) }
+        for p in ScanPose.allCases { #expect(!p.englishName.isEmpty) }
+    }
+}
