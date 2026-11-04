@@ -1383,6 +1383,35 @@ TEST_CASE( live_device_events_and_shutdown )
     CHECK( col.events().size() == events );
 }
 
+TEST_CASE( live_recording_ended_by_an_unplug_still_stops )
+{
+    // The camera unplugged mid-recording: the next command finishes the recording on the engine's side. The app's
+    // RECORD_STOP that follows must succeed (the IPC layer then delivers the file and reports recording_finished),
+    // not fail with "No recording is running".
+    TempDir dir;
+    RecordingOptions o;
+    o.frames = 1000;
+    LiveRig rig( o, 1 );
+    CaptureEngine & engine = *rig.engine;
+    engine.configure( to_json( LiveRig::config() ) );
+    engine.start();
+    rig.warm_up();
+    const std::string file = dir.file( "unplugged.db3" );
+    engine.start_recording( file, "db3" );
+    rig.warm_up();
+    CHECK( rig.feed( 5 ) == 5 );
+
+    mark_device_lost_for_testing( engine );
+    CHECK_THROWS_WITH( engine.device_info(), "disconnected" );
+    CHECK( rig.col.event_count( "recording_finished" ) == 1 );
+    CHECK( ! engine.streaming() );
+    engine.stop_recording();
+    CHECK( fs::exists( file ) && fs::file_size( file ) > 0 );
+    // Only once: a second stop has nothing to stop.
+    CHECK_THROWS_WITH( engine.stop_recording(), "No recording" );
+    engine.shutdown();
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Throughput (printed for docs/CAMERA.md; the bounds only catch gross regressions)
 

@@ -84,7 +84,9 @@ public:
     // Records the raw sensor streams into 'path' (a file inside the helper's root-private temporary directory,
     // chosen by the helper, never by the app). format: "db3" | "bag". May restart the streams.
     virtual void start_recording( const std::string & path, const std::string & format ) = 0;
-    // Returns once the recording file is complete and closed.
+    // Returns once the recording file is complete and closed. Also succeeds (once) when the engine already finished
+    // the recording itself, e.g. any command after the camera was unplugged mid-recording ends it: the file is then
+    // complete too. Throws when no recording was started.
     virtual void stop_recording() = 0;
 
     // Playback only.

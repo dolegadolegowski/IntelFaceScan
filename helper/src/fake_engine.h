@@ -8,7 +8,9 @@
 // frame number) with a shaded sphere of radius 0.1 m drifting around (0, 0, 0.45 m) in front of the color camera,
 // and the sphere's depth aligned to color (0 = no data around it). Intrinsics, extrinsics, IMU and metadata look
 // like a D455 at the configured resolution. Options, presets and ranges behave like a device (errors included).
-// Recording writes a small synthetic file ("IFSFAKE1" header) so the descriptor hand-over can be tested.
+// Recording writes a small synthetic file ("IFSFAKE1" header) so the descriptor hand-over can be tested. A hardware
+// reset plays an unplug and reconnect: device_disconnected + device_connected, and a running recording ends with the
+// camera (as with the real engine, the RECORD_STOP that follows still succeeds).
 
 #pragma once
 
