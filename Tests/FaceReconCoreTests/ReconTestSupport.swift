@@ -319,17 +319,23 @@ final class RenderedFrame {
 }
 
 /// Ray-casts a scene. Depth is z in the camera frame, quantized to depthScale, with Gaussian noise of
-/// sigma = noiseAt1m * z^2 (stereo depth error grows quadratically with distance).
+/// sigma = noiseAt1m * z^2 (stereo depth error grows quadratically with distance). Surfaces seen at more than
+/// maxIncidenceDeg get no depth (a D455 measured none beyond about 60° on a real head), nor do world points for which
+/// `keep` returns false.
 func render(_ scene: SynthScene, camera: SynthCamera, worldFromCamera: Rigid, noiseAt1m: Double = 0,
-            depthScale: Float = 0.0001, seed: UInt64 = 1) -> RenderedFrame {
+            depthScale: Float = 0.0001, seed: UInt64 = 1, maxIncidenceDeg: Double = 90,
+            keep: ((V3) -> Bool)? = nil) -> RenderedFrame {
     let frame = RenderedFrame(camera: camera, depthScale: depthScale, worldFromCamera: worldFromCamera)
     var rng = SplitMix64(seed: seed)
     let origin = worldFromCamera.t
+    let cosMaxIncidence = cos(maxIncidenceDeg * Double.pi / 180)
     for v in 0 ..< camera.height {
         for u in 0 ..< camera.width {
             let local = V3((Double(u) - camera.cx) / camera.fx, (Double(v) - camera.cy) / camera.fy, 1)
             let dir = worldFromCamera.rotate(local)
             guard let hit = scene.intersect(origin: origin, dir: dir) else { continue }
+            if maxIncidenceDeg < 90 && -hit.normal.dot(dir) / dir.length < cosMaxIncidence { continue }
+            if let keep, !keep(origin + dir * hit.t) { continue }
             let z = hit.t   // dir has unit z in the camera frame
             let noisy = z + (noiseAt1m > 0 ? noiseAt1m * z * z * rng.gaussian() : 0)
             let raw = (noisy / Double(depthScale)).rounded()

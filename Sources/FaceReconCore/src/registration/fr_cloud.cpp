@@ -557,6 +557,124 @@ fr_cloud cloud_from_rgbd( const fr_rgbd_frame & f, const fr_cloud_params & p )
     }
     return cloud;
 }
+
+ViewMap build_view_map( const fr_cloud & cloud, const fr_intrinsics & in )
+{
+    ViewMap view;
+    view.fx = in.fx;
+    view.fy = in.fy;
+    view.cx = in.cx;
+    view.cy = in.cy;
+    const size_t n = cloud.size();
+    std::vector< std::pair< int, int > > pixels( n );
+    int x0 = in.width, y0 = in.height, x1 = -1, y1 = -1;
+    for( size_t i = 0; i < n; ++i )
+    {
+        const Eigen::Vector3f p = cloud.point( i );
+        const int u = p.z() > 0 ? int( std::lround( in.fx * p.x() / p.z() + in.cx ) ) : -1;
+        const int v = p.z() > 0 ? int( std::lround( in.fy * p.y() / p.z() + in.cy ) ) : -1;
+        pixels[i] = { u, v };
+        if( u < 0 || v < 0 || u >= in.width || v >= in.height )
+            continue;
+        x0 = std::min( x0, u );
+        y0 = std::min( y0, v );
+        x1 = std::max( x1, u );
+        y1 = std::max( y1, v );
+    }
+    if( x1 < x0 )
+        return view;
+    view.x0 = x0;
+    view.y0 = y0;
+    view.width = x1 - x0 + 1;
+    view.height = y1 - y0 + 1;
+    view.z.assign( size_t( view.width ) * size_t( view.height ), 0.f );
+    for( size_t i = 0; i < n; ++i )
+    {
+        const int u = pixels[i].first - x0, v = pixels[i].second - y0;
+        if( u >= 0 && v >= 0 && u < view.width && v < view.height )
+            view.z[size_t( v ) * size_t( view.width ) + size_t( u )] = cloud.points[3 * i + 2];
+    }
+    return view;
+}
+
+OverlapStats projective_overlap( const fr_cloud & source, const fr_cloud & target, const CloudIndex & target_index,
+                                 const ViewMap & view, const Eigen::Matrix4d & target_from_source, float max_d, float tau,
+                                 float cos_max, float source_fx, float voxel, int stride )
+{
+    const Eigen::Matrix3f r = target_from_source.block< 3, 3 >( 0, 0 ).cast< float >();
+    const Eigen::Vector3f t = target_from_source.block< 3, 1 >( 0, 3 ).cast< float >();
+    const size_t n = source.size();
+    const size_t chunks = chunk_count( n, 2048 );
+    std::vector< OverlapStats > parts( chunks );
+    const bool target_normals = target.has_normals();
+    // The view map holds every stride-th pixel, so the nearest one with data can be stride / 2 pixels away. A fixed
+    // 3 x 3 window kept 63-75 % of the inlier area at stride 4 and a third of the expected points at stride 8, where
+    // it failed a correct alignment (ReconRegisterFramesTests.frameOverlapOfTurnedAndFrontalView checks stride 4).
+    const int window = std::max( 1, ( stride + 1 ) / 2 );
+    parallel_chunks( n, chunks, [&]( size_t begin, size_t end, size_t c ) {
+        OverlapStats & s = parts[c];
+        for( size_t i = begin; i < end; ++i )
+        {
+            const Eigen::Vector3f q = r * source.point( i ) + t;
+            if( q.z() <= 0 || view.z.empty() )
+                continue;
+            const int u = int( std::lround( view.fx * q.x() / q.z() + view.cx ) ) - view.x0;
+            const int v = int( std::lround( view.fy * q.y() / q.z() + view.cy ) ) - view.y0;
+            if( u < window || v < window || u >= view.width - window || v >= view.height - window )
+                continue;
+            float zt = 0, best = std::numeric_limits< float >::max();
+            for( int dv = -window; dv <= window; ++dv )
+                for( int du = -window; du <= window; ++du )
+                {
+                    const float z = view.z[size_t( v + dv ) * size_t( view.width ) + size_t( u + du )];
+                    if( z > 0 && std::abs( q.z() - z ) < best )
+                    {
+                        best = std::abs( q.z() - z );
+                        zt = z;
+                    }
+                }
+            if( zt <= 0 )
+                continue;
+            const Eigen::Vector3f nq = source.has_normals() ? Eigen::Vector3f( r * source.normal( i ) )
+                                                            : Eigen::Vector3f( -q.normalized() );
+            if( -nq.dot( q ) < cos_max * q.norm() )
+                continue;   // the target camera would not keep this point (grazing or back-facing)
+            ++s.visible;
+            const float dz = q.z() - zt;
+            if( dz < -tau )
+                ++s.violations;
+            if( dz > tau )
+                continue;   // hidden behind the target surface
+            ++s.expected;
+            uint32_t j;
+            float d2;
+            // Inlier: point-to-plane distance to the nearest target point within max_d plus the target's point
+            // spacing (sparse clouds of low-resolution or strided frames have no point within max_d of most surface
+            // points).
+            const float target_spacing = std::max( voxel, float( stride ) * zt / view.fx );
+            const float radius = max_d + target_spacing;
+            if( target_index.nearest( q.data(), radius * radius, j, d2 )
+                && ( target_normals ? std::abs( ( q - target.point( j ) ).dot( target.normal( j ) ) ) <= max_d
+                                    : d2 <= max_d * max_d ) )
+            {
+                ++s.inliers;
+                const double spacing
+                    = std::max( double( voxel ), double( stride ) * double( source.points[3 * i + 2] ) / double( source_fx ) );
+                s.inlier_area += spacing * spacing;
+            }
+        }
+    } );
+    OverlapStats total;
+    for( const auto & s : parts )
+    {
+        total.visible += s.visible;
+        total.expected += s.expected;
+        total.inliers += s.inliers;
+        total.violations += s.violations;
+        total.inlier_area += s.inlier_area;
+    }
+    return total;
+}
 }  // namespace fr
 
 extern "C" {

@@ -242,44 +242,161 @@ pipeline's registration check uses this.
 
 **Candidate edges.** Every candidate is refined by ICP from the initial relative pose:
 
-* **odometry**: consecutive frames of a group (certain). Within a group the head is held still, so ICP also tries
-  the identity rotation (centroids aligned) and keeps the better result.
+* **odometry**: consecutive frames of a group (certain).
 * **bridges**: each group to the frontal group, using the 3 frame pairs with the most similar initial rotations.
 * **loop closures**: every other pair whose initial rotations differ by less than `loop_closure_max_angle_deg`
   (70°), at most 6 per frame, in order of increasing angle. Within a group, only skip-one pairs are used.
 
-**Rejection.** An edge is rejected when its fitness is below `min_fitness`, its RMSE is above `max_rmse_m`, or ICP
-moved far from the initial guess: more than 30° of rotation or more than 4 cm displacement of the source cloud's
-centroid. The displacement is measured at the centroid, not as camera translation, because a few degrees about the
-head 0.6 m in front of the camera already mean centimeters of camera translation. Finally, every edge fitting worse
-than 1.5× the median RMSE is rejected. A sliding partial overlap can pass the absolute thresholds but still fits
-clearly worse than the typical edge, whose RMSE reflects the depth noise.
+Within a group the head is held still, so for every edge inside a group (odometry and skip-one loop closures) ICP
+also starts from the identity rotation (centroids aligned) and keeps the better result.
 
-**Certain spanning structure.** The certain edges are the accepted odometry edges plus, for each group, the
-accepted bridge that fits *best after ICP* (fitness / RMSE). An earlier version took the bridge with the closest
-initial rotation, and one of those slid into a wrong minimum that still passed the thresholds, which put a frame
-83 mm off. Groups or frames that stay disconnected are attached through the best accepted alternative (bridges
-first). Frames that cannot be connected at all keep their initial pose; the pipeline's registration check then
-removes them from fusion. Initial node poses are composed along the certain edges.
+**Rejection.** An edge is rejected when its RMSE is above `max_rmse_m` or ICP moved far from the initial guess:
+more than 30° of rotation or more than 4 cm displacement of the source cloud's centroid. The displacement is
+measured at the centroid, not as camera translation, because a few degrees about the head 0.6 m in front of the
+camera already mean centimeters of camera translation. This correction limit is what rejects gross errors: without
+it, the overlap test below accepted flips of 56–174° on a real scan. Of the remaining edges, one is accepted when its
+fitness is at least `min_fitness`, or, below that, when it passes the overlap test and its guard (next paragraphs).
+Finally, every edge accepted by fitness that fits worse than 1.5× the median RMSE of those edges is rejected (with
+at least 5 of them), and every edge accepted by the overlap test that fits worse than 1.5× the median of those (with
+at least 3). A sliding partial overlap can pass the absolute thresholds but still fits clearly worse than the typical
+edge, whose RMSE reflects the depth noise. The two kinds get a median each because overlap edges fit at about 1 mm
+(rec4 0.89–1.10 mm). In the replay of the recording rec4 was cut from, the five overlap edges (0.95–1.04 mm) in one
+shared median raised the limit from 0.81 to 1.46 mm. That let the two down frames in through edges fitting at
+1.06–1.19 mm, 36° below the front instead of about 42°, a doubled forehead. Held to the 0.81 mm limit, every overlap
+edge of that replay is rejected too, and only 3 keyframes remain, as before the overlap test. Their own limit
+(1.43 mm on rec4, 1.46 mm on the replay) keeps every accepted overlap edge and still rejects the replay's 5→2
+(1.6 mm), which missed the overlap test only by its reverse fitness (0.841). The split rejects the replay's wrong down
+pose only because its within-group edges outnumber the cross-group ones ("Known limits").
+
+**Overlap test (edges below `min_fitness`).** Fitness counts inliers among *all* source points, so it also drops when
+two views share little surface. People turn farther than the guided 45° (the right side views of a real D455 scan,
+rec4, sit 60–62° from the front), the D455 measured no depth on the head beyond a view angle of about 60–70°, and
+rec4's frontal head cloud was only 10.7 cm wide. A view 60–75° from the front then shares 6–10 % of its cloud with the
+frontal cloud: rec4's correct side edges have a fitness of 0.065–0.077, the textured synthetic head with 65° side
+views and no depth beyond 60° incidence 0.19–0.27, all below the default `min_fitness` of 0.3. A lower floor does not
+help: at 0.05 it lets rec4's doubtful left frame in, and no floor separates correct from wrong alignments. The overlap
+test instead judges what each camera could have measured of the other's surface, in both directions
+(`projective_overlap`):
+
+* a source point carried into the other camera is *visible* when it projects within ±max(1, ⌈stride / 2⌉) pixels
+  of a pixel where that frame has a cloud point (3 × 3 at registration's stride 1 and the check's stride 2: the
+  window grows with the stride because a strided frame has a point in every stride-th pixel only) and faces that
+  camera within `max_view_angle_deg`;
+* it is *hidden* (no evidence) when it lies more than 5 mm behind the other surface there, and *free space* when it
+  lies more than 5 mm in front of it, in space the other camera saw through;
+* of the visible points that are not hidden, the *inliers* lie within 3 mm (0.75 × `max_correspondence_m`)
+  point-to-plane of the other cloud; each covers max(voxel, stride · z / fx)².
+
+An edge below `min_fitness` passes with an overlap fitness (inliers / visible and not hidden) of at least 0.85, a
+free-space ratio (free space / visible) of at most 0.08 and 10 cm² of inlier surface, each in both directions. The
+thresholds come from 1,259 distinct ICP minima of rec4's side and frontal pairs (ICP started on a rotation grid
+around the Vision pose), labelled correct or wrong against the alignment that independent analyses agreed on (the
+right group about 61° from the front, consistent across 7 of 9 pairs). Every correct edge of the synthetic 45° scans
+passes the fitness floor and takes the unchanged path.
+
+`fr_frame_overlap` exposes these statistics for two frames, and `fr_overlap_fits` the thresholds. It is not exactly
+the registration test: it uses the given correspondence distance on clouds it builds itself (registration uses
+0.75 × `max_correspondence_m` on its own clouds), and it has no guard (next paragraph).
+
+**Guard against sliding.** A smooth, sphere-like shared patch does not pin the rotation, and the overlap statistics
+cannot see a slide along it. On the ellipsoid test head with side views at 65°, frontal depth only within 5.4 cm of
+the head center and no depth beyond 60° incidence (side-to-front fitness at the truth 0.072–0.074, like rec4's), ICP
+slid 20–25° away from the truth even when started at it, with overlap fitness 0.94–0.99 and free space ≤ 0.08: without
+the guard those edges were accepted 8.5–51 mm off (`ReconRegisterFramesTests.degenerateSideOverlapIsNeverAccepted`).
+The guard is λmin, the smallest eigenvalue of the point-to-plane Hessian Σ J Jᵀ / (inlier count) over the inliers
+(source points within 3 mm of the target), J = [(q − c) × n / 5 cm ; n], with the rotation about the inliers' centroid
+c scaled by 5 cm:
+
+| edges | λmin |
+|---|---|
+| slid side edges of the ellipsoid test head | 0.0004–0.0011 |
+| rec4's accepted side edges | 0.0042–0.0067 |
+| accepted side edges of the replay of the recording rec4 was cut from | 0.0030–0.0062 |
+| side edges of the textured synthetic head at 65° | 0.0049–0.013 |
+
+The floor is 0.002. In the ellipsoid study (exact start, 2°, 8°, rec4-like 6°/9°/7° plus 15 mm, 15° of yaw, 25°
+toward the front) every side frame then keeps its initial pose and is left to the registration check, while rec4 and
+the textured head keep all their accepted side edges. The separation holds up to a depth noise of σ = 0.0039 · z²
+(tested): about 1.0–1.2 mm on the shared surface, which lies 0.50–0.56 m from the camera (the test head's center is
+at 0.6 m). At 0.0045 · z² (about 1.2–1.4 mm there) slid edges score like correct ones and the right side frames were
+accepted 9.3–10.0 mm off ("Known limits").
+
+**rec4** (10 keyframes). Frame numbers here are registration order: front 0–2, down 3–5, left 6 (keyframe #9),
+right 7–9 (keyframes #6–#8); `#` marks keyframe numbers, as in the pipeline's notes. With the fitness floor alone,
+every side edge was rejected and 5 keyframes were used; now 9 are. The overlap test accepts:
+
+| edge | fitness | RMSE | overlap fitness | inlier area (cm²) | free space | λmin |
+|---|---|---|---|---|---|---|
+| 7→1 | 0.068 | 0.89 mm | 0.980 / 0.955 | 14.8 / 18.9 | 0 / 0.021 | 0.0067 |
+| 7→2 | 0.068 | 0.96 mm | 0.955 / 0.940 | 14.7 / 19.0 | 0 / 0.022 | 0.0048 |
+| 9→2 | 0.077 | 1.10 mm | 0.983 / 0.952 | 18.9 / 24.3 | 0 / 0.014 | 0.0042 |
+
+(source → target / target → source). The other right edges (9→0, 8→0, 8→1, 8→2, 9→1, 7→0) fail the correction
+limit; 8→0, 8→1 and 9→0 were traced to sliding minima 24–41° and 47–75 mm from that alignment. The left frame stays
+out: 6→0 and 6→1 miss by thin margins (free space 0.090 and 0.099, reverse overlap fitness 0.842 and 0.840), and 6→2
+fails the correction limit.
+
+**The replay of the recording rec4 was cut from** (8 keyframes: front 0–2, down 3–4, right 5–7). The overlap test
+accepts 7→2, 5→1, 7→1, 6→2 and 6→1 (RMSE 0.95–1.04 mm, λmin 0.0030–0.0062), and 6 keyframes are used, the right
+group 60.1–61.1° from the front. The bridges of the two down frames (1.06–1.19 mm) fail the relative RMSE limit of
+0.81 mm (1.5 × the median of the 13 edges accepted by fitness, 7 of them within a pose group), and the registration
+check leaves both frames out. When they were fused (limit 1.46 mm, above), they sat 36° below the front, and their
+depth disagreed with the frontal frames by a median 3.1–3.4 mm, against 0.9–1.3 mm for rec4's down frames at 42.6°.
+
+**Certain spanning structure.** The certain edges are the accepted odometry edges plus, for each group, the accepted
+bridge that fits *best after ICP*: most correspondences per RMSE. An earlier version took the bridge with the closest
+initial rotation, and one of those slid into a wrong minimum that still passed the thresholds, which put a frame 83 mm
+off. The version before this one ranked by fitness / RMSE, but fitness is relative to the source cloud: in rec4 two
+down frames whose head masks were cut to 1.7k-point eye-band strips (fitness 0.78–0.84) outranked the full third down
+frame (12.9k points, fitness 0.43, four times their correspondences) and put the down group 36° below the front.
+Ranked by correspondences, that frame's bridge (3→2) is certain, the frame (#3) is used (with the old ranking the
+registration check left it out: 8 of 10 keyframes), and the group lands at 42.3–42.9°, where two independent analyses
+had put it (42.6°). No synthetic test pins this ranking: a synthetic version of the case (down views with one or two
+masks cut to an eye, brow or forehead strip, 6–8° initial error) did not fail with the old ranking (the full frame
+landed within 0.1° either way). The ranking also has a cost: a large wrong candidate inside the 30° / 4 cm correction
+limit can now outrank a small correct one. Between the two starts of an edge within a group (above), fitness / RMSE
+still decides: both share the source cloud. Groups or frames that stay disconnected are attached through the best
+accepted alternative (bridges first). Frames that cannot be connected at all keep their initial pose; the pipeline's
+registration check then removes them from fusion. Initial node poses are composed along the certain edges.
 
 **Pose graph.** Implementation details are in the next section. Frame 0 is fixed (`reference_node` is forced to
 0). Certain edges are odometry edges and uncertain edges are loop closures. The report counts certain edges as
 `odometry_edges` and surviving uncertain edges as `loop_closures`. Rejected and pruned edges are counted together.
 
 **Diagnostics.** Set `FR_DEBUG_REGISTRATION=1` to print every candidate edge (kind, initial angle, status,
-fitness, RMSE, acceptance) to stderr.
+fitness, RMSE, acceptance) to stderr; for an edge that reached the overlap test also its overlap fitness, inlier area
+and free space (source → target / target → source), λmin (`constraint`; 0 when the statistics already failed) and
+whether the overlap test accepted it (`by-overlap`).
 
-**Registration check (`RegistrationCheck.verify`, Swift).** The registered poses are grouped (relative rotation
-below 12° to a group's first frame). Every frame's registered cloud (stride 2, 1.5 mm voxels) is evaluated against
-the most similar view (smallest relative rotation) of its own pose group and of every other pose group within 60°,
-with `fr_icp` at `max_iterations = 0` and a 3 mm correspondence distance. A pair fits when its fitness is at least
-0.25 and its RMSE at most max(2 × median, median + 0.7 mm) over all evaluated pairs. A frame passes when a chain of
-fitting pairs links it to frame 0, which always passes. An earlier version judged each frame by its single most
-similar view, which failed both ways: a pose group misregistered as a whole (a wrong bridge) fits itself, because
-its frames are each other's most similar views, and passed; a correct frame whose most similar view was the
-misregistered one was dropped (tests with a 3.6 mm offset of one frame and of a two-frame group). Comparing with a
-fixed number of most similar views is not enough either: with four keyframes per pose those are all siblings, and
-the left groups of the 40-keyframe benchmark were never linked to the reference (test with four views per pose).
+**Registration check (`RegistrationCheck.verify`, Swift).** The registered poses are grouped (relative rotation below
+12° to a group's first frame). Every frame's registered cloud (stride 2, 1.5 mm voxels) is evaluated against the most
+similar view (smallest relative rotation) of its own pose group and of every other pose group within 75°, with
+`fr_icp` at `max_iterations = 0` and a 3 mm correspondence distance. A pair fits when its fitness is at least 0.25 and
+its RMSE at most max(2 × median, median + 0.7 mm) over those pairs, or, below 0.25, when it passes the registration's
+overlap test (`fr_frame_overlap` on the two frames under the registered relative pose, stride 2, 1.5 mm voxels, 3 mm;
+`fr_overlap_fits`). A frame passes when a chain of fitting pairs links it to frame 0, which always passes. An earlier
+version judged each frame by its single most similar view, which failed both ways: a pose group misregistered as a
+whole (a wrong bridge) fits itself, because its frames are each other's most similar views, and passed; a correct
+frame whose most similar view was the misregistered one was dropped (tests with a 3.6 mm offset of one frame and of a
+two-frame group). Comparing with a fixed number of most similar views is not enough either: with four keyframes per
+pose those are all siblings, and the left groups of the 40-keyframe benchmark were never linked to the reference (test
+with four views per pose).
+
+*Pairs beyond 60°.* Up to 60°, rec4's right side views (60–62° from the front) had no pair across pose groups and
+failed wherever registration had put them, and so did all six side views at 67–69° of a synthetic scan at their true
+poses (`correctSideViewsBeyondSixtyDegreesPass`; there, enough of those pairs reach a fitness of 0.26–0.30 to pass
+without the overlap test). Pairs this far apart share little surface (rec4's side-to-front fitness 0.06–0.14), hence
+the overlap test for pairs below 0.25: with side views at 65°, no depth beyond 60° incidence and frontal depth only
+within 3.5 cm of the head center, the six side frames failed at their true poses without it
+(`sideViewsSharingANarrowBandPassByOverlap`). As in registration, the RMSE limit comes from and applies to the pairs
+that fit by fitness only; the overlap pairs have no relative RMSE limit (registration gives its overlap edges one of
+their own). They sit at about 1 mm, close to that limit (rec4's
+right-to-front pairs at the registered poses 0.74–1.13 mm against 1.10 mm, the replay's 0.92–1.06 mm against
+1.09 mm), and in the median they raised it for every pair (rec4: to 1.48 mm). A left group of the 67–69° scan moved
+3.6 mm is excluded (`misregisteredWideSideGroupIsExcluded`; it fails the overlap test). The same offset on the right
+group passes, even doubled: there it is nearly perpendicular to the normal of the surface the side and frontal views
+share (34° from the frontal view axis), a shift along that surface, which the 3 mm inlier distance of a surface check
+does not see.
 
 **Face-landmark term (evaluated, off).** The surface cannot see a frame rotated a few degrees about the head center,
 because the near-spherical skull slides along itself: 4° of yaw leaves the best pair at an RMSE of 1.0 mm, under the
@@ -571,10 +688,53 @@ within **0.27 mm** of the truth (the worst displacement of head points), with ro
 | 10° | 20 mm | no | 0.84 | 16 | 0.09 |
 
 (`IFS_BENCH=1 scripts/test.sh -c release --filter ReconCaptureRange`, with the robust photometric kernel; before it,
-colored ICP reached 0.41–0.54 mm.) The perturbations are per frame, so relative errors between two frames are up
-to twice these values. Colored ICP is about 50 % more accurate on this smooth test head, where geometry alone
-leaves sliding directions and the texture looks the same from every view; on the textured head with view-dependent
-shading it is not (next section).
+colored ICP reached 0.41–0.54 mm; re-measured with the overlap test of "Whole-scan registration" in a debug build:
+misalignment and rejected edges identical, times within 0.01 s, the rejected edges stay rejected.) The perturbations
+are per frame, so relative errors between two frames are up to twice these values. Colored ICP is about 50 % more
+accurate on this smooth test head, where geometry alone leaves sliding directions and the texture looks the same from
+every view; on the textured head with view-dependent shading it is not (next section).
+
+### Side views beyond 60°
+
+People turn farther than the guidance's 45°: rec4's right side views sit 60–62° from the front. Those views share a
+thin strip of surface with the frontal views (14.7–24.3 cm² of fitting surface on rec4's accepted side edges), and
+their edges are accepted by the overlap test, not by fitness ("Whole-scan registration"). `PipelineWideSideViewsTests`
+measures this with the full pipeline on the textured `SyntheticData` head at 1280×800: front, down, left and right
+× 3, no depth beyond 60° incidence (`IFS_RECON_STUDY=1` prints the table). "Side error" is a systematic Vision error
+on the side views on top of the random 2° per angle: the turn overstated, pitch, roll; (6, 9, 7)° is rec4's. Errors
+are relative to the reference keyframe:
+
+| scan | frames | side frames: worst rotation / head misalignment | front, down: worst rotation |
+|---|---|---|---|
+| sides at 65°, Vision error 2° | 12/12 | 0.28° / 0.9 mm | 0.08° |
+| sides at 65°, side error (6, 9, 7)° | 12/12 | 0.34° / 1.1 mm | 0.08° |
+| sides at 65°, side error (15, 0, 0)° | 12/12 | 0.33° / 1.1 mm | 0.10° |
+| sides at 68°, Vision error 2° | 12/12 | 0.34° / 1.0 mm | 0.08° |
+| sides at 65°, frontal depth within ±3.5 cm, Vision error 2° | 12/12 | 0.39° / 1.3 mm | 0.15° |
+| sides at 65°, frontal depth within ±3.5 cm, side error (6, 9, 7)° | 12/12 | **1.70° / 5.0 mm** | 0.21° |
+
+* With the fitness floor alone, the scans of the first four rows excluded all six side frames (6/12; front and down
+  0.08° where measured).
+* The side frames are four to seven times less accurate than the clean 45° scan in "Robustness to real-data
+  imperfections" (worst frame 0.07° / 0.16 mm), where the views share much more surface. At 640×400 the same scans
+  give 0.53–0.69° / 1.5–1.7 mm on the side frames and 0.24–0.28° on front and down (0.19° when the side frames are
+  left out), so the test runs at 1280×800.
+* **The accuracy limit is the shared surface.** The ±3.5 cm band matches rec4 in shared surface (16–40 cm²,
+  side-to-front fitness 0.09–0.16), not in width (rec4's frontal head cloud was 10.7 cm wide). With it and rec4's
+  Vision error, ICP stops in a biased minimum: 1.70° / 5.0 mm on the worst side frame in the table (1.1–1.8° /
+  3.7–5.6 mm in prototype runs of such scans). From a 2° start it reaches 0.26–0.39°. Restarting ICP from its result
+  moved it by at most 0.11°, eight rotated starts gave the same result, and removing only the pitch error still left
+  1.1–1.6°. Neither the overlap test nor its guard nor the registration check can see this error.
+* **rec4**: 9 of 10 keyframes are used (5 before): the right group lands 60.6–62.1° from the front, and the down group
+  moves from 36° to 42.3–42.9° (bridge ranking, "Whole-scan registration"). The measured surface grows from 255 to
+  637 cm², and the report's mean edge fitness drops from 0.91 to 0.73 with the side edges. The estimates of the right
+  group from independent analyses agree only to 1.6–2.5°, so with the narrow-band result above its frames are
+  probably a few millimeters off at the ear. The left frame (#9, 62°) stays out (above). Accepted as the better of
+  the two options: measured side surface a few millimeters off, instead of a synthesized dome there; requiring
+  40 cm² of shared surface for the overlap path would reject rec4's side frames again. The capture fix is in "Known
+  limits".
+* **The replay of the recording rec4 was cut from**: 6 of 8 keyframes are used (3 before the overlap test): the
+  right group lands 60.1–61.1° from the front, and the two down frames stay out ("Whole-scan registration").
 
 ### Colored versus point-to-plane ICP (default: point-to-plane)
 
@@ -632,7 +792,8 @@ available (`--icp colored`) for smooth, strongly textured surfaces under diffuse
 recordings.
 
 **40-keyframe scan.** In the 1280×800 benchmark scan, the worst frame is 0.87 mm off (a down-left frame) and the
-median is about 0.36 mm; all 40 keyframes pass the registration check.
+median is about 0.36 mm; all 40 keyframes passed the registration check (measured before the overlap test of
+"Whole-scan registration", not re-measured).
 
 ## Robustness to real-data imperfections
 
@@ -672,7 +833,9 @@ landmark term of the registration check (since turned off; it dropped no frame i
 eye-line weights, against the same table
 measured at 933c323 on the same machine: the point-to-plane rows of the scenarios that existed before moved by at
 most 0.01° and 0.02 mm, the colored rows by at most 0.02° and 0.05 mm, in both directions. The two new rows put the
-head off the optical axis and render the color through the D455 lens.
+head off the optical axis and render the color through the D455 lens. Re-measured again with the overlap test, the
+bridge ranking by correspondences and the registration check up to 75° ("Whole-scan registration"): rotation errors,
+head misalignment and frame counts are unchanged in every row, the surface figures within 0.04 mm of the table.
 
 * Correlated noise and low-frequency waviness are the one imperfection that costs accuracy, and it is inherent:
   each frame's surface is slightly deformed, so no rigid registration fits all views exactly.
@@ -826,7 +989,12 @@ reference machine is an M4 Pro; this one is somewhat faster on GPU and CPU throu
 
 This is inside the 60 s target; texturing dominates. The figures in parentheses are the same benchmark with
 `closeHead` on (the default since then), measured separately. The registration check was 0.15 s when it compared each
-frame with one view only; it now evaluates about 6 pairs per frame. Lens undistortion, when the keyframes carry
+frame with one view only; it now evaluates about 6 pairs per frame. Since then the check also runs the overlap test on
+pairs below the fitness floor, and `fr_frame_overlap` builds both clouds again for each call. On rec4 (10 keyframes at
+1280×800, debug build, `ifscan reconstruct --triangles 50000 --texture-size 512`) the check went from 0.09 to 0.30 s
+and the whole reconstruction from 6.8 to 14.5 s, most of it cleanup (2.7 → 9.9 s) and texturing (1.8 → 2.6 s) of the
+larger surface of four more frames. Registration itself computes overlap only for edges below the fitness floor
+(0.17 → 0.15 s on rec4); the 40-keyframe benchmark was not re-measured. Lens undistortion, when the keyframes carry
 distortion, adds about 15 ms for 10–18 keyframes at 1280×800 (`ifscan reconstruct`, release; this benchmark has no
 distortion). The debug-build unit tests run the 13-keyframe 640×400 pipeline in 1–3 s plus texturing.
 
@@ -846,6 +1014,32 @@ distortion). The debug-build unit tests run the 13-keyframe 640×400 pipeline in
 * **Frames that cannot be registered** keep their initial pose inside `fr_register_frames`. The C API has no
   per-frame status, so the pipeline re-scores the registered clouds (`RegistrationCheck`, below) and leaves failing
   frames out of fusion.
+* **Side views beyond 60° are less accurate.** Their edges rest on the thin strip of surface they share with the
+  frontal views ("Side views beyond 60°"): about 0.3° / 1 mm with a full frontal cloud, up to 1.70° / 5.0 mm with as
+  little shared surface as rec4's, which none of the checks can see. A frame whose edges miss the overlap
+  thresholds, like rec4's left view (#9), stays out of the fusion. Capture recommendation: side views within about
+  45–60° of the front, which share more surface with the frontal views; a cap on the overshoot in the guided scan
+  would be the real fix.
+* **The overlap test does not see a slide along a smooth shared patch.** Its statistics stay perfect while ICP slides
+  20–25° along a sphere-like overlap; in registration λmin and the 30° / 4 cm correction limit guard against it, in
+  the registration check nothing does (a 7 mm shift along the shared surface of a 68° side group passed). Its
+  thresholds come from one real scan and two synthetic heads, and rec4's left edges miss them by thin margins.
+* **The sliding guard needs depth noise below about 1.1 mm.** λmin separates slid from correct side edges up to a
+  depth noise of σ = 0.0039 · z² (`degenerateSideOverlapIsNeverAccepted`), about 1.0–1.2 mm on the shared surface of
+  the test (0.50–0.56 m from the camera); at 0.0045 · z² (about 1.2–1.4 mm there) slid edges score like correct ones
+  and side frames were accepted 9.3–10.0 mm off. A D455 in the default range of 0.56–0.71 m is at 0.4–0.6 mm depth
+  RMS in theory (`docs/CAMERA.md`, "Working distance per configuration"), and rec4's frontal odometry edges fit at
+  0.29–0.32 mm, but the worst case of the noise model in "Voxel size and truncation" (1.2–2.0 mm over that range) is
+  beyond the tested limit for most of it.
+* **The relative RMSE limit does not tell a wrong down pose from a correct one.** It rejected the replay's down frames
+  at 36° (1.06–1.19 mm against 0.81 mm) only because its within-group edges outnumbered the cross-group ones, so the
+  median was a within-group edge; in rec4 the counts are equal, the median is a down edge (1.08 mm) and the limit
+  1.61 mm, and rec4's correctly placed down edges fit at 1.08–1.25 mm, no better than the replay's wrong ones. A third
+  down frame in the replay would have raised its limit to about 1.6 mm and fused the wrong pose; one cross-group edge
+  fewer in rec4 would drop its correct down group.
+* **Overlap pairs in the registration check have no relative RMSE limit.** They fit at about 1 mm, close to or above
+  the limit the fitness pairs set; they are judged by the overlap thresholds alone (registration also applies λmin
+  and a limit from the overlap edges' own median).
 * **Registration check blind spot.** An error that rotates a frame about the head center mostly slides the
   near-spherical skull along itself; the surface check does not see a few degrees of it. A face-landmark term catches
   about 4° of yaw or pitch with idealized landmarks, but Apple Vision's landmarks drift too much with the view angle

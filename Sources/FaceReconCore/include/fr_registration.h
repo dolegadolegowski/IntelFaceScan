@@ -115,7 +115,8 @@ typedef struct fr_registration_params {
     fr_pose_graph_params graph;
     int32_t global_optimization;          /* 1 = pose graph with loop closures after sequential registration */
     float loop_closure_max_angle_deg;     /* try loop-closure edges between frames whose poses differ less */
-    float min_fitness;                    /* edges with lower ICP fitness are rejected */
+    float min_fitness;                    /* edges with lower ICP fitness are rejected unless they pass the overlap
+                                             test (fr_frame_overlap, docs/RECONSTRUCTION.md) */
     float max_rmse_m;                     /* edges with higher inlier RMSE are rejected */
 } fr_registration_params;
 
@@ -139,6 +140,33 @@ void fr_registration_params_default(fr_registration_params *params);
 fr_status fr_register_frames(const fr_rgbd_frame *frames, uint32_t count, const fr_registration_params *params,
                              float *out_world_from_camera, fr_registration_report *report /* nullable */,
                              fr_progress_cb progress, void *user);
+
+/* Projective overlap of two frames under target_from_source (camera frames, rigid), both directions: of the points
+   one camera could have measured on the other's surface (inside its valid depth, facing it within the view-angle
+   limit, not hidden more than 5 mm behind its surface), the fraction within max_correspondence_m of the other cloud
+   (fitness), and the fraction of the visible points lying more than 5 mm in front of its surface (free space). Clouds
+   from fr_cloud_from_rgbd(cloud_params; NULL = fr_cloud_params_default), voxel-averaged at voxel_m (0 = none). When
+   either cloud is empty, out is all zeros and the call returns FR_OK. FR_ERR_INVALID_ARGUMENT for NULL frames,
+   transform or out, invalid frames or cloud parameters, a negative or non-finite voxel_m, a non-positive or
+   non-finite max_correspondence_m, and a non-finite transform or one whose rotation is not a proper rotation
+   (orthonormal with determinant +1: no scale, no mirroring).
+   fr_register_frames runs the same test on an edge below min_fitness (docs/RECONSTRUCTION.md, "Whole-scan
+   registration"), with max_correspondence_m = 0.75 x icp.max_correspondence_m on its own clouds, and then also
+   applies a guard against ICP sliding along a smooth shared patch, which fr_overlap_fits does not include. */
+typedef struct fr_overlap_result {
+    float fitness[2];                     /* [0] source->target, [1] target->source */
+    float free_space_ratio[2];
+    uint32_t expected[2];
+    uint32_t inliers[2];
+    float inlier_area_m2[2];              /* surface covered by the inliers */
+} fr_overlap_result;
+
+fr_status fr_frame_overlap(const fr_rgbd_frame *source, const fr_rgbd_frame *target, const float target_from_source[16],
+                           const fr_cloud_params *cloud_params, float voxel_m, float max_correspondence_m,
+                           fr_overlap_result *out);
+/* 1 when the overlap passes fr_register_frames' thresholds (fitness, free space and inlier area in both directions;
+   not its sliding guard), 0 otherwise or for NULL. */
+int32_t fr_overlap_fits(const fr_overlap_result *result);
 
 #ifdef __cplusplus
 }

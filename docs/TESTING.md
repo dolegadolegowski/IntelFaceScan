@@ -17,20 +17,24 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
   plugin path that SwiftPM does not find on its own; with Xcode it is plain `swift test`. XCTest is not used.
 * The five test targets run one after another, as separate test runs (the tests of a target in parallel). Timing
   on an M3 Ultra (28 cores, Command Line Tools), November 2026: ScanKitTests 118 tests ~20 s (Vision),
-  ReconKitTests 83 tests ~55–70 s (the longest single test sets it: the combined-imperfections reconstruction of
-  `Pipeline robustness`), IntelFaceScanAppTests 35 tests ~8 s, FaceReconCoreTests 89 tests ~7 s, CameraKitTests 77
-  tests ~27 s (most of it `Helper playback backpressure`); about 2.5 min in all when nothing changed, about 3 min
-  from a clean debug build (about 40 s of it building).
+  ReconKitTests 88 tests ~75–100 s (the longest single test sets it: the combined-imperfections reconstruction of
+  `Pipeline robustness`; the two 1280×800 reconstructions of `Pipeline wide side views` run beside it),
+  IntelFaceScanAppTests 35 tests ~8 s, FaceReconCoreTests 91 tests ~7 s, CameraKitTests 77 tests ~27 s (most of it
+  `Helper playback backpressure`); about 2.5–3 min in all when nothing changed, about 3.5 min from a clean debug
+  build (about 40 s of it building).
 * The reconstruction tests of ReconKitTests (the suites and tests marked `.heavyReconstruction`,
   `Tests/ReconKitTests/HeavyTestSlots.swift`) share a few slots. Each reconstruction peaks at about 0.5 GB and uses
   every core it gets; with about twenty of them at once, no test finished for 35 minutes on the 3-core, 7 GB CI
   runner (memory pressure or CPU oversubscription: neither was measured there). The number of slots is
   min(cores, 2 × (memory in GB − 3)): 28 on the M3 Ultra (no limit in practice) and 3 on the runner, where
-  ReconKitTests then passed in about 400 s; `IFS_TEST_HEAVY_SLOTS=n` overrides it (with 3: ReconKitTests ~90 s and
-  1.5 GB at the peak on the M3 Ultra, instead of ~65 s and 2.6 GB). `cliSyntheticCameraScanStopsAtTheTimeLimit`
-  runs `ifscan reconstruct synthetic-camera` in-process and in real time, and takes every slot (exclusive): next to
-  the other reconstructions it took 105–227 s on the runner, and twice it had not ended when the step timed out. A
-  `.timeLimit` counts the wait for a slot, so the marked suites that have one allow 30 minutes.
+  ReconKitTests then passed in about 400 s (measured before `Pipeline wide side views` was added; in CI run
+  41815653340 the runner kept about 70 % of its memory free and used no swap with 3 slots, and ReconKitTests took
+  377 s); `IFS_TEST_HEAVY_SLOTS=n` overrides it (with 3: ReconKitTests ~90 s and 1.5 GB at the peak on the M3 Ultra,
+  instead of ~65 s and 2.6 GB, also measured before `Pipeline wide side views`).
+  `cliSyntheticCameraScanStopsAtTheTimeLimit` runs `ifscan reconstruct synthetic-camera` in-process and in real
+  time, and takes every slot (exclusive): next to the other reconstructions it took 105–227 s on the runner, and
+  twice it had not ended when the step timed out. A `.timeLimit` counts the wait for a slot, so the marked suites
+  that have one allow 30 minutes.
 * Skipped, with a reason (`➜ Test ... skipped: "..."`), never failed: benchmarks and measurement sweeps that are
   run by hand (`PipelineBenchmark`, `Mesh performance`, `ReconCaptureRange`, the `IFS_RECON_STUDY=1` tables of
   docs/RECONSTRUCTION.md, `GuidanceSyntheticVisionStudy` with `IFS_VISION_STUDY=1` – `IFS_VISION_STUDY_GRID=1` adds
@@ -62,11 +66,13 @@ mode end to end, session lifecycle, frame broadcasting, playback backpressure, t
 `ScanKitTests/Guidance*` (head tracker, masks, quality, scan controller; `Guidance pose recognition`: turns far
 beyond the target, any order after the front pose, short turns held, turn hints, with the head poses of the first
 live D455 session), `FaceReconCoreTests/Recon*`, `Mesh*`,
-`Texture*`, `ExportFile*` and `ReconKitTests/Pipeline*` (with the registration check and robustness to real-data
-imperfections), `ReconLensDistortion*` (undistorting keyframes once before reconstruction), `ReconInitialPose*`
-(initial rotations with Vision's line of sight taken out), `MeshProcessing*`, `MeshClosing*` (closing the head into a
-watertight bust that keeps the measured surface), `MeshSynthesizedTexture*` (interpolated colors on synthesized
-surface), `Export*`, `TextureBake*` (registration, fusion, mesh processing, texturing, export).
+`Texture*`, `ExportFile*` and `ReconKitTests/Pipeline*` (with the registration check, robustness to real-data
+imperfections and side views beyond 60°: `Pipeline wide side views`, 65° side views without depth beyond 60°
+incidence, all 12 keyframes used, side frames < 0.6° / 2.5 mm), `ReconLensDistortion*` (undistorting keyframes once
+before reconstruction), `ReconInitialPose*` (initial rotations with Vision's line of sight taken out),
+`MeshProcessing*`, `MeshClosing*` (closing the head into a watertight bust that keeps the measured surface),
+`MeshSynthesizedTexture*` (interpolated colors on synthesized surface), `Export*`, `TextureBake*` (registration,
+fusion, mesh processing, texturing, export).
 
 `CoreAvailability` (SyntheticData) probes the core with arguments a real implementation rejects without side
 effects and reports which stages still return `FR_ERR_NOT_IMPLEMENTED`; use it for any test that needs a stage
@@ -90,15 +96,19 @@ of another work stream: `@Test(.enabled(if: CoreAvailability.reconstruction, "..
   NEON align does); `headOffsetM` moves the head off the optical axis; depth aligned to color, Z16 in 0.1 mm units. Depth is the exact ray/mesh intersection at each
   pixel center, plus Gaussian noise with σ = `depthNoiseAt1m · z²` (default 2 mm at 1 m → 0.72 mm at 0.6 m),
   invalid at viewing angles above 80°, at depth jumps (both sides, like stereo matching), and as 1% speckle. An
-  optional wall stands behind the head (`backgroundDistanceM`).
+  optional wall stands behind the head (`backgroundDistanceM`). `frontalHalfWidthM` keeps depth and mask of the
+  frontal keyframes only within that distance of the head center across the image (a real D455 head mask was
+  10.7 cm wide).
 * **Poses**: world = camera frame of keyframe 0 (exactly at the first pose's target, frontal by default), meters,
-  +X right, +Y down, +Z forward. The head turns about a pivot near the neck to each `ScanPose.target` ±
-  `poseVariationDeg` with ±2 mm translation jitter; `HeadPose.cameraFrameRotation` gives the rotation, so
-  `world_from_camera` has rotation Rᵀ. The reconstruction's world is the camera frame of its first *frontal*
-  keyframe; for a pose list that does not start with `front` the evaluation maps it to the ground truth's world
-  through keyframe 0's estimated pose (`ground_truth_from_world` in the report).
+  +X right, +Y down, +Z forward. The head turns about a pivot near the neck to each `ScanPose.target` (left and right
+  at ±`sideYawDeg` when set: real side views reach 60–62°) ± `poseVariationDeg` with ±2 mm translation jitter;
+  `HeadPose.cameraFrameRotation` gives the rotation, so `world_from_camera` has rotation Rᵀ. The reconstruction's
+  world is the camera frame of its first *frontal* keyframe; for a pose list that does not start with `front` the
+  evaluation maps it to the ground truth's world through keyframe 0's estimated pose (`ground_truth_from_world` in the
+  report).
 * **Per keyframe**: `headPose` = truth + Vision's line-of-sight effect (yaw + 0.75 a, pitch − 0.67 b for a face
-  seen a / b degrees right of / below the optical axis, `visionLineOfSightGain`) + N(0, 2°) per angle, 76 projected landmarks (Vision's groups:
+  seen a / b degrees right of / below the optical axis, `visionLineOfSightGain`) + N(0, 2°) per angle (+ the
+  systematic `sidePoseErrorDeg` on left and right: turn overstated, pitch, roll), 76 projected landmarks (Vision's groups:
   contour, brows, eyes, pupils, nose crest and base, lips) with 1 px noise, a Vision-like face rectangle, the head
   mask (head above 1.5 cm below the chin), and `FrameQuality` measured on the images (variance of Laplacian,
   valid depth ratio and count, median face depth).

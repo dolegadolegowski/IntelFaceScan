@@ -131,4 +131,32 @@ bool validate_cloud_params( const fr_cloud_params & params, std::string & error 
 
 // Back-projection of a frame (implementation of fr_cloud_from_rgbd, throws on invalid input).
 fr_cloud cloud_from_rgbd( const fr_rgbd_frame & frame, const fr_cloud_params & params );
+
+// Where a frame's cloud has points: the camera-frame depth of each pixel's point (0 = none), cropped to the points'
+// bounding box. Built from the camera-frame cloud of cloud_from_rgbd, so it holds exactly the surface that survived
+// mask, erosion and the view-angle limit.
+struct ViewMap
+{
+    float fx = 0, fy = 0, cx = 0, cy = 0;
+    int x0 = 0, y0 = 0, width = 0, height = 0;
+    std::vector< float > z;
+};
+ViewMap build_view_map( const fr_cloud & camera_cloud, const fr_intrinsics & intrinsics );
+
+// Projective overlap of a source cloud with a target view under target_from_source. A source point is visible when it
+// projects onto target data (within +-max(1, ceil(stride / 2)) pixels: the view map of a strided cloud holds every
+// stride-th pixel) and faces the target camera within the view-angle limit; it is expected (the target could have
+// measured it) unless it lies more than tau behind the target surface; it is an inlier when it is expected and within
+// max_d of a target point; a violation when it lies more than tau in front of the observed target surface, i.e. in
+// space the target camera saw through.
+struct OverlapStats
+{
+    size_t visible = 0, expected = 0, inliers = 0, violations = 0;
+    double inlier_area = 0;   // m², each source point covering max(voxel, stride * z / fx)^2
+    float fitness() const { return expected ? float( double( inliers ) / double( expected ) ) : 0.f; }
+    float violation_ratio() const { return visible ? float( double( violations ) / double( visible ) ) : 0.f; }
+};
+OverlapStats projective_overlap( const fr_cloud & source, const fr_cloud & target, const CloudIndex & target_index,
+                                 const ViewMap & target_view, const Eigen::Matrix4d & target_from_source, float max_d, float tau,
+                                 float cos_max_view_angle, float source_fx, float voxel, int stride );
 }  // namespace fr

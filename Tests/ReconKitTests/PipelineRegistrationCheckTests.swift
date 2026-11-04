@@ -12,7 +12,11 @@ import Testing
 struct PipelineRegistrationCheckTests {
     /// The scan's frames with the pipeline's head masks, as the registration check sees them.
     static func frames(_ scan: SynthScan) throws -> RGBDFrameSet {
-        var keyframes = scan.capture.keyframes
+        try frames(scan.capture)
+    }
+
+    static func frames(_ capture: ScanCapture) throws -> RGBDFrameSet {
+        var keyframes = capture.keyframes
         for i in keyframes.indices {
             keyframes[i].mask = try #require(HeadSegmentation.segment(keyframes[i], keepShoulders: false)).headMask
         }
@@ -66,6 +70,51 @@ struct PipelineRegistrationCheckTests {
         let check = try RegistrationCheck.verify(frames: try Self.frames(scan), poses: poses)
         #expect(!check.passed[7] && !check.passed[8], "\(check.scores.map { ($0.fitness, $0.rmse * 1000) })")
         #expect(check.passed.enumerated().allSatisfy { [7, 8].contains($0.offset) || $0.element })
+    }
+
+    /// Front x3, left x3 and right x3 at 67-69°: a real scan's side views sat 60-62° from the front (the guidance asks
+    /// for 45°, people turn farther).
+    static let wideSideScan: SynthScan = {
+        var o = SynthScanOptions()
+        o.views = [(.front, 0, 0), (.front, 1.5, -1), (.front, -1, 1.5), (.left, 68, 0), (.left, 67, 2), (.left, 69, -1),
+                   (.right, -68, 0), (.right, -67, -2), (.right, -69, 1)]
+        return makeSyntheticScan(o)
+    }()
+
+    @Test func correctSideViewsBeyondSixtyDegreesPass() throws {
+        // With pairs only up to 60°, the side groups were compared with nothing but themselves and all six side
+        // frames failed at their true poses.
+        let scan = Self.wideSideScan
+        let check = try RegistrationCheck.verify(frames: try Self.frames(scan), poses: scan.truth)
+        #expect(check.passed.allSatisfy { $0 }, "failed: \(check.passed.indices.filter { !check.passed[$0] })")
+    }
+
+    @Test func misregisteredWideSideGroupIsExcluded() throws {
+        // The left group: on the right side this offset lies along the surface the views share (3 mm sideways and 2 mm
+        // back are nearly perpendicular to its normal, 34° from the frontal view axis), which no surface check sees;
+        // the right group passed with this offset and with twice it.
+        let scan = Self.wideSideScan
+        var poses = scan.truth
+        for i in [3, 4, 5] { poses[i] = Self.offset * poses[i] }
+        let check = try RegistrationCheck.verify(frames: try Self.frames(scan), poses: poses)
+        #expect([3, 4, 5].allSatisfy { !check.passed[$0] }, "\(check.scores.map { ($0.fitness, $0.rmse * 1000) })")
+        #expect(check.passed.enumerated().allSatisfy { [3, 4, 5].contains($0.offset) || $0.element })
+    }
+
+    @Test func sideViewsSharingANarrowBandPassByOverlap() throws {
+        // The textured SyntheticData head with side views at 65°, no depth beyond 60° incidence and frontal depth only
+        // within 3.5 cm of the head center (rec4's frontal head cloud was 10.7 cm wide): every side-to-front pair falls
+        // below the fitness floor, and without the overlap test frames 3-8 (left and right) failed at their true poses.
+        var o = SyntheticScan.Options()
+        o.poses = [.front, .left, .right]
+        o.framesPerPose = 3
+        o.maxIncidenceDeg = 60
+        o.sideYawDeg = 65
+        o.frontalHalfWidthM = 0.035
+        let scan = SyntheticScan.make(o)
+        let check = try RegistrationCheck.verify(frames: try Self.frames(scan.capture), poses: scan.groundTruthPoses)
+        let failed = check.passed.indices.filter { !check.passed[$0] }
+        #expect(failed.isEmpty, "failed: \(failed), \(check.scores.map { ($0.fitness, $0.rmse * 1000) })")
     }
 
     /// The scan's camera-frame 3D landmarks, as the pipeline computes them for the initial poses.

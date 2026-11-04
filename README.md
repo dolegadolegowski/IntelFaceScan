@@ -97,9 +97,11 @@ notarized): on another Mac, open it the first time with right-click → **Open**
    (the exact range for your camera is shown under the preview).
 4. Press **Start scan**, look at the camera, then turn up, down, left and right (and the diagonals if enabled). The
    animated head suggests the next pose, but after the front one every pose counts in whatever order you make it,
-   and a turn further than the animation is fine. When you reach a pose you hear a short tick: **hold still** until
-   the chime, which means its 3 sharp, still frames (configurable) are captured; then move on. A turn that stops a
-   little short of the suggested pose also counts when you hold it for about 2 s. A fanfare ends the scan, which
+   and a turn a little further than the animation is fine, but keep left and right within about 60° of the front:
+   side views turned farther share little surface with the frontal ones and are registered less accurately or left
+   out. When you reach a pose you hear a short tick: **hold still** until the chime, which means its 3 sharp, still
+   frames (configurable) are captured; then move on. A turn that stops a little short of the suggested pose also
+   counts when you hold it for about 2 s. A fanfare ends the scan, which
    takes about a minute.
 5. Check the summary, then press **Reconstruct 3D model**. On an M3 Ultra, reconstructing a 15-keyframe scan takes
    about 20–40 s.
@@ -197,6 +199,9 @@ High Density and disparity shift 0 vs 50 on a flat wall and on skin.
   aligned depth is free of lens distortion while color is not, and how much Apple Vision's head angles lean toward the
   line of sight for a face off the image center.
 - Hair, glasses, very dark or shiny surfaces give little or no stereo depth.
+- Side views turned more than about 60° from the front share little surface with the frontal views: they are
+  registered less accurately (up to about 2° / 5 mm in synthetic tests) or left out. Keep side turns within about
+  45–60°.
 - Apple Vision's head-pose angles can be off by several degrees for some faces; the scan compensates by measuring
   targets relative to your frontal pose, and registration refines the poses.
 - The app is signed ad hoc and not notarized.
@@ -357,10 +362,12 @@ Uruchom aplikację przez `open build/IntelFaceScan.app` albo skopiuj ją do `/Ap
    zasięgu* (dokładny zakres dla Twojej kamery jest widoczny pod podglądem).
 4. Naciśnij **Rozpocznij skan**, spójrz w kamerę, potem obróć głowę w górę, w dół, w lewo i w prawo (i ukośnie, jeśli
    pozy ukośne są włączone). Animowana głowa podpowiada następną pozę, ale po pozie prosto każda poza liczy się w
-   dowolnej kolejności, a obrót dalszy niż na animacji też jest dobry. Po osiągnięciu pozy słychać krótki dźwięk:
-   **nie ruszaj się** do drugiego dźwięku, który oznacza, że 3 ostre, nieruchome klatki (do ustawienia) są zebrane;
-   wtedy przejdź dalej. Obrót, który zatrzymał się trochę przed podpowiadaną pozą, też się liczy, gdy przytrzymasz go
-   ok. 2 s. Fanfara kończy skan, który trwa około minuty.
+   dowolnej kolejności, a obrót trochę dalszy niż na animacji też jest dobry, ale w lewo i w prawo obracaj się
+   najwyżej o ok. 60° od pozycji na wprost: dalsze widoki boczne mają mało wspólnej powierzchni z frontalnymi, więc
+   są rejestrowane mniej dokładnie albo pomijane. Po osiągnięciu pozy słychać krótki dźwięk: **nie ruszaj się** do
+   drugiego dźwięku, który oznacza, że 3 ostre, nieruchome klatki (do ustawienia) są zebrane; wtedy przejdź dalej.
+   Obrót, który zatrzymał się trochę przed podpowiadaną pozą, też się liczy, gdy przytrzymasz go ok. 2 s. Fanfara
+   kończy skan, który trwa około minuty.
 5. Sprawdź podsumowanie i naciśnij **Rekonstruuj model 3D**. Na M3 Ultra rekonstrukcja skanu z 15 klatek kluczowych
    trwa ok. 20–40 s.
 6. Obejrzyj model w podglądzie 3D i wyeksportuj **OBJ** (opcjonalnie PLY i surową sesję).
@@ -456,6 +463,9 @@ i High Density oraz disparity shift 0 i 50 na płaskiej ścianie i na skórze.
   że wyrównana głębia z librealsense nie ma dystorsji obiektywu, a kolor ma, oraz jak bardzo kąty głowy z Apple
   Vision odchylają się w stronę linii widzenia, gdy twarz jest poza środkiem obrazu.
 - Włosy, okulary, bardzo ciemne lub błyszczące powierzchnie dają mało głębi stereo albo nie dają jej wcale.
+- Widoki boczne obrócone o więcej niż ok. 60° od pozycji na wprost mają mało wspólnej powierzchni z frontalnymi: są
+  rejestrowane mniej dokładnie (w testach syntetycznych do ok. 2° / 5 mm) albo pomijane. Obracaj głowę na boki o ok.
+  45–60°.
 - Kąty pozy głowy z Apple Vision mogą się mylić o kilka stopni dla niektórych twarzy; skan to kompensuje, mierząc cele
   względem Twojej pozycji na wprost, a rejestracja poprawia pozy.
 - Aplikacja ma podpis ad hoc i nie jest notaryzowana.

@@ -70,6 +70,15 @@ public enum SyntheticScan {
         /// Measured with Vision on the rendered head (docs/RECONSTRUCTION.md, "Initial poses"): yaw 0.75, pitch
         /// 0.67, the medians of slopes from 0.14 to 1.45. (0, 0) = Vision without this effect.
         public var visionLineOfSightGain = SIMD2<Float>(0.75, 0.67)
+        /// |yaw| target of the left and right poses (degrees), nil = ScanPose.target (45). Real side views reach
+        /// 60-62° (docs/RECONSTRUCTION.md, "Side views beyond 60°").
+        public var sideYawDeg: Float? = nil
+        /// Systematic Vision error on the left and right poses (degrees), added to the random one: the turn overstated
+        /// (yaw away from the front), pitch, roll. A real scan's side views read about (6, 9, 7) off.
+        public var sidePoseErrorDeg = SIMD3<Float>.zero
+        /// Frontal keyframes keep depth and mask only within this distance (meters) of the head center across the
+        /// image, nil = everywhere: a D455 head mask measured 10.7 cm wide, without the outer cheeks.
+        public var frontalHalfWidthM: Float? = nil
 
         public init() {}
     }
@@ -87,7 +96,10 @@ public enum SyntheticScan {
         var plan: [Planned] = []
         for scanPose in options.poses {
             for _ in 0 ..< max(1, options.framesPerPose) {
-                let target = scanPose.target
+                var target = scanPose.target
+                if let yaw = options.sideYawDeg, scanPose == .left || scanPose == .right {
+                    target.yaw = scanPose == .left ? yaw : -yaw
+                }
                 if plan.isEmpty {
                     plan.append(Planned(scanPose: scanPose, headPose: HeadPose(yaw: target.yaw, pitch: target.pitch, roll: 0),
                                         offset: .zero))
@@ -112,8 +124,12 @@ public enum SyntheticScan {
         for (i, planned) in plan.enumerated() {
             let sequence = UInt64(120 + 45 * i)
             let timestamp = referenceDate.timeIntervalSince1970 * 1000 + 1500 * Double(i)
-            let view = scene.render(cameraFromWorld: cameraFromModel[i], frameIndex: UInt64(i), sequence: sequence,
+            var view = scene.render(cameraFromWorld: cameraFromModel[i], frameIndex: UInt64(i), sequence: sequence,
                                     timestampMs: timestamp)
+            if let halfWidth = options.frontalHalfWidthM, planned.scanPose == .front {
+                let center = cameraFromModel[i] * SIMD4(scene.headCenter, 1)
+                keepBand(&view, centerX: center.x, halfWidth: halfWidth)
+            }
             poses.append(worldFromModel * cameraFromModel[i].inverse)
 
             let landmarks = scene.landmarks(cameraFromWorld: cameraFromModel[i]).map {
@@ -123,9 +139,14 @@ public enum SyntheticScan {
             // Vision reads the face relative to its line of sight, through the center of its face rectangle.
             let lineOfSight = scene.lineOfSightDegrees(cameraFromWorld: cameraFromModel[i])
             let e = options.headPoseErrorDeg, gain = options.visionLineOfSightGain
-            let estimate = HeadPose(yaw: planned.headPose.yaw + gain.x * lineOfSight.x + e * random.gaussian(),
-                                    pitch: planned.headPose.pitch - gain.y * lineOfSight.y + e * random.gaussian(),
-                                    roll: planned.headPose.roll + e * random.gaussian(),
+            var side = SIMD3<Float>.zero
+            if planned.scanPose == .left || planned.scanPose == .right {
+                side = options.sidePoseErrorDeg
+                side.x *= planned.headPose.yaw >= 0 ? 1 : -1
+            }
+            let estimate = HeadPose(yaw: planned.headPose.yaw + gain.x * lineOfSight.x + e * random.gaussian() + side.x,
+                                    pitch: planned.headPose.pitch - gain.y * lineOfSight.y + e * random.gaussian() + side.y,
+                                    roll: planned.headPose.roll + e * random.gaussian() + side.z,
                                     confidence: 0.9 + 0.09 * random.uniform())
             var quality = SyntheticScene.quality(view: view, faceRect: faceRect)
             quality.angularSpeedDegPerSec = 2 + 6 * random.uniform()
@@ -151,6 +172,25 @@ public enum SyntheticScan {
                                    groundTruthMesh: scene.groundTruthMesh(worldFromModel: worldFromModel),
                                    groundTruthHeadPoses: plan.map { $0.headPose },
                                    headCenter: SIMD3(center.x, center.y, center.z), pivot: SIMD3(pivot.x, pivot.y, pivot.z))
+    }
+
+    /// Clears depth and mask where the surface lies more than halfWidth (meters, camera frame) left or right of centerX.
+    static func keepBand(_ view: inout SyntheticView, centerX: Float, halfWidth: Float) {
+        let depth = view.frame.alignedDepth, w = depth.width, h = depth.height
+        var pixels = [UInt16](repeating: 0, count: w * h)
+        _ = pixels.withUnsafeMutableBytes { depth.pixels.copyBytes(to: $0) }
+        var mask = [UInt8](view.mask)
+        for y in 0 ..< h {
+            for x in 0 ..< w {
+                let k = y * w + x
+                let z = Float(UInt16(littleEndian: pixels[k])) * depth.depthScale
+                guard z > 0, abs((Float(x) - depth.intrinsics.ppx) * z / depth.intrinsics.fx - centerX) > halfWidth else { continue }
+                pixels[k] = 0
+                if k < mask.count { mask[k] = 0 }
+            }
+        }
+        view.frame.alignedDepth.pixels = pixels.withUnsafeBufferPointer { Data(buffer: $0) }
+        view.mask = Data(mask)
     }
 }
 

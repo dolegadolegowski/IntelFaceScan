@@ -333,8 +333,9 @@ enum RegistrationCheck {
 
     /// Views closer than this (relative rotation) form one pose group.
     static let groupAngle: Float = 12 * .pi / 180
-    /// Views farther apart than this overlap too little to be compared.
-    static let maxPairAngle: Float = 60 * .pi / 180
+    /// Views farther apart than this overlap too little to be compared. rec4's right side views sit 60-62° from the
+    /// front: at 60° they had no pair across pose groups and failed even where registration had placed them.
+    static let maxPairAngle: Float = 75 * .pi / 180
     static let minFitness: Float = 0.25
     /// Landmark term: a frame fails when its landmark residual exceeds max(minLandmarkLimit, landmarkLimitFactor x
     /// the median frame's). The residual is the landmarkQuantile of its landmarks' distances to the reference's.
@@ -361,11 +362,12 @@ enum RegistrationCheck {
 
     /// Scores every frame's registered cloud against the most similar view of its own pose group and of every other
     /// pose group within maxPairAngle. A pair fits when the surfaces overlap (fitness) with an RMSE close to the
-    /// typical pair's. A frame passes when a chain of fitting pairs links it to frame 0 (the world reference, which
-    /// always passes). Judging each frame by its single most similar view failed both ways: a misregistered pose
-    /// group fits itself (its frames are each other's most similar views) and passed, while a correct frame whose
-    /// most similar view was the misregistered one was dropped. The comparisons across pose groups are what link a
-    /// group to the reference.
+    /// typical such pair's, or below minFitness when it passes the two-way overlap test of fr_register_frames
+    /// (fr_overlap_fits). A frame passes when a chain of fitting pairs links it to frame 0 (the world reference, which
+    /// always passes). Judging each frame by its single most similar view failed both ways: a misregistered pose group
+    /// fits itself (its frames are each other's most similar views) and passed, while a correct frame whose most
+    /// similar view was the misregistered one was dropped. The comparisons across pose groups are what link a group to
+    /// the reference.
     ///
     /// The surface cannot see a rotation about the head center: the near-spherical skull slides along itself (4 deg
     /// of yaw: RMSE 1.0 mm against a limit of ~1.4 mm). With `landmarks` (camera-frame 3D landmarks per frame), a
@@ -431,20 +433,40 @@ enum RegistrationCheck {
             }
         }
         var pairScores: [FrameScore] = []
+        var fitsByOverlap: [Bool] = []
         for (i, j) in pairs {
             var result = fr_icp_result()
             let status = identity.withUnsafeBufferPointer { fr_icp(clouds[i], clouds[j], $0.baseAddress, &icp, &result) }
-            pairScores.append(status == FR_OK ? FrameScore(fitness: result.fitness, rmse: result.inlier_rmse_m)
-                                              : FrameScore(fitness: 0, rmse: .infinity))
+            let score = status == FR_OK ? FrameScore(fitness: result.fitness, rmse: result.inlier_rmse_m)
+                                        : FrameScore(fitness: 0, rmse: .infinity)
+            pairScores.append(score)
+            // Fitness counts inliers among all points of a cloud, so views 60-75° apart that share only a few percent
+            // of their surface fall below minFitness although they fit (rec4's side views against the front:
+            // 0.06-0.14). The overlap test judges what each camera could have measured of the other's surface.
+            var byOverlap = false
+            if score.fitness < minFitness {
+                var source = frames.frames[i], target = frames.frames[j]
+                var overlap = fr_overlap_result()
+                let jFromI = (poses[j].inverse * poses[i]).floats
+                let overlapStatus = jFromI.withUnsafeBufferPointer {
+                    fr_frame_overlap(&source, &target, $0.baseAddress, &cloudParams, 0.0015, icp.max_correspondence_m, &overlap)
+                }
+                byOverlap = overlapStatus == FR_OK && fr_overlap_fits(&overlap) != 0
+            }
+            fitsByOverlap.append(byOverlap)
         }
+        // As in fr_register_frames, the RMSE limit comes from and applies to the pairs that fit by fitness only. Pairs
+        // that fit by the overlap test sit at about 1 mm (rec4's right-to-front pairs at the registered poses
+        // 0.74-1.13 mm against a limit of 1.10 mm, those of the replay of the recording rec4 was cut from 0.92-1.06 mm
+        // against 1.09 mm); in the median they raised the limit for every pair (rec4: 1.10 -> 1.48 mm).
         let finite = pairScores.filter { $0.fitness >= minFitness }.map(\.rmse).filter { $0.isFinite }.sorted()
         let median = finite.isEmpty ? 0 : finite[finite.count / 2]
         let limit = max(2 * median, median + 0.0007)
         // Fitting pairs are links (either direction); frames linked to frame 0 pass. Each frame reports its best pair.
         var links = [[Int]](repeating: [], count: n)
         var scores = Array(repeating: FrameScore(fitness: 0, rmse: .infinity), count: n)
-        for ((i, j), s) in zip(pairs, pairScores) {
-            if s.fitness >= minFitness && s.rmse <= limit {
+        for (pair, ((i, j), s)) in zip(pairs, pairScores).enumerated() {
+            if (s.fitness >= minFitness && s.rmse <= limit) || fitsByOverlap[pair] {
                 links[i].append(j)
                 links[j].append(i)
             }
