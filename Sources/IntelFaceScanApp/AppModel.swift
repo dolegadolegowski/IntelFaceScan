@@ -104,6 +104,8 @@ final class AppModel {
     private(set) var statusMessage: String?
     /// The file the status message reports (Show in Finder); nil for messages about something else.
     private(set) var revealableURL: URL?
+    /// File writes in progress (observable; writeTasks holds them for the termination).
+    private(set) var runningWrites = 0
     private(set) var playbackEnded = false
     private(set) var capture: ScanCapture?
     /// Whether the scan behind `capture` kept the neck and shoulders in its keyframe masks; nil when unknown (a
@@ -182,6 +184,9 @@ final class AppModel {
     var shouldersMissingFromCapture: Bool {
         settings.keepShoulders && capture != nil && captureKeptShoulders == false && screen != .scanning
     }
+    /// The depth stream settings cannot change during a scan, nor during a recording: the camera helper refuses to
+    /// change the streams (or to enter advanced mode) while it records, so a change would only show in the sidebar.
+    var depthSettingsLocked: Bool { screen == .scanning || isRecording }
 
     var previewDisplay: PreviewDisplay {
         PreviewDisplay(mode: settings.previewMode, mirrored: settings.mirrored,
@@ -624,8 +629,10 @@ final class AppModel {
         nextTaskID += 1
         let id = nextTaskID
         writeTasks[id] = Task.detached { _ = await work.value }
+        runningWrites += 1
         let outcome = await work.value
         writeTasks[id] = nil
+        runningWrites -= 1
         switch outcome {
         case .success(let files):
             showStatus(S.saved(files.map(\.lastPathComponent).joined(separator: ", ")), reveal: files.first)
@@ -634,7 +641,8 @@ final class AppModel {
         }
     }
 
-    var isWriting: Bool { !writeTasks.isEmpty }
+    /// A save is running (the save buttons wait for it: a second write to the same files would interleave).
+    var isWriting: Bool { runningWrites > 0 }
 
     func revealSavedFile() {
         guard let url = revealableURL else { return }

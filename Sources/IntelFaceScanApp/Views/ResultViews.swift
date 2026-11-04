@@ -40,6 +40,7 @@ struct ScanSummaryView: View {
                 }
                 if !keyframes.isEmpty {
                     Button(S.saveSession, systemImage: "square.and.arrow.down") { Task { await model.saveSession() } }
+                        .disabled(model.isWriting)
                     Button {
                         model.reconstruct()
                     } label: {
@@ -89,7 +90,11 @@ struct ResultView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                 VStack(alignment: .leading, spacing: 14) {
-                    Text(S.result).font(.title2.weight(.semibold))
+                    HStack {
+                        Text(S.result).font(.title2.weight(.semibold))
+                        Spacer()
+                        if model.isWriting { ProgressView().controlSize(.small) }
+                    }
                     Picker(S.displayMode, selection: $model.displayMode) {
                         ForEach(ModelDisplayMode.allCases) { Text($0.title).tag($0) }
                     }
@@ -108,6 +113,7 @@ struct ResultView: View {
                         .disabled(model.capture == nil)
                     }
                     .controlSize(.large)
+                    .disabled(model.isWriting)
                     // The report grows with the pipeline's notes: it scrolls instead of pushing the panel out of a
                     // window at its minimum height.
                     ScrollView(.vertical) {

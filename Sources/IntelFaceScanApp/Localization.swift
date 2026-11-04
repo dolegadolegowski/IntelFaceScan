@@ -127,6 +127,9 @@ enum S {
     static var settingsLockedDuringScan: String {
         tr("Camera settings are locked during a scan.", "Ustawienia kamery są zablokowane podczas skanu.")
     }
+    static var settingsLockedDuringRecording: String {
+        tr("Stop the recording to change the depth settings.", "Zatrzymaj nagrywanie, aby zmienić ustawienia głębi.")
+    }
 
     // MARK: Preview
     static var previewColor: String { tr("Color", "Kolor") }

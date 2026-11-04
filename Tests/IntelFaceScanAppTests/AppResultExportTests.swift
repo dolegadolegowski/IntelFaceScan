@@ -117,7 +117,12 @@ struct AppResultExportTests {
 
         // The session export writes a dataset folder (the extension is added) and offers it in Finder.
         let chosen = dir.appendingPathComponent("my scan")
-        await model.exportSession(to: chosen)
+        let export = Task { await model.exportSession(to: chosen) }
+        await Task.yield()
+        #expect(model.isWriting, "the save buttons do not wait for the running write")
+        #expect(model.needsShutdown, "quitting would not wait for the running write")
+        await export.value
+        #expect(!model.isWriting)
         #expect(model.alert == nil, "session export failed: \(model.alert?.message ?? "")")
         let written = chosen.appendingPathExtension(ScanDataset.fileExtension)
         #expect(model.revealableURL == written)
