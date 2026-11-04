@@ -118,7 +118,6 @@ license Eigen-COPYING.MPL2.txt      third_party/eigen/COPYING.MPL2
 license nanoflann-COPYING.txt       third_party/nanoflann/COPYING
 license meshoptimizer-LICENSE.md    third_party/meshoptimizer/LICENSE.md
 license xatlas-LICENSE.txt          third_party/xatlas/LICENSE
-license stb-LICENSE.txt             third_party/stb/LICENSE
 license PoissonRecon-LICENSE.txt    third_party/PoissonRecon/LICENSE
 BUILD_NUMBER="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
 cat > "$APP/Contents/Info.plist" <<PLIST

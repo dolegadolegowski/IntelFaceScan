@@ -19,10 +19,6 @@
 	path = third_party/xatlas
 	url = https://github.com/jpcy/xatlas.git
 	shallow = true
-[submodule "third_party/stb"]
-	path = third_party/stb
-	url = https://github.com/nothings/stb.git
-	shallow = true
 [submodule "third_party/PoissonRecon"]
 	path = third_party/PoissonRecon
 	url = https://github.com/mkazhdan/PoissonRecon.git

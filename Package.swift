@@ -47,7 +47,6 @@ let package = Package(
                 .headerSearchPath("\(thirdParty)/nanoflann/include"),
                 .headerSearchPath("\(thirdParty)/xatlas/source/xatlas"),
                 .headerSearchPath("\(thirdParty)/meshoptimizer/src"),
-                .headerSearchPath("\(thirdParty)/stb"),
                 .headerSearchPath("\(thirdParty)/PoissonRecon/Src"),
                 .define("EIGEN_MPL2_ONLY"),
                 .define("NDEBUG", .when(configuration: .release)),

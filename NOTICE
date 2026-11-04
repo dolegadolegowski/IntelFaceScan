@@ -7,13 +7,15 @@ the app bundle carries them in Contents/Resources/Licenses):
 * librealsense v2.58.4 - Copyright RealSense, Inc. - Apache License 2.0
   patches/0001-macos-apple-silicon-support.patch and tools/release/ come from
   https://github.com/dolegadolegowski/realsense-viewer-macos (Apache License 2.0)
-* libusb 1.0.30 (fetched by the librealsense build) - LGPL-2.1 (statically linked into librealsense2.dylib;
-  scripts/build-sdk.sh rebuilds that dylib, e.g. with a modified libusb, and it replaces the one in
-  IntelFaceScan.app/Contents/Frameworks; then re-sign: codesign --force --deep --sign - IntelFaceScan.app)
+* libusb 1.0.30 (fetched by the librealsense build) - LGPL-2.1, statically linked into
+  Contents/Frameworks/librealsense2.X.Y.dylib. To relink it with a modified libusb: run scripts/build-sdk.sh once
+  (it fetches libusb into build/sdk/build/third-party/libusb), change the sources there, delete
+  build/sdk/build/libusb/src/libusb-stamp/libusb-build, run IFS_SDK_REBUILD=1 scripts/build-sdk.sh, then
+  scripts/bundle-app.sh (or copy build/sdk/install/lib/librealsense2.X.Y.dylib over the one in the app and re-sign
+  it: codesign --force --deep --sign - IntelFaceScan.app)
 * Eigen 5.0.1 - MPL-2.0 (only MPL2 parts are used: EIGEN_MPL2_ONLY)
 * nanoflann 1.10.0 - BSD-2-Clause
 * meshoptimizer 1.3 - MIT
 * xatlas - MIT
-* stb (stb_image_write) - MIT / public domain
 * PoissonRecon (Screened Poisson Surface Reconstruction, M. Kazhdan) - MIT
 * nlohmann/json 3.12.0 (fetched by the librealsense build) - MIT
