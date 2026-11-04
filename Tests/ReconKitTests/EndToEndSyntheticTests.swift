@@ -36,7 +36,7 @@ private final class Lines: @unchecked Sendable {
 }
 
 @Suite(.enabled(if: CoreAvailability.reconstruction, "fr_register_frames / fr_tsdf_create are still placeholders"),
-       .timeLimit(.minutes(10)))
+       .timeLimit(.minutes(30)), .heavyReconstruction)
 struct EndToEndSyntheticTests {
     /// Geometry and poses are what is measured: decimate before texturing (UV unwrapping the full-resolution mesh
     /// takes minutes) and bake a small texture, as `ifscan reconstruct --triangles 60000 --texture-size 512` does.

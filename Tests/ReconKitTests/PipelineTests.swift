@@ -15,7 +15,7 @@ final class ProgressLog: @unchecked Sendable {
     var all: [ReconstructionProgress] { lock.lock(); defer { lock.unlock() }; return events }
 }
 
-@Suite("Pipeline")
+@Suite("Pipeline", .heavyReconstruction)
 struct PipelineTests {
     static let scan = makeSyntheticScan()
 

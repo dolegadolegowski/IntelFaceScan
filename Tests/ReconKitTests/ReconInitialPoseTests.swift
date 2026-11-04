@@ -14,7 +14,7 @@ import simd
 import SyntheticData
 import Testing
 
-@Suite("Recon initial poses")
+@Suite("Recon initial poses", .heavyReconstruction)
 struct ReconInitialPoseTests {
     /// Off-center head, no random Vision error: what remains is the line-of-sight effect.
     static let scan: SyntheticScanResult = {

@@ -21,6 +21,12 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
   `Pipeline robustness`), IntelFaceScanAppTests 30 tests ~8 s, FaceReconCoreTests 89 tests ~7 s, CameraKitTests 77
   tests ~27 s (most of it `Helper playback backpressure`); about 2.5 min in all when nothing changed, about 3 min
   from a clean debug build (about 40 s of it building).
+* The reconstruction tests of ReconKitTests (the suites and tests marked `.heavyReconstruction`,
+  `Tests/ReconKitTests/HeavyTestSlots.swift`) share a few slots: each peaks at about 0.5 GB, and all of them at once
+  made the 7 GB CI runner swap until the step timed out. The number of slots is min(cores, 2 × (memory in GB − 3)),
+  28 on the M3 Ultra (no limit in practice) and 3 on the runner; `IFS_TEST_HEAVY_SLOTS=n` overrides it (with 3:
+  ReconKitTests ~90 s and 1.5 GB at the peak on the M3 Ultra, instead of ~65 s and 2.6 GB). A `.timeLimit` counts
+  the wait for a slot, so those suites allow 30 minutes.
 * Skipped, with a reason (`➜ Test ... skipped: "..."`), never failed: benchmarks and measurement sweeps that are
   run by hand (`PipelineBenchmark`, `Mesh performance`, `ReconCaptureRange`, the `IFS_RECON_STUDY=1` tables of
   docs/RECONSTRUCTION.md, `GuidanceSyntheticVisionStudy` with `IFS_VISION_STUDY=1` – `IFS_VISION_STUDY_GRID=1` adds

@@ -263,7 +263,7 @@ enum RobustnessStudy {
 }
 
 @Suite("Pipeline robustness", .enabled(if: CoreAvailability.reconstruction, "fr_register_frames / fr_tsdf_create are placeholders"),
-       .timeLimit(.minutes(30)))
+       .timeLimit(.minutes(30)), .heavyReconstruction)
 struct PipelineRobustnessTests {
     /// All imperfections at once, point-to-plane ICP (the default): the end-to-end requirements still hold.
     @Test func realisticImperfectionsCombined() async throws {

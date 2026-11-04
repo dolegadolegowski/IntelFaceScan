@@ -8,7 +8,7 @@ import simd
 import SyntheticData
 import Testing
 
-@Suite("Pipeline registration check")
+@Suite("Pipeline registration check", .heavyReconstruction)
 struct PipelineRegistrationCheckTests {
     /// The scan's frames with the pipeline's head masks, as the registration check sees them.
     static func frames(_ scan: SynthScan) throws -> RGBDFrameSet {

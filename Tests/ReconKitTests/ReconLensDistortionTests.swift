@@ -161,7 +161,7 @@ struct ReconLensDistortionTests {
 }
 
 @Suite("Recon lens distortion pipeline", .enabled(if: CoreAvailability.reconstruction, "the core is a placeholder"),
-       .timeLimit(.minutes(30)))
+       .timeLimit(.minutes(30)), .heavyReconstruction)
 struct ReconLensDistortionPipelineTests {
     static let offCenter = SIMD2<Float>(0.15, 0.06)
 

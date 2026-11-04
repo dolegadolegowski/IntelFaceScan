@@ -12,7 +12,7 @@ import SyntheticData
 import Testing
 
 @Suite("Mesh closing (pipeline)", .enabled(if: CoreAvailability.reconstruction, "fr_register_frames / fr_tsdf_create are placeholders"),
-       .timeLimit(.minutes(10)))
+       .timeLimit(.minutes(30)), .heavyReconstruction)
 struct MeshClosingPipelineTests {
     static func run(closeHead: Bool, scan: SyntheticScanResult) async throws -> ReconstructionResult {
         var options = ReconstructionOptions()
