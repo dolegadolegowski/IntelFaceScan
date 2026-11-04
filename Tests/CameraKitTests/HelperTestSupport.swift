@@ -26,6 +26,47 @@ enum TestHelper {
     static let skipReason: Comment =
         "IntelFaceScanHelper not built: run the helper CMake build (build/helper) or set IFS_HELPER_PATH"
 
+    /// make-test-recording (synthetic .db3/.bag recordings): $IFS_MAKE_TEST_RECORDING, or the one the helper build
+    /// makes with -DIFS_HELPER_TESTS=ON (build/helper/tests), or the standalone helper-tests build.
+    static let recordingTool: URL? = {
+        if let path = ProcessInfo.processInfo.environment["IFS_MAKE_TEST_RECORDING"], !path.isEmpty,
+           FileManager.default.isExecutableFile(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+        var candidates = [root.appendingPathComponent("build/helper/tests/make-test-recording"),
+                          root.appendingPathComponent("build/helper-tests/make-test-recording")]
+        if let helper = url {
+            candidates.insert(helper.deletingLastPathComponent().appendingPathComponent("tests/make-test-recording"), at: 0)
+        }
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }()
+
+    static let playbackAvailable = url != nil && recordingTool != nil
+    static let playbackSkipReason: Comment =
+        "IntelFaceScanHelper or make-test-recording not built: configure the helper with -DIFS_HELPER_TESTS=ON"
+
+    /// Writes a synthetic recording (make-test-recording, no IR, small frames so tests stay fast) and returns it.
+    static func makeRecording(in dir: URL, frames: Int, size: String = "640x480") throws -> URL {
+        guard let tool = recordingTool else { throw CameraError.helperNotFound("make-test-recording") }
+        let file = dir.appendingPathComponent("synthetic-\(frames).db3")
+        let process = Process()
+        process.executableURL = tool
+        process.arguments = ["-o", file.path, "--frames", String(frames), "--depth", size, "--color", size,
+                             "--no-ir", "--fast"]
+        process.standardOutput = FileHandle.nullDevice
+        let errors = Pipe()
+        process.standardError = errors
+        try process.run()
+        process.waitUntilExit()
+        let message = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        guard process.terminationStatus == 0, FileManager.default.fileExists(atPath: file.path) else {
+            throw CameraError.commandFailed("make-test-recording failed (\(process.terminationStatus)): \(message)")
+        }
+        return file
+    }
+
     static func scratchDirectory() throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("IntelFaceScanTests-\(UUID().uuidString)")
