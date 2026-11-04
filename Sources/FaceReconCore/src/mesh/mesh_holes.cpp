@@ -459,6 +459,14 @@ fr_status fr_mesh_fill_holes( fr_mesh * mesh, uint32_t max_hole_edges, uint32_t 
         if( mesh->triangle_count == 0 || max_hole_edges < 3 )
             return FR_OK;
         mesh_buffers b = load( *mesh );
+        // With UVs, chart borders are boundaries of the split mesh but not holes: loops are found on the topology
+        // with coincident vertices merged, and the original (seam-split) triangles are restored afterwards.
+        std::vector< uint32_t > original;
+        if( b.has_uvs )
+        {
+            original = b.indices;
+            b.indices = remap_indices( original.data(), original.size(), coincident_representatives( b.positions.data(), b.vertex_count() ) );
+        }
         hole_filler filler( b );
         std::vector< boundary_loop > loops = filler.loops();
         if( loops.size() < 2 )
@@ -474,6 +482,8 @@ fr_status fr_mesh_fill_holes( fr_mesh * mesh, uint32_t max_hole_edges, uint32_t 
                 ++filled;
         if( filled == 0 )
             return FR_OK;
+        if( ! original.empty() )
+            std::copy( original.begin(), original.end(), b.indices.begin() );
         if( b.has_normals )
             compute_vertex_normals( b.positions.data(), b.vertex_count(), b.indices.data(), b.triangle_count(),
                                     b.normals.data(), b.has_uvs );

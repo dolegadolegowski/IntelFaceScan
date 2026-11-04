@@ -295,6 +295,41 @@ double mean_edge_length( const float * p, const uint32_t * idx, uint32_t t )
     return sum / ( 3.0 * t );
 }
 
+std::vector< uint32_t > coincident_representatives( const float * p, uint32_t n )
+{
+    std::vector< uint32_t > order( n ), rep( n );
+    for( uint32_t v = 0; v < n; ++v )
+        order[v] = rep[v] = v;
+    // Bit patterns: exact coincidence, and -0 / +0 or NaNs never merge with anything unexpected.
+    auto key = [p]( uint32_t v, int k ) {
+        uint32_t bits;
+        std::memcpy( &bits, p + size_t( v ) * 3 + k, 4 );
+        return bits;
+    };
+    auto less = [&]( uint32_t a, uint32_t b ) {
+        for( int k = 0; k < 3; ++k )
+            if( key( a, k ) != key( b, k ) )
+                return key( a, k ) < key( b, k );
+        return a < b;
+    };
+    std::sort( order.begin(), order.end(), less );
+    for( uint32_t i = 1; i < n; ++i )
+    {
+        const uint32_t a = order[i - 1], b = order[i];
+        if( key( a, 0 ) == key( b, 0 ) && key( a, 1 ) == key( b, 1 ) && key( a, 2 ) == key( b, 2 ) )
+            rep[b] = rep[a];  // runs are sorted by index, so the first of a run is the lowest
+    }
+    return rep;
+}
+
+std::vector< uint32_t > remap_indices( const uint32_t * indices, size_t count, const std::vector< uint32_t > & rep )
+{
+    std::vector< uint32_t > out( count );
+    for( size_t i = 0; i < count; ++i )
+        out[i] = rep[indices[i]];
+    return out;
+}
+
 void compute_vertex_normals( const float * p, uint32_t n, const uint32_t * idx, uint32_t t, float * normals,
                              bool share_coincident )
 {
@@ -314,37 +349,13 @@ void compute_vertex_normals( const float * p, uint32_t n, const uint32_t * idx, 
     }
     if( share_coincident && n > 1 )
     {
-        // Runs of bit-identical positions after sorting share their accumulated normal.
-        std::vector< uint32_t > order( n );
+        const std::vector< uint32_t > rep = coincident_representatives( p, n );
         for( uint32_t v = 0; v < n; ++v )
-            order[v] = v;
-        auto key = [p]( uint32_t v, int k ) {
-            uint32_t bits;
-            std::memcpy( &bits, p + size_t( v ) * 3 + k, 4 );
-            return bits;
-        };
-        std::sort( order.begin(), order.end(), [&]( uint32_t a, uint32_t b ) {
-            for( int k = 0; k < 3; ++k )
-                if( key( a, k ) != key( b, k ) )
-                    return key( a, k ) < key( b, k );
-            return a < b;
-        } );
-        auto same = [&]( uint32_t a, uint32_t b ) { return key( a, 0 ) == key( b, 0 ) && key( a, 1 ) == key( b, 1 ) && key( a, 2 ) == key( b, 2 ); };
-        for( uint32_t i = 0; i < n; )
-        {
-            uint32_t j = i + 1;
-            while( j < n && same( order[i], order[j] ) )
-                ++j;
-            if( j - i > 1 )
-            {
-                vec3 sum;
-                for( uint32_t k = i; k < j; ++k )
-                    sum += acc[order[k]];
-                for( uint32_t k = i; k < j; ++k )
-                    acc[order[k]] = sum;
-            }
-            i = j;
-        }
+            if( rep[v] != v )
+                acc[rep[v]] += acc[v];
+        for( uint32_t v = 0; v < n; ++v )
+            if( rep[v] != v )
+                acc[v] = acc[rep[v]];
     }
     parallel_for( n, 16384, [&]( size_t b, size_t e ) {
         for( size_t v = b; v < e; ++v )

@@ -62,10 +62,9 @@ inline void for_each_ring_face( const csr & vf, const uint32_t * idx, uint32_t f
         }
 }
 
-void bilateral_filter( fr_mesh * mesh, const csr & vf, int iterations, float sigma_s, float sigma_r )
+void bilateral_filter( fr_mesh * mesh, const uint32_t * idx, const csr & vf, int iterations, float sigma_s, float sigma_r )
 {
     const uint32_t n = mesh->vertex_count, t = mesh->triangle_count;
-    const uint32_t * idx = mesh->indices;
     face_data fd;
     fd.normal.resize( t );
     fd.centroid.resize( t );
@@ -118,10 +117,10 @@ void bilateral_filter( fr_mesh * mesh, const csr & vf, int iterations, float sig
     }
 }
 
-void taubin_smooth( fr_mesh * mesh, int iterations, float lambda, float mu, bool feature_weights, float sigma_r )
+void taubin_smooth( fr_mesh * mesh, const uint32_t * idx, int iterations, float lambda, float mu, bool feature_weights,
+                    float sigma_r )
 {
     const uint32_t n = mesh->vertex_count, t = mesh->triangle_count;
-    const uint32_t * idx = mesh->indices;
     const csr nb = vertex_neighbors( n, idx, t );
     const csr out = outgoing_edges( n, idx, t );
 
@@ -236,21 +235,36 @@ fr_status fr_mesh_smooth( fr_mesh * mesh, const fr_smooth_params * params )
         if( mesh->triangle_count == 0 )
             return FR_OK;
 
+        // Vertices split on UV seams are smoothed as one (else the seams would open); the duplicates follow their
+        // representative at the end.
+        std::vector< uint32_t > rep, welded;
+        const uint32_t * idx = mesh->indices;
+        if( mesh->uvs )
+        {
+            rep = coincident_representatives( mesh->positions, mesh->vertex_count );
+            welded = remap_indices( mesh->indices, size_t( mesh->triangle_count ) * 3, rep );
+            idx = welded.data();
+        }
+
         // Sigmas <= 0 select automatic values: the spatial one from the mesh resolution.
         const float sigma_r = p.bilateral_sigma_normal > 0 ? p.bilateral_sigma_normal : 0.3f;
         if( p.bilateral_iterations > 0 )
         {
             float sigma_s = p.bilateral_sigma_spatial_m;
             if( sigma_s <= 0 )
-                sigma_s = float( 1.5 * mean_edge_length( mesh->positions, mesh->indices, mesh->triangle_count ) );
+                sigma_s = float( 1.5 * mean_edge_length( mesh->positions, idx, mesh->triangle_count ) );
             if( sigma_s > 0 )
             {
-                const csr vf = vertex_faces( mesh->vertex_count, mesh->indices, mesh->triangle_count );
-                bilateral_filter( mesh, vf, p.bilateral_iterations, sigma_s, sigma_r );
+                const csr vf = vertex_faces( mesh->vertex_count, idx, mesh->triangle_count );
+                bilateral_filter( mesh, idx, vf, p.bilateral_iterations, sigma_s, sigma_r );
             }
         }
         if( p.taubin_iterations > 0 )
-            taubin_smooth( mesh, p.taubin_iterations, p.taubin_lambda, p.taubin_mu, p.bilateral_iterations > 0, sigma_r );
+            taubin_smooth( mesh, idx, p.taubin_iterations, p.taubin_lambda, p.taubin_mu, p.bilateral_iterations > 0,
+                           sigma_r );
+        for( uint32_t v = 0; v < uint32_t( rep.size() ); ++v )
+            if( rep[v] != v )
+                std::memcpy( mesh->positions + size_t( v ) * 3, mesh->positions + size_t( rep[v] ) * 3, sizeof( float ) * 3 );
         if( mesh->normals )
             compute_vertex_normals( mesh->positions, mesh->vertex_count, mesh->indices, mesh->triangle_count,
                                     mesh->normals, mesh->uvs != nullptr );

@@ -306,6 +306,13 @@ fr_status fr_mesh_remove_small_components( fr_mesh * mesh, float min_relative_si
             uf.unite( tri[0], tri[1] );
             uf.unite( tri[0], tri[2] );
         }
+        // UV charts of one surface are joined through their split seam vertices.
+        if( mesh->uvs )
+        {
+            const std::vector< uint32_t > rep = coincident_representatives( mesh->positions, n );
+            for( uint32_t v = 0; v < n; ++v )
+                uf.unite( v, rep[v] );
+        }
         std::vector< uint32_t > triangles_of( n, 0 );
         for( uint32_t f = 0; f < t; ++f )
             ++triangles_of[uf.find( mesh->indices[size_t( f ) * 3] )];

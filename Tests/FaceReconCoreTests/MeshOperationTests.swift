@@ -272,6 +272,54 @@ struct MeshOperationTests {
         #expect(lo[2] > 0.39 && hi[2] < 0.61)
     }
 
+    /// After UV unwrapping, seams split vertices: components, holes and smoothing must still see one surface.
+    @Test func operationsSeeThroughUVSeams() throws {
+        var mesh = MeshFactory.icosphere(level: 4)
+        // A neck cut and one small hole.
+        mesh.indices = stride(from: 0, to: mesh.indices.count, by: 3).flatMap { t -> [UInt32] in
+            let c = (mesh.positions[Int(mesh.indices[t])] + mesh.positions[Int(mesh.indices[t + 1])] + mesh.positions[Int(mesh.indices[t + 2])]) / 3
+            return c.y < -0.07 || simd_distance(c, [0.1, 0, 0]) < 0.012 ? [] : Array(mesh.indices[t ..< t + 3])
+        }
+        var uv = fr_uv_params()
+        fr_uv_params_default(&uv)
+        uv.texture_size = 512
+        try mesh.withCoreMesh {
+            try check(fr_mesh_clean($0, 0))
+            try check(fr_mesh_compute_normals($0))
+            try check(fr_mesh_uv_unwrap($0, &uv, nil, nil))
+        }
+        let triangles = mesh.triangleCount
+        let seamLoops = MeshMeasure.boundaryLoops(mesh).count
+        #expect(seamLoops > 2)  // chart borders look like boundaries of the split mesh
+
+        var removed: UInt32 = 99
+        try mesh.withCoreMesh { try check(fr_mesh_remove_small_components($0, 0.5, 0, &removed)) }
+        #expect(removed == 0 && mesh.triangleCount == triangles)
+
+        var filled: UInt32 = 0
+        try mesh.withCoreMesh { try check(fr_mesh_fill_holes($0, 200, &filled)) }
+        #expect(filled == 1)
+        #expect(mesh.uvs.count == mesh.vertexCount)
+
+        var params = fr_smooth_params()
+        fr_smooth_params_default(&params)
+        params.bilateral_sigma_spatial_m = 0
+        let before = mesh.positions
+        try mesh.withCoreMesh { try check(fr_mesh_smooth($0, &params)) }
+        // Vertices that coincided before smoothing still coincide (no cracks along the seams).
+        var first: [SIMD3<Float>: Int] = [:]
+        var shared = 0
+        for (i, p) in before.enumerated() {
+            if let j = first[p] {
+                shared += 1
+                #expect(mesh.positions[i] == mesh.positions[j])
+            } else {
+                first[p] = i
+            }
+        }
+        #expect(shared > 0)
+    }
+
     @Test func invalidArgumentsAreRejected() throws {
         #expect(fr_mesh_clean(nil, 0) == FR_ERR_INVALID_ARGUMENT)
         #expect(fr_mesh_smooth(nil, nil) == FR_ERR_INVALID_ARGUMENT)
