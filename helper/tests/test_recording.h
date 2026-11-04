@@ -77,6 +77,9 @@ public:
     // Feeds frame i to the sensors that stream (IMU samples up to its timestamp, color, depth, infrared); frames
     // of stopped sensors are dropped by librealsense.
     void emit_frame( int i );
+    // Depth units of the following frames (as after a DEPTH_UNITS change while streaming): the Z16 values are
+    // rendered in the new units and each frame carries them; the profile stays the same.
+    void set_depth_units( float units );
 
 private:
     struct Impl;

@@ -2,6 +2,9 @@
 //
 // Tests of the capture module without a camera: configuration validation, helpers, measurement math, and the
 // CaptureEngine end to end on synthetic recordings (software device -> .db3/.bag -> playback -> framesets).
+// Nothing here may depend on how fast the machine is (CI runs it on a 3-core runner): count framesets only where
+// every frame is delivered (non-real-time playback, the live rig's lockstep feed), and otherwise wait for
+// conditions with generous bounds. Benchmarks (bench_*) run only when asked for by name: capture-tests bench.
 
 #include "capture_config.h"
 #include "capture_engine.h"
@@ -174,6 +177,50 @@ private:
 bool near( double a, double b, double tolerance )
 {
     return std::fabs( a - b ) <= tolerance;
+}
+
+// Waits until no frameset arrived for 'quiet' (at most 'limit') and returns the count then. After a pause, frames
+// already in the syncer queue and the processing thread still come out; how long that takes depends on the machine.
+size_t wait_until_quiet( Collector & col, std::chrono::milliseconds quiet, std::chrono::milliseconds limit = 20s )
+{
+    auto end = std::chrono::steady_clock::now() + limit;
+    size_t count = col.frameset_count();
+    auto changed = std::chrono::steady_clock::now();
+    while( std::chrono::steady_clock::now() < end )
+    {
+        std::this_thread::sleep_for( 10ms );
+        size_t now_count = col.frameset_count();
+        if( now_count != count )
+        {
+            count = now_count;
+            changed = std::chrono::steady_clock::now();
+        }
+        else if( std::chrono::steady_clock::now() - changed >= quiet )
+            break;
+    }
+    return count;
+}
+
+// A recording at a quarter of the pixels (640x360 depth, 640x400 color): for the lifecycle tests of real-time
+// playback, where full-size frames make the processing speed of the machine decide how many framesets arrive.
+RecordingOptions small_recording( const std::string & path, int frames )
+{
+    RecordingOptions o;
+    o.path = path;
+    o.frames = frames;
+    o.depth_width = 640;
+    o.depth_height = 360;
+    o.color_width = 640;
+    o.color_height = 400;
+    return o;
+}
+
+CaptureConfig config_for( const RecordingOptions & o )
+{
+    CaptureConfig c;
+    c.depth = { o.depth_width, o.depth_height, o.fps };
+    c.color = { o.color_width, o.color_height, o.fps };
+    return c;
 }
 
 uint16_t z16_at( const CapturedPlane & p, int x, int y )
@@ -441,6 +488,36 @@ TEST_CASE( util_roi_mapping )
     auto c = clamp_rect( PixelRect{ -10, -10, 50, 50 }, 100, 100 );
     REQUIRE( c );
     CHECK( c->x == 0 && c->y == 0 && c->width == 40 && c->height == 40 );
+
+    // The color rectangle is deprojected with the color intrinsics and projected with the depth intrinsics (not the
+    // other way round): at 0.5 m a 200 px wide face is ~197 px wide in depth (632 / 640.1).
+    rs2_intrinsics depth_848 = synthetic_depth_intrinsics( 848, 480 );
+    auto small = map_color_rect_to_depth( color, depth_848, c2d, face, 0.5f );
+    REQUIRE( small );
+    CHECK_MSG( near( small->width, face.width * depth_848.fx / color.fx, 6 ), small->width );
+    CHECK( small->x + small->width <= 848 && small->y + small->height <= 480 );
+}
+
+TEST_CASE( util_roi_minimum_size )
+{
+    // A face rectangle that mostly left the image leaves a sliver after clamping; auto exposure needs an area.
+    auto sliver = clamp_rect( PixelRect{ 1279, 300, 300, 200 }, 1280, 800 );
+    REQUIRE( sliver );
+    CHECK( sliver->width == 1 );
+    PixelRect r = ensure_min_size( *sliver, k_min_roi_px, k_min_roi_px, 1280, 800 );
+    CHECK_MSG( r.width == k_min_roi_px && r.x + r.width == 1280, r.x << " " << r.width );  // moved inside
+    CHECK( r.y == 300 && r.height == 200 );                                                // tall enough already
+    // Grown about the center when there is room.
+    r = ensure_min_size( PixelRect{ 600, 400, 4, 2 }, 32, 32, 1280, 800 );
+    CHECK_MSG( r.x == 586 && r.width == 32 && r.y == 385 && r.height == 32, r.x << "," << r.y );
+    // Top-left corner, and an image smaller than the minimum.
+    r = ensure_min_size( PixelRect{ 0, 0, 1, 1 }, 32, 32, 1280, 800 );
+    CHECK( r.x == 0 && r.y == 0 && r.width == 32 && r.height == 32 );
+    r = ensure_min_size( PixelRect{ 3, 2, 2, 2 }, 32, 32, 20, 10 );
+    CHECK( r.x == 0 && r.y == 0 && r.width == 20 && r.height == 10 );
+    // Large rectangles are unchanged.
+    r = ensure_min_size( PixelRect{ 500, 220, 300, 380 }, 32, 32, 1280, 800 );
+    CHECK( r.x == 500 && r.y == 220 && r.width == 300 && r.height == 380 );
 }
 
 TEST_CASE( util_frame_counter_monitor )
@@ -751,19 +828,17 @@ TEST_CASE( playback_filters_reduce_noise )
 TEST_CASE( playback_set_filters_while_streaming )
 {
     TempDir dir;
-    RecordingOptions o;
-    o.path = dir.file( "filters.db3" );
-    o.frames = 30;
-    o.pace = true;
+    // 90 frames = 3 s of real time: still playing after the first framesets, however slow the machine.
+    RecordingOptions o = small_recording( dir.file( "filters.db3" ), 90 );
     write_test_recording( o );
     Collector col;
     auto engine = CaptureEngine::create_playback( o.path, true, col.callbacks() );
-    engine->start();  // defaults without configure
-    REQUIRE( col.wait_for_framesets( 3, 10s ) );
+    engine->start();  // defaults without configure (the recording's streams are played)
+    REQUIRE( col.wait_for_framesets( 3, 20s ) );
     CHECK( engine->streaming() );
     engine->set_filters( to_json( FilterConfig::none() ) );
     CHECK_THROWS_WITH( engine->set_filters( json{ { "threshold", nullptr } } ), "FilterConfiguration" );
-    REQUIRE( col.wait_for_event( "playback_finished", 20s ) );
+    REQUIRE( col.wait_for_event( "playback_finished", 60s ) );
     engine->shutdown();
     engine->shutdown();  // idempotent
     CHECK_THROWS_WITH( engine->start(), "shut down" );
@@ -794,55 +869,78 @@ TEST_CASE( playback_stream_restart_event )
 
 TEST_CASE( playback_restart_stop_and_pause )
 {
+    // Real-time playback paces by the file and drops framesets that the processing cannot keep up with, so this
+    // test counts only what does not depend on the machine's speed: whether framesets arrive, and whether they stop.
     TempDir dir;
-    RecordingOptions o;
-    o.path = dir.file( "paced.db3" );
-    o.frames = 45;
+    RecordingOptions o = small_recording( dir.file( "paced.db3" ), 90 );
     write_test_recording( o );
 
     Collector col( 1000 );
     auto engine = CaptureEngine::create_playback( o.path, true, col.callbacks() );
-    CaptureConfig config;
+    CaptureConfig config = config_for( o );
     config.enable_imu = false;
+    config.filters = FilterConfig::none();  // the lifecycle is tested here, not the filters
     engine->configure( to_json( config ) );
 
-    // Real time: 45 frames at 30 fps take about 1.5 s.
+    // Real time: 90 frames at 30 fps take about 3 s (more when the file was written slowly, never less).
     auto t0 = std::chrono::steady_clock::now();
     engine->start();
-    REQUIRE( col.wait_for_event( "playback_finished", 20s ) );
+    REQUIRE( col.wait_for_event( "playback_finished", 60s ) );
     double seconds = std::chrono::duration< double >( std::chrono::steady_clock::now() - t0 ).count();
-    CHECK_MSG( seconds > 1.0 && seconds < 4.0, seconds );
-    // Real-time playback drops frames when processing falls behind (the face-scan filters take ~33 ms per frameset
-    // on a 3-core CI runner); every-frame delivery is checked by the non-real-time tests.
-    CHECK_MSG( col.frameset_count() >= size_t( o.frames / 2 ), col.frameset_count() );
+    CHECK_MSG( seconds > 2.5, seconds );
+    CHECK_MSG( col.frameset_count() >= 3, col.frameset_count() );
+    CHECK( ! engine->streaming() );
 
     // After the end, start() plays the file again from the beginning.
     col.clear();
     engine->start();
-    REQUIRE( col.wait_for_framesets( 5, 10s ) );
+    REQUIRE( col.wait_for_framesets( 3, 20s ) );
+
+    // Pause: the framesets already on their way come out, then nothing.
     engine->playback_control( true, true );
-    std::this_thread::sleep_for( 200ms );
-    size_t paused_at = col.frameset_count();
-    std::this_thread::sleep_for( 400ms );
-    CHECK_MSG( col.frameset_count() <= paused_at + 1, col.frameset_count() << " vs " << paused_at );
+    size_t paused_at = wait_until_quiet( col, 500ms );
+    std::this_thread::sleep_for( 500ms );
+    CHECK_MSG( col.frameset_count() == paused_at, col.frameset_count() << " vs " << paused_at );
+    CHECK( engine->streaming() );
+
+    // A paused playback stays paused through stop and start (librealsense forgets its pause when the sensors stop;
+    // the engine used to start playing while it still believed to be paused, and then ignored the next pause).
+    engine->stop();
+    CHECK( ! engine->streaming() );
+    engine->start();
+    CHECK( engine->streaming() );
+    std::this_thread::sleep_for( 700ms );
+    CHECK_MSG( col.frameset_count() == paused_at, "played while paused: " << col.frameset_count() << " vs "
+                                                                           << paused_at );
     engine->playback_control( false, true );
-    REQUIRE( col.wait_for_framesets( paused_at + 5, 10s ) );
+    REQUIRE( col.wait_for_framesets( paused_at + 3, 20s ) );
+    engine->playback_control( true, true );
+    size_t paused_again = wait_until_quiet( col, 500ms );
+    std::this_thread::sleep_for( 500ms );
+    CHECK_MSG( col.frameset_count() == paused_again, "pause ignored: " << col.frameset_count() << " vs "
+                                                                       << paused_again );
+    engine->playback_control( false, true );
+    REQUIRE( col.wait_for_framesets( paused_again + 3, 20s ) );
 
     // A user stop is not the end of the file.
+    size_t stopped_before = col.event_count( "streaming_stopped" );
     engine->stop();
     CHECK( ! engine->streaming() );
     std::this_thread::sleep_for( 200ms );
     CHECK( col.event_count( "playback_finished" ) == 0 );
-    CHECK( col.event_count( "streaming_stopped" ) == 1 );
+    CHECK( col.event_count( "streaming_stopped" ) == stopped_before + 1 );
     engine->stop();  // idempotent
-    CHECK( col.event_count( "streaming_stopped" ) == 1 );
+    CHECK( col.event_count( "streaming_stopped" ) == stopped_before + 1 );
 
-    // Configure while streaming with other streams restarts them; filters alone do not.
+    // Configure while streaming: the next framesets follow it (send_depth does not need a stream restart).
     engine->start();
-    REQUIRE( col.wait_for_framesets( col.frameset_count() + 3, 10s ) );
+    REQUIRE( col.wait_for_framesets( col.frameset_count() + 3, 20s ) );
     config.send_depth = true;
     engine->configure( to_json( config ) );
     CHECK( engine->streaming() );
+    size_t before = col.frameset_count();
+    REQUIRE( col.wait_for_framesets( before + 3, 20s ) );
+    CHECK( col.framesets().back().planes.size() == 3 );  // color, depth_aligned, depth
     engine->shutdown();
     CHECK( ! engine->streaming() );
 }
@@ -896,16 +994,39 @@ struct LiveRig
         engine = create_live_engine_for_device( camera.device(), col.callbacks() );
     }
 
-    // At the frame rate: frames that come faster than the processing thread takes them are dropped (live
-    // behavior), which would make counts flaky.
-    void feed( int n )
+    // One frame at a time, each after the previous one's frameset came out (bounded wait). A live engine drops the
+    // oldest synchronized set when processing falls behind, so feeding at the frame rate made the counts depend on
+    // the machine (a 3-core CI runner processes 1280x720 slower than 30 fps); the recorder sees every frame either
+    // way. Call warm_up() after every stream (re)start first. Returns the number of framesets that arrived.
+    size_t feed( int n )
     {
+        size_t start = col.frameset_count();
         for( int i = 0; i < n; ++i )
         {
+            size_t before = col.frameset_count();
             camera.emit_frame( next_frame++ );
-            std::this_thread::sleep_for( std::chrono::milliseconds( 1000 / options.fps ) );
+            col.wait_for_framesets( before + 1, 10s );
         }
-        std::this_thread::sleep_for( 100ms );
+        return col.frameset_count() - start;
+    }
+
+    // After a stream (re)start the syncer learns the stream set from the frames: the first frame's color, depth and
+    // infrared come out as three sets, and when the processing thread is slow to take them the queue of 2 drops one
+    // (as with a camera, the first frameset after a start may be lost; nothing else is). Feeds frames until a
+    // frameset came out and the stragglers are in; returns the number of frames fed (the recorder sees them all).
+    int warm_up()
+    {
+        size_t start = col.frameset_count();
+        for( int i = 1; i <= 10; ++i )
+        {
+            camera.emit_frame( next_frame++ );
+            if( col.wait_for_framesets( start + 1, 2s ) )
+            {
+                wait_until_quiet( col, 500ms );
+                return i;
+            }
+        }
+        throw std::runtime_error( "no frameset after 10 frames" );
     }
 
     // What a software device can do: no presets, fixed depth units, no advanced mode.
@@ -1001,8 +1122,9 @@ TEST_CASE( live_streaming_and_recording )
     engine.set_auto_exposure_roi( 500, 220, 300, 380, 0.5f );  // no ROI support on the software device: ignored
     engine.start();
     CHECK( engine.streaming() );
-    rig.feed( 10 );
-    CHECK_MSG( rig.col.frameset_count() >= 8, rig.col.frameset_count() );
+    rig.warm_up();
+    size_t fed = rig.feed( 10 );
+    CHECK_MSG( fed == 10, fed );
     auto sets = rig.col.framesets();
     REQUIRE( ! sets.empty() );
     CHECK( sets.back().planes.size() == 3 );  // color, depth_aligned, ir_left
@@ -1018,6 +1140,7 @@ TEST_CASE( live_streaming_and_recording )
     std::string db3 = dir.file( "live.db3" );
     engine.start_recording( db3, "db3" );
     CHECK( engine.streaming() );
+    int db3_frames = rig.warm_up();
     CHECK( rig.col.event_count( "recording_started" ) == 1 );
     CHECK_THROWS_WITH( engine.start_recording( dir.file( "b.db3" ), "db3" ), "already running" );
     CaptureConfig other = c;
@@ -1026,7 +1149,9 @@ TEST_CASE( live_streaming_and_recording )
     CHECK_THROWS_WITH( engine.configure( to_json( other ) ), "Stop the recording before changing the streams" );
     engine.set_filters( to_json( FilterConfig() ) );  // filters may change while recording
     engine.set_filters( to_json( FilterConfig::none() ) );
-    rig.feed( 15 );
+    fed = rig.feed( 15 );
+    CHECK_MSG( fed == 15, fed );
+    db3_frames += 15;
     engine.stop_recording();
     CHECK( engine.streaming() );
     REQUIRE( rig.col.event_count( "recording_finished" ) == 1 );
@@ -1035,13 +1160,14 @@ TEST_CASE( live_streaming_and_recording )
         if( e.first == "recording_finished" )
             bytes = e.second["bytes"].get< uint64_t >();
     CHECK( bytes > 0 && bytes == fs::file_size( db3 ) );
-    size_t before = rig.col.frameset_count();
-    rig.feed( 5 );
-    CHECK( rig.col.frameset_count() >= before + 4 );
+    rig.warm_up();
+    fed = rig.feed( 5 );
+    CHECK_MSG( fed == 5, fed );
 
     // .bag needs patches/0002 in the SDK build.
     std::string bag = dir.file( "live.bag" );
     bool bag_supported = true;
+    int bag_frames = 0;
     try
     {
         engine.start_recording( bag, "bag" );
@@ -1054,7 +1180,10 @@ TEST_CASE( live_streaming_and_recording )
     CHECK( engine.streaming() );
     if( bag_supported )
     {
-        rig.feed( 10 );
+        bag_frames = rig.warm_up();
+        fed = rig.feed( 10 );
+        CHECK_MSG( fed == 10, fed );
+        bag_frames += 10;
         engine.stop_recording();
     }
     engine.stop();
@@ -1072,8 +1201,9 @@ TEST_CASE( live_streaming_and_recording )
         pc.send_ir = true;
         pc.filters = FilterConfig::none();
         auto played = play_all( file, pc, col );
-        size_t expected = file == db3 ? 15 : 10;
-        CHECK_MSG( played.size() + 2 >= expected && played.size() <= expected, file << ": " << played.size() );
+        // The recorder takes every frame from the sensors; a non-real-time playback delivers every one of them.
+        size_t expected = size_t( file == db3 ? db3_frames : bag_frames );
+        CHECK_MSG( played.size() == expected, file << ": " << played.size() << " of " << expected );
         REQUIRE( ! played.empty() );
         CHECK( played.front().planes.size() == 3 );
         check_intrinsics( played.front().planes[0].desc["intrinsics"], rig.camera.info().color_intrinsics );
@@ -1081,6 +1211,115 @@ TEST_CASE( live_streaming_and_recording )
         AlignmentScore s = score_alignment( o, played.front().planes[1], o.depth_units, 0.003 );
         CHECK_MSG( s.agree > 0.97, s.agree );
     }
+}
+
+TEST_CASE( live_depth_units_change_while_streaming )
+{
+    // DEPTH_UNITS changed while streaming (SET_OPTION, or CONFIGURE with the same streams) keeps the stream profile.
+    // librealsense's disparity transforms and NEON align cache the depth scale per profile, so the aligned depth was
+    // reprojected with the old scale (10x off) and the disparity-domain filters used thresholds off by 10x.
+    RecordingOptions o;
+    o.frames = 1000;
+    LiveRig rig( o, 1 );
+    CaptureEngine & engine = *rig.engine;
+    CaptureConfig c = LiveRig::config();
+    c.send_depth = true;
+    c.filters = FilterConfig();  // face-scan filters: threshold, spatial and temporal in the disparity domain
+    engine.configure( to_json( c ) );
+    engine.start();
+    rig.warm_up();
+    CHECK( rig.feed( 6 ) == 6 );
+
+    auto check_last = [&]( float units, const char * what ) {
+        auto sets = rig.col.framesets();
+        REQUIRE( ! sets.empty() );
+        const CapturedFrameset & last = sets.back();
+        CHECK_MSG( near( last.metadata["depth_scale"].get< double >(), units, 1e-9 ), what );
+        RecordingOptions truth = o;
+        truth.depth_units = units;
+        const CapturedPlane * depth = last.plane( "depth" );
+        const CapturedPlane * aligned = last.plane( "depth_aligned" );
+        REQUIRE( depth && aligned );
+        double rms = head_depth_rms_mm( truth, *depth, units );
+        CHECK_MSG( rms >= 0 && rms < 0.6, what << ": depth RMS " << rms << " mm" );
+        // Noise-free scene: 0.996 agree, 0.89 coverage (the RGB camera sees more than the depth imagers); with the
+        // stale scale 0.93 and 0.61.
+        AlignmentScore score = score_alignment( truth, *aligned, units, 0.003 );
+        CHECK_MSG( score.agree > 0.98 && score.coverage > 0.85,
+                   what << ": aligned agree " << score.agree << ", coverage " << score.coverage );
+    };
+    check_last( 0.0001f, "0.1 mm units" );
+
+    rig.camera.set_depth_units( 0.001f );
+    CHECK( rig.feed( 6 ) == 6 );
+    check_last( 0.001f, "after the change to 1 mm units" );
+    engine.shutdown();
+}
+
+TEST_CASE( live_device_events_and_shutdown )
+{
+    // A recording loaded into the context the engine watches stands in for the camera: unloading it is an unplug,
+    // loading it again a reconnect (librealsense raises the devices-changed callback for both).
+    TempDir dir;
+    RecordingOptions o = small_recording( dir.file( "device.db3" ), 3 );
+    o.pace = false;
+    write_test_recording( o );
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    int disconnects_entered = 0, disconnects_left = 0;
+    Collector col;
+    CaptureCallbacks cb = col.callbacks();
+    auto record = cb.on_event;
+    cb.on_event = [&, record]( const std::string & event, const json & data ) {
+        record( event, data );
+        if( event != "device_disconnected" )
+            return;
+        {
+            std::lock_guard< std::mutex > lock( mutex );
+            ++disconnects_entered;
+        }
+        cv.notify_all();
+        std::this_thread::sleep_for( 300ms );  // e.g. the IPC layer queueing the event
+        std::lock_guard< std::mutex > lock( mutex );
+        ++disconnects_left;
+    };
+
+    rs2::context ctx;
+    rs2::device camera = ctx.load_device( o.path );
+    auto engine = create_live_engine_for_device( ctx, camera, cb );
+    CHECK( engine->device_info()["serial"] == k_synthetic_serial );
+
+    // Unplugged: the event, and commands fail until the camera is back.
+    ctx.unload_device( o.path );
+    CHECK( col.event_count( "device_disconnected" ) == 1 );
+    CHECK_THROWS_WITH( engine->device_info(), "disconnected" );
+    CHECK( ! engine->streaming() );
+
+    // Plugged in again: the event, and the next command adopts the new device instance.
+    ctx.load_device( o.path );
+    CHECK( col.event_count( "device_connected" ) == 1 );
+    CHECK( engine->device_info()["serial"] == k_synthetic_serial );
+
+    // Unplugged while shutting down: shutdown() waits for the event being emitted and no callback runs after it
+    // returned (the callbacks capture objects the caller destroys after shutdown(), e.g. the IPC service).
+    std::thread unplug( [&] { ctx.unload_device( o.path ); } );
+    {
+        std::unique_lock< std::mutex > lock( mutex );
+        REQUIRE( cv.wait_for( lock, 10s, [&] { return disconnects_entered == 2; } ) );
+    }
+    engine->shutdown();
+    int left = 0;
+    {
+        std::lock_guard< std::mutex > lock( mutex );
+        left = disconnects_left;
+    }
+    unplug.join();
+    CHECK_MSG( left == 2, "shutdown() returned while a device_disconnected event was still being emitted" );
+    size_t events = col.events().size();
+    ctx.load_device( o.path );  // nothing may reach the callbacks any more
+    std::this_thread::sleep_for( 100ms );
+    CHECK( col.events().size() == events );
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1211,6 +1450,10 @@ int main( int argc, char ** argv )
         std::string status = "PASS";
         try
         {
+            // Benchmarks measure (docs/CAMERA.md) rather than test, and take a minute on a slow CI runner: they run
+            // only when asked for by name, e.g. "capture-tests bench".
+            if( ! filter && std::strncmp( t.name, "bench_", 6 ) == 0 )
+                SKIP( "benchmark: run 'capture-tests bench'" );
             t.body();
         }
         catch( const Skipped & e )

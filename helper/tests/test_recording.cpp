@@ -552,6 +552,15 @@ void SyntheticCamera::emit_frame( int i )
                                      RS2_TIMESTAMP_DOMAIN_GLOBAL_TIME, depth_number, m->ir_profile.get(), 0.f } );
 }
 
+void SyntheticCamera::set_depth_units( float units )
+{
+    if( ! ( units > 0 ) )
+        throw std::runtime_error( "Invalid depth units" );
+    m->o.depth_units = units;
+    if( ! m->per_frame )
+        m->still = render( m->o, 0, m->info.depth_intrinsics, m->info.color_intrinsics, m->info.depth_to_color );
+}
+
 RecordingInfo write_test_recording( const RecordingOptions & o )
 {
     if( o.path.empty() )
