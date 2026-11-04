@@ -22,19 +22,24 @@ struct MeshClosingPipelineTests {
         return try await ReconstructionPipeline(options: options).run(scan.capture)
     }
 
-    /// Topology of an exported OBJ as a viewer sees it: vertices welded by position (UV seams joined).
-    static func exportedTopology(_ url: URL) throws -> (boundaryEdges: Int, nonManifoldEdges: Int, volume: Double) {
+    /// Topology of an exported OBJ as a viewer sees it: vertices welded by position (UV seams joined). The weld is
+    /// done here, not by fr_mesh_clean, which would drop duplicate triangles and those on non-manifold edges first.
+    /// fins: triangles whose three welded vertices another triangle also has (opposed copies enclose nothing).
+    static func exportedTopology(_ url: URL) throws -> (boundaryEdges: Int, nonManifoldEdges: Int, fins: Int, volume: Double) {
         var imported: UnsafeMutablePointer<fr_mesh>?
         guard fr_import_obj(url.path, &imported) == FR_OK, let core = imported else { throw CocoaError(.fileReadCorruptFile) }
         defer { fr_mesh_free(core) }
-        #expect(fr_mesh_set_attributes(core, 0) == FR_OK)  // without UVs the weld joins the seams
-        #expect(fr_mesh_clean(core, 0) == FR_OK)
         let mesh = ReconMesh(core: core)
+        var welded: [SIMD3<Float>: UInt32] = [:]
+        let weld = mesh.positions.map { p in welded[p] ?? { welded[p] = UInt32(welded.count); return UInt32(welded.count - 1) }() }
         var directed: [UInt64: Int] = [:]
+        var triangles: [[UInt32]: Int] = [:]
         for t in 0 ..< mesh.triangleCount {
             for k in 0 ..< 3 {
-                directed[UInt64(mesh.indices[3 * t + k]) << 32 | UInt64(mesh.indices[3 * t + (k + 1) % 3]), default: 0] += 1
+                let a = weld[Int(mesh.indices[3 * t + k])], b = weld[Int(mesh.indices[3 * t + (k + 1) % 3])]
+                directed[UInt64(a) << 32 | UInt64(b), default: 0] += 1
             }
+            triangles[(0 ..< 3).map { weld[Int(mesh.indices[3 * t + $0])] }.sorted(), default: 0] += 1
         }
         var boundary = 0, nonManifold = 0
         for (key, count) in directed {
@@ -46,7 +51,7 @@ struct MeshClosingPipelineTests {
             let p = (0 ..< 3).map { SIMD3<Double>(mesh.positions[Int(mesh.indices[3 * t + $0])]) }
             volume += simd_dot(p[0], simd_cross(p[1], p[2])) / 6
         }
-        return (boundary, nonManifold, volume)
+        return (boundary, nonManifold, triangles.values.filter { $0 > 1 }.reduce(0, +), volume)
     }
 
     @Test func closedHeadIsWatertightAndKeepsTheMeasuredSurface() async throws {
@@ -68,7 +73,7 @@ struct MeshClosingPipelineTests {
         let url = dir.url.appendingPathComponent("head.obj")
         try MeshExport.writeOBJ(closed, to: url)
         let topology = try Self.exportedTopology(url)
-        #expect(topology.boundaryEdges == 0 && topology.nonManifoldEdges == 0, "\(topology)")
+        #expect(topology.boundaryEdges == 0 && topology.nonManifoldEdges == 0 && topology.fins == 0, "\(topology)")
         #expect(topology.volume > 0)
         let openURL = dir.url.appendingPathComponent("open.obj")
         try MeshExport.writeOBJ(open, to: openURL)
