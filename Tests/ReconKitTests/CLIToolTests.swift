@@ -250,16 +250,22 @@ private let smallSynth = ["--width", "320", "--height", "200", "--frames-per-pos
 
 /// The animated synthetic head loops forever; the guided scan must not keep `reconstruct synthetic-camera` running
 /// when it cannot capture every pose (here: 5 s cover at most the first poses).
-@Test(.timeLimit(.minutes(3))) func cliSyntheticCameraScanStopsAtTheTimeLimit() async throws {
+/// The bound is on the scan (the report's "input" timing), not on the whole command: the reconstruction after it runs
+/// next to every other ReconKit test, which on a GitHub runner stretched the command to 4 minutes.
+@Test(.timeLimit(.minutes(10))) func cliSyntheticCameraScanStopsAtTheTimeLimit() async throws {
     let root = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }
+    let report = root.appendingPathComponent("report.json")
     let start = Date()
     let run = await ifscan(["reconstruct", "synthetic-camera", "-o", root.appendingPathComponent("head.obj").path,
-                            "--time-limit", "5", "--triangles", "20000", "--texture-size", "512"])
+                            "--time-limit", "5", "--triangles", "20000", "--texture-size", "512", "--report", report.path])
     let elapsed = Date().timeIntervalSince(start)
     #expect(run.err.contains("within the time limit of 5 s"), "\(run.err)")
     #expect(run.status == 0 || run.status == 65, "\(run.err)")   // reconstructed what it had, or too few keyframes
-    #expect(elapsed < 90, "took \(elapsed) s")
+    // Without keyframes (65) there is no report; the command then ended with the scan.
+    let json = (try? Data(contentsOf: report)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+    let scanSeconds = (json?["timings"] as? [String: Any])?["input"] as? Double ?? elapsed
+    #expect(scanSeconds < 60, "the scan took \(scanSeconds) s (command \(elapsed) s)")
 }
 
 @Test(.enabled(if: !CoreAvailability.reconstruction, "the reconstruction core is integrated"))
