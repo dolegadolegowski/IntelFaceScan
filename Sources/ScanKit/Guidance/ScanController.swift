@@ -135,7 +135,9 @@ public struct ScanUpdate: Sendable {
     /// Head pose averaged over the last ~0.25 s (what the target check uses).
     public var smoothedPose: HeadPose?
     public var angularSpeedDegPerSec: Float?
-    /// Angular distance to the current pose target (degrees).
+    /// Remaining angular distance to the current pose target (degrees), with the component across the pose direction
+    /// scaled by angleTolerance / perpendicularToleranceDeg: the pose is within tolerance when this is at most
+    /// angleTolerance (what the UI compares).
     public var angularErrorDeg: Float?
     /// Target - current (yaw, pitch) in degrees.
     public var targetDelta: SIMD2<Float>?
@@ -452,7 +454,7 @@ public final class ScanController: @unchecked Sendable {
         }
         let delta = Self.poseDelta(pose: pose, current: SIMD2(smoothed.yaw, smoothed.pitch),
                                    frontOffset: frontOffset(snapshot), overshootDeg: c.overshootToleranceDeg)
-        let error = (delta.x * delta.x + delta.y * delta.y).squareRoot()
+        let error = Self.toleranceError(delta, pose: pose, along: c.angleTolerance, across: c.perpendicularToleranceDeg)
         update.targetDelta = delta
         update.angularErrorDeg = error
 
@@ -479,7 +481,7 @@ public final class ScanController: @unchecked Sendable {
             update.instructionKind = .moveCloser; update.rejection = .tooFar
             return .none
         }
-        if !Self.withinTolerance(delta, pose: pose, along: c.angleTolerance, across: c.perpendicularToleranceDeg) {
+        if error > c.angleTolerance {
             work.holdSince = nil
             update.instructionKind = .turn(pose, yawDelta: delta.x, pitchDelta: delta.y)
             return .none
@@ -587,16 +589,21 @@ public final class ScanController: @unchecked Sendable {
         return perpendicular + remaining * direction
     }
 
-    /// Whether a remaining turn (poseDelta) is within the tolerance ellipse: semi-axis `along` in the direction of the
-    /// pose's target and `across` perpendicular to it; a circle of radius `along` for the front pose.
-    static func withinTolerance(_ delta: SIMD2<Float>, pose: ScanPose, along: Float, across: Float) -> Bool {
+    /// A remaining turn (poseDelta) measured against the tolerance ellipse, in degrees on the `along` scale: the
+    /// component across the direction of the pose's target counts along / across times, so the turn is within the
+    /// ellipse (semi-axes `along` and `across`) when the result is at most `along`. The front pose: the plain length.
+    static func toleranceError(_ delta: SIMD2<Float>, pose: ScanPose, along: Float, across: Float) -> Float {
         let target = SIMD2(pose.target.yaw, pose.target.pitch)
         let magnitude = simd_length(target)
-        guard magnitude > 0, along > 0, across > 0 else { return simd_length(delta) <= along }
+        guard magnitude > 0, along > 0, across > 0 else { return simd_length(delta) }
         let direction = target / magnitude
-        let a = simd_dot(delta, direction) / along
-        let p = simd_length(delta - simd_dot(delta, direction) * direction) / across
-        return a * a + p * p <= 1
+        let a = simd_dot(delta, direction)
+        let p = simd_length(delta - a * direction) * along / across
+        return (a * a + p * p).squareRoot()
+    }
+
+    static func withinTolerance(_ delta: SIMD2<Float>, pose: ScanPose, along: Float, across: Float) -> Bool {
+        toleranceError(delta, pose: pose, along: along, across: across) <= along
     }
 
     private func commit(_ decision: Decision, update: inout ScanUpdate, generation: UInt64, t: Double) {

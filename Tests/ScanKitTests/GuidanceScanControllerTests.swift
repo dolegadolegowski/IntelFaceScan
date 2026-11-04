@@ -505,6 +505,11 @@ import Testing
         // Equal semi-axes: the old circle.
         let delta = ScanController.poseDelta(pose: .left, current: SIMD2(45, 9), frontOffset: .zero, overshootDeg: 15)
         #expect(!ScanController.withinTolerance(delta, pose: .left, along: 8, across: 8))
+        // The reported error is on the along scale (the UI compares it with angleTolerance): 9 degrees of pitch on
+        // left count 6, 30 degrees short of the target count 30.
+        #expect(abs(ScanController.toleranceError(delta, pose: .left, along: 8, across: 12) - 6) < 1e-4)
+        let short = ScanController.poseDelta(pose: .left, current: SIMD2(15, 0), frontOffset: .zero, overshootDeg: 15)
+        #expect(abs(ScanController.toleranceError(short, pose: .left, along: 8, across: 12) - 30) < 1e-4)
     }
 
     @Test func pitchReadOnTheSidePosesDoesNotBlockThem() async {
