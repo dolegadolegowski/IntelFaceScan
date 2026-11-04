@@ -17,6 +17,13 @@
 
 namespace fr
 {
+namespace
+{
+// Regions of at most this many pixels without depth are isolated holes inside a surface, not silhouettes. With 8%
+// randomly scattered holes, 99.5% of the empty pixels lie in such regions (84% at 20%).
+constexpr size_t kMaxHolePixels = 4;
+}  // namespace
+
 CloudIndex::CloudIndex( const fr_cloud & cloud )
 {
     _adaptor.pts = cloud.points.data();
@@ -339,6 +346,48 @@ fr_cloud cloud_from_rgbd( const fr_rgbd_frame & f, const fr_cloud_params & p )
     }
     else
     {
+        // Isolated holes (stereo matching failures, speckle) are not silhouettes: a pixel without data counts as one
+        // only when its 4-connected region of empty pixels is larger than kMaxHolePixels. Otherwise every speckle
+        // would erase (2 erode + 1)^2 pixels: with 8% scattered holes the dilation removed 98% of a head cloud and
+        // registration failed. Occlusion bands along silhouettes and creases are long, so they still count.
+        std::vector< uint8_t > empty( npix, 0 );
+        {
+            std::vector< uint8_t > visited( npix, 0 );
+            std::vector< uint32_t > region, stack;
+            for( size_t start = 0; start < npix; ++start )
+            {
+                if( z[start] > 0 || visited[start] )
+                    continue;
+                region.clear();
+                stack.assign( 1, uint32_t( start ) );
+                visited[start] = 1;
+                while( ! stack.empty() )
+                {
+                    const uint32_t i = stack.back();
+                    stack.pop_back();
+                    region.push_back( i );
+                    const int x = int( i % uint32_t( w ) ), y = int( i / uint32_t( w ) );
+                    auto visit = [&]( size_t j ) {
+                        if( z[j] <= 0 && ! visited[j] )
+                        {
+                            visited[j] = 1;
+                            stack.push_back( uint32_t( j ) );
+                        }
+                    };
+                    if( x > 0 )
+                        visit( i - 1 );
+                    if( x + 1 < w )
+                        visit( i + 1 );
+                    if( y > 0 )
+                        visit( i - size_t( w ) );
+                    if( y + 1 < h )
+                        visit( i + size_t( w ) );
+                }
+                if( region.size() > kMaxHolePixels )
+                    for( uint32_t i : region )
+                        empty[i] = 1;
+            }
+        }
         std::vector< uint8_t > bad( npix, 1 ), tmp( npix, 0 );
         parallel_chunks( size_t( h ), chunk_count( size_t( h ), 8 ), [&]( size_t y0, size_t y1, size_t ) {
             for( size_t y = y0; y < y1; ++y )
@@ -346,13 +395,18 @@ fr_cloud cloud_from_rgbd( const fr_rgbd_frame & f, const fr_cloud_params & p )
                 {
                     const size_t i = y * size_t( w ) + size_t( x );
                     const float zc = z[i];
-                    if( zc <= 0 || x == 0 || y == 0 || x == w - 1 || int( y ) == h - 1 )
+                    if( zc <= 0 )
+                    {
+                        bad[i] = empty[i];
+                        continue;
+                    }
+                    if( x == 0 || y == 0 || x == w - 1 || int( y ) == h - 1 )
                         continue;
                     const float tol = jump_tolerance( zc, 1 );
-                    const float n4[4] = { z[i - 1], z[i + 1], z[i - size_t( w )], z[i + size_t( w )] };
+                    const size_t n4[4] = { i - 1, i + 1, i - size_t( w ), i + size_t( w ) };
                     bool edge = false;
-                    for( float zn : n4 )
-                        edge |= zn <= 0 || std::abs( zn - zc ) > tol;
+                    for( size_t j : n4 )
+                        edge |= z[j] <= 0 ? empty[j] != 0 : std::abs( z[j] - zc ) > tol;
                     bad[i] = edge;
                 }
         } );
