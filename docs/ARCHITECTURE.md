@@ -44,18 +44,18 @@ IntelFaceScan does a 3D scan of a human head with an Intel RealSense D455 (USB�
 
 | Module | Path | Language | Owner (work stream) |
 |---|---|---|---|
-| SDK build + patches | `third_party/librealsense`, `patches/`, `scripts/build-sdk.sh` | CMake | platform |
-| Helper main, IPC, security, USB release | `helper/src/main.cpp`, `helper/src/ipc_*`, `helper/src/security_*`, `helper/src/usb_release.*` | C++ | platform |
-| Capture engine + measurements | `helper/src/capture_engine.*`, `helper/src/probe.*`, `docs/CAMERA.md` | C++ | capture |
+| SDK build + patches | `third_party/librealsense`, `patches/`, `scripts/build-sdk.sh`, `scripts/apply-patches.sh` | CMake | platform |
+| Helper main, IPC, security, USB release, fake camera | `helper/CMakeLists.txt`, `helper/src/main.cpp`, `helper/src/ipc_*`, `helper/src/security_*`, `helper/src/usb_release.*`, `helper/src/fake_engine.*`, `docs/HELPER.md` | C++ | platform |
+| Capture engine + measurements | `helper/src/capture_*`, `helper/src/probe.*`, `helper/tests/*` (capture tests, `make-test-recording`), `docs/CAMERA.md` | C++ | capture |
 | Wire protocol | `Sources/IFSProtocol`, `docs/PROTOCOL.md` | C | shared (frozen) |
 | Camera sources (live/playback) | `Sources/CameraKit/Helper/*` | Swift | platform |
 | Shared types | `Sources/CameraKit/CameraTypes.swift`, `CameraSource.swift`, `Sources/ScanKit/ScanTypes.swift`, `Sources/ReconKit/ReconTypes.swift`, `Sources/ReconKit/CoreBridge.swift`, `Sources/FaceReconCore/include/*.h`, `Sources/FaceReconCore/src/common/*` | Swift/C | shared (frozen) |
 | Guided scan (Vision, state machine, quality, coverage) | `Sources/ScanKit/Guidance/*` | Swift | ui-scan |
 | SwiftUI app (except the 3D viewer) | `Sources/IntelFaceScanApp/*` | Swift | ui-scan |
-| Registration, pose graph, TSDF (Metal), MC, Poisson | `Sources/FaceReconCore/src/{registration,fusion}/*`, `Sources/ReconKit/ReconstructionPipeline.swift`, `Sources/ReconKit/Registration*.swift` | C++/ObjC++/Swift | recon |
+| Registration, pose graph, TSDF (Metal), MC, Poisson | `Sources/FaceReconCore/src/{registration,fusion}/*`, `Sources/ReconKit/ReconstructionPipeline.swift`, `Sources/ReconKit/Registration*.swift`, `Sources/ReconKit/SegmentationHeadMask.swift`, `docs/RECONSTRUCTION.md` | C++/ObjC++/Swift | recon |
 | Mesh cleanup, UV, texture, export, 3D viewer | `Sources/FaceReconCore/src/{mesh,texture,export}/*`, `Sources/ReconKit/{MeshProcessing,Texturing,MeshExport}.swift`, `Sources/IntelFaceScanApp/ModelViewer/*` | C++/Swift | mesh |
-| Datasets, synthetic data, eval, CLI, CI | `Sources/ScanKit/Dataset/*`, `Sources/SyntheticData/*`, `Sources/FaceReconCore/src/eval/*`, `Sources/ifscan/*`, `.github/workflows/*`, `scripts/test.sh` | Swift/C++ | tests |
-| App bundle | `scripts/build.sh`, `scripts/bundle-app.sh` | bash | platform |
+| Datasets, synthetic data, eval, CLI, CI | `Sources/ScanKit/Dataset/*`, `Sources/SyntheticData/*`, `Sources/FaceReconCore/src/eval/*`, `Sources/ifscan/*`, `.github/workflows/*`, `scripts/test.sh`, `docs/TESTING.md` | Swift/C++ | tests |
+| Build, app bundle, DMG | `scripts/build.sh`, `scripts/bundle-app.sh`, `scripts/package.sh`, `scripts/dev-worktree-setup.sh`, `tools/release/*` | bash/C/Swift | platform |
 
 "Frozen" files are the contract between work streams: change them only together with every user of the change.
 Each work stream owns its tests under `Tests/<Module>Tests/` (file names prefixed with the stream's area).
@@ -76,11 +76,12 @@ Each work stream owns its tests under `Tests/<Module>Tests/` (file names prefixe
    3. multi-scale point-to-plane ICP between neighboring keyframes (colored ICP optional; measured comparison in
       docs/RECONSTRUCTION.md),
    4. loop closures between overlapping poses (left↔front↔right, up/down↔front), pose graph optimization,
-   5. TSDF fusion on the GPU (Metal), voxel 0.5–1 mm chosen from the measured noise, marching cubes;
-      screened Poisson as the alternative (compared in docs/RECONSTRUCTION.md),
+   5. TSDF fusion on the GPU (Metal), 0.75 mm voxels by default (chosen from the measured accuracy of 0.5, 0.75
+      and 1 mm; coarser only when the volume would be too large), marching cubes; screened Poisson as the
+      alternative (compared in docs/RECONSTRUCTION.md),
    6. cleanup (small components, detail-preserving smoothing, hole filling, optional decimation),
    7. UV atlas (xatlas) and texture from the most frontal sharp keyframes with blending + vertex colors.
-4. **Result** – 3D preview (SceneKit/RealityKit: texture / vertex colors / shaded / wireframe), export OBJ+MTL+PNG
+4. **Result** – 3D preview (SceneKit: texture / vertex colors / shaded / wireframe), export OBJ+MTL+PNG
    in millimeters (head upright +Y, face toward +Z, origin at the head center), optional PLY and the raw
    session (ScanDataset).
 
@@ -122,16 +123,28 @@ mask/000000.png    8-bit head mask (optional)
 
 ## Build
 
-`scripts/build.sh`: submodules → patched librealsense (`scripts/build-sdk.sh`, ~1 min on an M4 Pro) → helper
-(CMake) → Swift package (`swift build -c release`) → `build/IntelFaceScan.app` (`scripts/bundle-app.sh`: helper
-in `Contents/Helpers`, `librealsense2.dylib` in `Contents/Frameworks`, ad-hoc signature).
-Works with Xcode 27 or the Command Line Tools. Metal shaders are compiled at runtime from source (the CLT have
-no `metal` compiler). `scripts/test.sh` runs the Swift Testing suites (adds the Testing macro plugin path when
-only the Command Line Tools are installed).
+`scripts/build.sh`: tool checks → submodules → patched librealsense (`scripts/build-sdk.sh`) → helper (CMake) →
+Swift package (`swift build -c release`) → `build/IntelFaceScan.app` (`scripts/bundle-app.sh`: helper in
+`Contents/Helpers`, `librealsense2.X.Y.dylib` in `Contents/Frameworks`, `ifscan` in `Contents/MacOS`, ad-hoc
+signature). It prints the time of each step: from a fresh clone on an M3 Ultra (28 cores, Command Line Tools only)
+about 2¼ min – submodules 19 s, librealsense 45 s, helper 5 s, Swift release build 62 s, bundle 2 s; a second run
+without changes takes 3 s.
+
+Requirements: an Apple Silicon Mac, the Command Line Tools (`xcode-select --install`) or Xcode 27 with the macOS
+27.2 SDK, CMake 3.20+ (`brew install cmake`; no other Homebrew package: libusb is built from source and linked
+statically) and network access for the first build (submodules; librealsense downloads libusb, nlohmann/json,
+fastcdr, yaml-cpp and sqlite while configuring). The script checks these up front and names the fix (missing
+tools, an Xcode whose license is not accepted, an SDK older than 27.2). Building works on older macOS 27 releases
+(warning); the app needs 27.2 to run. Metal shaders are compiled at runtime from source (the CLT have no `metal`
+compiler). Release binaries contain no absolute build paths (`-ffile-prefix-map`, no linker debug map).
+`scripts/test.sh` runs the Swift Testing suites (adds the Testing macro plugin path when only the Command Line
+Tools are installed).
 
 ## Testing without a camera
 
 * `SyntheticData` renders a textured synthetic head from known poses with a D455-like noise model; tests
   check registration (pose error), fusion (surface distance to ground truth) and export.
 * `ifscan reconstruct <recording.db3|dataset.ifsdataset> -o head.obj` runs the guided-scan logic offline over a
-  recording (helper in playback mode) and the full reconstruction – the same code path as the app.
+  recording (helper in playback mode) and the full reconstruction – the same code path as the app;
+  `ifscan reconstruct synthetic-camera` does the same live with `SyntheticCameraSource` (the animated synthetic head
+  at 30 fps through Vision), which the app also offers as a camera for UI work. See docs/TESTING.md.
