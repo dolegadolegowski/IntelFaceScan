@@ -57,6 +57,12 @@ struct PixelRect
 // Intersection of 'rect' with the image; nullopt when nothing is left.
 std::optional< PixelRect > clamp_rect( const PixelRect & rect, int image_width, int image_height );
 
+// 'rect' (inside the image) grown about its center to at least min_width x min_height (at most the image) and moved
+// back inside the image where the growth crosses a border. Auto exposure metering a sliver of a few pixels (a face
+// rectangle that mostly left the image) would follow those pixels instead of the face.
+constexpr int k_min_roi_px = 32;
+PixelRect ensure_min_size( const PixelRect & rect, int min_width, int min_height, int image_width, int image_height );
+
 // Maps a rectangle of color pixels onto the depth image: the rectangle's outline is deprojected at distance_m,
 // moved into the depth sensor frame and projected; the result is the bounding box, clamped to the depth image.
 // nullopt when the rectangle does not land on the depth image.

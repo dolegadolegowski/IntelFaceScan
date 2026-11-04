@@ -232,6 +232,21 @@ std::optional< PixelRect > clamp_rect( const PixelRect & r, int image_width, int
     return PixelRect{ int( x0 ), int( y0 ), int( x1 - x0 ), int( y1 - y0 ) };
 }
 
+PixelRect ensure_min_size( const PixelRect & r, int min_width, int min_height, int image_width, int image_height )
+{
+    auto grow = []( int pos, int size, int min_size, int limit, int & out_pos, int & out_size ) {
+        out_size = std::min( std::max( size, min_size ), std::max( limit, 1 ) );
+        // Keep the center (rounded toward the original position), then shift inside [0, limit).
+        long start = long( pos ) - ( long( out_size ) - size ) / 2;
+        start = std::clamp< long >( start, 0, std::max< long >( long( limit ) - out_size, 0 ) );
+        out_pos = int( start );
+    };
+    PixelRect out;
+    grow( r.x, r.width, min_width, image_width, out.x, out.width );
+    grow( r.y, r.height, min_height, image_height, out.y, out.height );
+    return out;
+}
+
 std::optional< PixelRect > map_color_rect_to_depth( const rs2_intrinsics & color,
                                                     const rs2_intrinsics & depth,
                                                     const rs2_extrinsics & color_to_depth,
