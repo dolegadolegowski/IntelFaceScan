@@ -93,22 +93,29 @@ struct PreviewStatus: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        HStack(spacing: 8) {
-            if let kind = model.sourceKind {
-                Chip(text: S.sourceName(kind), symbol: "dot.radiowaves.left.and.right")
+        // In a row when they fit; stacked over the narrow preview of the scan screen, where a row wrapped every label.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) { chips }
+            VStack(alignment: .leading, spacing: 6) { chips }
+        }
+    }
+
+    @ViewBuilder
+    private var chips: some View {
+        if let kind = model.sourceKind {
+            Chip(text: S.sourceName(kind), symbol: "dot.radiowaves.left.and.right")
+        }
+        if model.hasFrames {
+            Chip(text: S.fps(model.stats.displayFPS, model.stats.analysisFPS), symbol: "speedometer")
+        }
+        if let started = model.recordingStartedAt {
+            TimelineView(.periodic(from: started, by: 1)) { context in
+                Chip(text: S.recordingStatus(Int(context.date.timeIntervalSince(started))), symbol: "record.circle",
+                     tint: .red)
             }
-            if model.hasFrames {
-                Chip(text: S.fps(model.stats.displayFPS, model.stats.analysisFPS), symbol: "speedometer")
-            }
-            if let started = model.recordingStartedAt {
-                TimelineView(.periodic(from: started, by: 1)) { context in
-                    Chip(text: S.recordingStatus(Int(context.date.timeIntervalSince(started))), symbol: "record.circle",
-                         tint: .red)
-                }
-            }
-            if model.playbackEnded {
-                Chip(text: S.playbackFinished, symbol: "stop.circle")
-            }
+        }
+        if model.playbackEnded {
+            Chip(text: S.playbackFinished, symbol: "stop.circle")
         }
     }
 }
@@ -120,6 +127,8 @@ struct Chip: View {
 
     var body: some View {
         Label(text, systemImage: symbol)
+            .lineLimit(1)
+            .truncationMode(.middle)
             .font(.caption.weight(.medium))
             .foregroundStyle(tint)
             .padding(.horizontal, 8).padding(.vertical, 4)

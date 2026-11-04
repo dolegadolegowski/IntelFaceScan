@@ -102,13 +102,21 @@ final class AppModel {
     private(set) var recordingStartedAt: Date?
     private(set) var isRecordingBusy = false
     private(set) var statusMessage: String?
-    private(set) var lastSavedURL: URL?
+    /// The file the status message reports (Show in Finder); nil for messages about something else.
+    private(set) var revealableURL: URL?
+    /// File writes in progress (observable; writeTasks holds them for the termination).
+    private(set) var runningWrites = 0
     private(set) var playbackEnded = false
     private(set) var capture: ScanCapture?
+    /// Whether the scan behind `capture` kept the neck and shoulders in its keyframe masks; nil when unknown (a
+    /// dataset). The reconstruction cannot add what the masks cut off.
+    private(set) var captureKeptShoulders: Bool?
     /// The keyframes of an opened dataset: they were accepted by a scan already and can be reconstructed as is.
     private(set) var datasetCapture: ScanCapture?
     private(set) var reconstructionProgress: ReconstructionProgress?
     private(set) var result: ReconstructionResult?
+    /// The reconstruction settings `result` was made with.
+    private(set) var resultOptions: ReconstructionOptions?
     private(set) var isQuitting = false
     var displayMode: ModelDisplayMode = .texture
     var alert: AppAlert?
@@ -139,7 +147,7 @@ final class AppModel {
     @ObservationIgnored private let log = Logger(subsystem: "IntelFaceScan", category: "App")
 
     /// - Parameters:
-    ///   - defaults: where the settings persist; nil keeps them in memory (developer checks).
+    ///   - defaults: where the settings persist; nil keeps them in memory (tests, snapshots).
     ///   - sourceFactory: makes the camera source for a request.
     init(defaults: UserDefaults? = .standard, sourceFactory: @escaping SourceFactory = AppModel.makeSource) {
         self.defaults = defaults
@@ -174,6 +182,19 @@ final class AppModel {
     var canReturnToPreview: Bool { pipeline != nil }
     /// Opening another source would end a scan or abandon a reconstruction, or a source is still connecting.
     var canOpenSource: Bool { !isConnecting && !isQuitting && screen != .scanning && screen != .reconstructing }
+    /// "Keep neck and shoulders" was switched on after a scan that cut them off: it applies from the next scan.
+    var shouldersMissingFromCapture: Bool {
+        settings.keepShoulders && capture != nil && captureKeptShoulders == false && screen != .scanning
+    }
+    /// The depth stream settings cannot change during a scan, nor during a recording: the camera helper refuses to
+    /// change the streams (or to enter advanced mode) while it records, so a change would only show in the sidebar.
+    var depthSettingsLocked: Bool { screen == .scanning || isRecording }
+    /// The reconstruction settings were changed on the result screen: they apply only when the scan is reconstructed
+    /// again (the result screen offers it; otherwise the changed voxel size or surface did nothing until a new scan).
+    var resultSettingsChanged: Bool {
+        guard screen == .result, result != nil, let resultOptions, capture != nil else { return false }
+        return settings.reconstructionOptions != resultOptions
+    }
 
     var previewDisplay: PreviewDisplay {
         PreviewDisplay(mode: settings.previewMode, mirrored: settings.mirrored,
@@ -349,7 +370,7 @@ final class AppModel {
             present(S.cameraError, message: message)
         case .helperExited(let status):
             guard !isQuitting else { return }
-            present(S.helperExited, message: "exit status \(status)")
+            present(S.helperExited, message: S.exitStatus(status))
             detachSource()
         }
     }
@@ -393,7 +414,7 @@ final class AppModel {
         case .finished:
             completeScan()
         case .failed(let message):
-            present(S.error, message: message)
+            present(S.scanFailed, message: message)
             cancelScan()
         default:
             break
@@ -435,6 +456,7 @@ final class AppModel {
         scanController = controller
         scanUpdate = nil
         capture = nil
+        captureKeptShoulders = nil
         result = nil
         pipeline.setController(controller)
         screen = .scanning
@@ -461,6 +483,7 @@ final class AppModel {
     private func completeScan() {
         guard let controller = scanController else { return }
         capture = controller.finish()
+        captureKeptShoulders = scanConfiguration.keepShoulders
         scanController = nil
         if let previewController { pipeline?.setController(previewController) }
         screen = .scanComplete
@@ -484,6 +507,7 @@ final class AppModel {
     func useDatasetCapture() {
         guard let datasetCapture, screen == .preview else { return }
         capture = datasetCapture
+        captureKeptShoulders = nil
         result = nil
         screen = .scanComplete
     }
@@ -519,11 +543,14 @@ final class AppModel {
                 let output = try await Self.runReconstruction(capture, options: options, relay: relay)
                 guard let self, id == self.reconstructionID, !Task.isCancelled else { return }
                 self.result = output
+                self.resultOptions = options
                 self.displayMode = output.texture != nil ? .texture : .vertexColors
                 self.screen = .result
             } catch {
                 guard let self, id == self.reconstructionID else { return }
-                if !Self.isCancellation(error) { self.present(S.reconstructionFailed, error) }
+                if !Self.isCancellation(error) {
+                    self.present(S.reconstructionFailed, message: S.reconstructionError(error))
+                }
                 self.screen = .scanComplete
             }
         }
@@ -611,21 +638,24 @@ final class AppModel {
         nextTaskID += 1
         let id = nextTaskID
         writeTasks[id] = Task.detached { _ = await work.value }
+        runningWrites += 1
         let outcome = await work.value
         writeTasks[id] = nil
+        runningWrites -= 1
         switch outcome {
         case .success(let files):
-            lastSavedURL = files.first
-            showStatus(S.saved(files.map(\.lastPathComponent).joined(separator: ", ")))
+            showStatus(S.saved(files.map(\.lastPathComponent).joined(separator: ", ")), reveal: files.first)
         case .failure(let error):
-            present(S.saveFailed, error)
+            // MeshExport's own errors (an empty mesh, a bad texture) in the UI language too.
+            present(S.saveFailed, message: S.reconstructionError(error))
         }
     }
 
-    var isWriting: Bool { !writeTasks.isEmpty }
+    /// A save is running (the save buttons wait for it: a second write to the same files would interleave).
+    var isWriting: Bool { runningWrites > 0 }
 
-    func revealLastSaved() {
-        guard let url = lastSavedURL else { return }
+    func revealSavedFile() {
+        guard let url = revealableURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
@@ -681,8 +711,7 @@ final class AppModel {
     private func recordingStopped(_ outcome: Result<Int64, Error>, url: URL?) {
         switch outcome {
         case .success(let bytes):
-            lastSavedURL = url
-            showStatus(S.recordingSaved(bytes, url?.lastPathComponent ?? ""))
+            showStatus(S.recordingSaved(bytes, url?.lastPathComponent ?? ""), reveal: url)
         case .failure(let error):
             present(S.recordingFailed, error)
         }
@@ -770,13 +799,17 @@ final class AppModel {
         }
     }
 
-    func showStatus(_ message: String) {
+    /// Shows a message for a few seconds; `reveal` is the saved file it reports, offered by Show in Finder. A message
+    /// about something else must not offer the file of an earlier one.
+    func showStatus(_ message: String, reveal: URL? = nil) {
         statusMessage = message
+        revealableURL = reveal
         statusTask?.cancel()
         statusTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(6))
             guard !Task.isCancelled else { return }
             self?.statusMessage = nil
+            self?.revealableURL = nil
         }
     }
 
@@ -870,14 +903,15 @@ extension AppModel {
         self.capture = capture
         self.reconstructionProgress = progress
         self.result = result
+        self.resultOptions = result != nil ? settings.reconstructionOptions : nil
         self.stats = stats
         self.recordingStartedAt = recordingStartedAt
         self.datasetCapture = datasetCapture
     }
 
-    /// Developer checks: the number of detached sources whose shutdown is still running.
+    /// Tests: the number of detached sources whose shutdown is still running.
     var pendingSourceShutdowns: Int { closingTasks.count }
-    /// Developer checks: whether the frame pipeline currently uploads and analyzes frames.
+    /// Tests: whether the frame pipeline currently uploads and analyzes frames.
     var isPipelineActive: Bool? { pipeline?.isActive }
 }
 #endif

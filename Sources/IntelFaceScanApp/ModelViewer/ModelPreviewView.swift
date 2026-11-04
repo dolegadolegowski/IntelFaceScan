@@ -12,14 +12,7 @@ enum ModelDisplayMode: String, CaseIterable, Identifiable {
     case texture, vertexColors, shaded, wireframe
     var id: String { rawValue }
 
-    var title: String {
-        switch self {
-        case .texture: return "Texture"
-        case .vertexColors: return "Vertex Colors"
-        case .shaded: return "Shaded"
-        case .wireframe: return "Wireframe"
-        }
-    }
+    var title: String { S.displayModeName(self) }
 
     var systemImage: String {
         switch self {
@@ -52,7 +45,7 @@ struct ModelPreviewView: View {
 }
 
 /// Size in millimeters, triangle count and texture size.
-private struct ModelInfoLabel: View {
+struct ModelInfoLabel: View {
     let result: ReconstructionResult
     let displayMode: ModelDisplayMode
 
@@ -79,26 +72,23 @@ private struct ModelInfoLabel: View {
         return result.mesh.positions.isEmpty ? .zero : (hi - lo) * 1000
     }
 
-    private var sizeText: String {
-        let s = size
-        return String(format: "%.0f × %.0f × %.0f mm (W × H × D)", s.x, s.y, s.z)
-    }
+    private var sizeText: String { S.modelSize(size) }
 
-    private var detailText: String {
-        var parts = ["\(result.mesh.triangleCount.formatted()) triangles"]
-        if let t = result.texture { parts.append("texture \(t.width)×\(t.height)") }
+    private var detailText: String { Self.detailText(result) }
+
+    private var note: String? { Self.note(result, displayMode: displayMode) }
+
+    /// Triangle count and texture size.
+    static func detailText(_ result: ReconstructionResult) -> String {
+        var parts = [S.triangles(result.mesh.triangleCount)]
+        if let t = result.texture { parts.append(S.textureSize(t.width, t.height)) }
         return parts.joined(separator: " · ")
     }
 
-    private var note: String? {
-        switch displayMode {
-        case .texture where result.texture == nil || result.mesh.uvs.isEmpty:
-            return "No texture: showing \(result.mesh.colors.isEmpty ? "shading" : "vertex colors")"
-        case .vertexColors where result.mesh.colors.isEmpty:
-            return "No vertex colors: showing shading"
-        default:
-            return nil
-        }
+    /// Why another mode than the chosen one is shown (the scene's own fallback rule).
+    static func note(_ result: ReconstructionResult, displayMode: ModelDisplayMode) -> String? {
+        let content = PreviewScene.Content(result)
+        return S.displayFallback(requested: displayMode, shown: content.effectiveMode(displayMode))
     }
 }
 
@@ -146,11 +136,11 @@ private struct SceneModelView: NSViewRepresentable {
     }
 
     private func addResetButton(to view: SCNView, coordinator: Coordinator) {
-        let image = NSImage(systemSymbolName: "scope", accessibilityDescription: "Reset the view") ?? NSImage()
+        let image = NSImage(systemSymbolName: "scope", accessibilityDescription: S.resetView) ?? NSImage()
         let button = NSButton(image: image, target: coordinator, action: #selector(Coordinator.resetCamera(_:)))
         button.bezelStyle = .regularSquare
         button.isBordered = true
-        button.toolTip = "Reset the view"
+        button.toolTip = S.resetView
         button.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(button)
         NSLayoutConstraint.activate([

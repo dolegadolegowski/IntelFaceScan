@@ -29,10 +29,38 @@ struct PreviewFingerprint: Equatable {
 }
 
 final class PreviewScene {
+    /// What a result can show besides shading: a texture needs one UV per vertex, colors one color per vertex.
+    struct Content: Equatable {
+        var hasTexture: Bool
+        var hasColors: Bool
+
+        init(hasTexture: Bool, hasColors: Bool) {
+            self.hasTexture = hasTexture
+            self.hasColors = hasColors
+        }
+
+        init(_ result: ReconstructionResult) {
+            let mesh = result.mesh
+            let n = mesh.vertexCount
+            hasTexture = result.texture != nil && mesh.uvs.count == n && n > 0
+            hasColors = mesh.colors.count == n && n > 0
+        }
+
+        /// The mode actually shown for a request (texture and colors fall back when the result has none).
+        func effectiveMode(_ mode: ModelDisplayMode) -> ModelDisplayMode {
+            switch mode {
+            case .texture: return hasTexture ? .texture : (hasColors ? .vertexColors : .shaded)
+            case .vertexColors: return hasColors ? .vertexColors : .shaded
+            case .shaded, .wireframe: return mode
+            }
+        }
+    }
+
     let scene = SCNScene()
     let cameraNode = SCNNode()
-    let hasTexture: Bool
-    let hasColors: Bool
+    let content: Content
+    var hasTexture: Bool { content.hasTexture }
+    var hasColors: Bool { content.hasColors }
     /// Bounds of the model in millimeters (export frame).
     let boundsMin: SIMD3<Float>
     let boundsMax: SIMD3<Float>
@@ -93,8 +121,8 @@ final class PreviewScene {
                                          primitiveCount: indices.count / 3, bytesPerIndex: 4)
 
         var plainSources = [positionSource, normalSource]
-        hasTexture = result.texture != nil && mesh.uvs.count == n && n > 0
-        if hasTexture {
+        content = Content(result)
+        if content.hasTexture {
             // SceneKit texture coordinates have their origin at the top-left of the image, OBJ UVs at the bottom-left.
             var uvs = [Float](repeating: 0, count: 2 * n)
             for i in 0 ..< n { uvs[2 * i] = mesh.uvs[i].x; uvs[2 * i + 1] = 1 - mesh.uvs[i].y }
@@ -104,8 +132,7 @@ final class PreviewScene {
         }
         plainGeometry = SCNGeometry(sources: plainSources, elements: [element])
 
-        hasColors = mesh.colors.count == n && n > 0
-        if hasColors {
+        if content.hasColors {
             // Float components: SceneKit does not normalize 8-bit vertex colors.
             var rgba = [Float](repeating: 1, count: 4 * n)
             for i in 0 ..< n {
@@ -149,14 +176,7 @@ final class PreviewScene {
         setUpCameraAndLights()
     }
 
-    /// The mode actually shown for a request (texture and colors fall back when the result has none).
-    func effectiveMode(_ mode: ModelDisplayMode) -> ModelDisplayMode {
-        switch mode {
-        case .texture: return hasTexture ? .texture : (hasColors ? .vertexColors : .shaded)
-        case .vertexColors: return hasColors ? .vertexColors : .shaded
-        case .shaded, .wireframe: return mode
-        }
-    }
+    func effectiveMode(_ mode: ModelDisplayMode) -> ModelDisplayMode { content.effectiveMode(mode) }
 
     func apply(_ requested: ModelDisplayMode) {
         let mode = effectiveMode(requested)

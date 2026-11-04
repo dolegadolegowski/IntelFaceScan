@@ -40,6 +40,7 @@ struct ScanSummaryView: View {
                 }
                 if !keyframes.isEmpty {
                     Button(S.saveSession, systemImage: "square.and.arrow.down") { Task { await model.saveSession() } }
+                        .disabled(model.isWriting)
                     Button {
                         model.reconstruct()
                     } label: {
@@ -66,7 +67,7 @@ struct ReconstructionView: View {
                 Text(progress.map { S.stageName($0.stage) } ?? "")
                     .font(.headline)
             } currentValueLabel: {
-                Text(progress?.message ?? "").foregroundStyle(.secondary)
+                Text(S.progressDetail(progress?.message ?? "")).foregroundStyle(.secondary)
             }
             .frame(maxWidth: 520)
             .animation(.easeOut(duration: 0.2), value: progress?.fraction ?? 0)
@@ -89,9 +90,13 @@ struct ResultView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                 VStack(alignment: .leading, spacing: 14) {
-                    Text(S.result).font(.title2.weight(.semibold))
+                    HStack {
+                        Text(S.result).font(.title2.weight(.semibold))
+                        Spacer()
+                        if model.isWriting { ProgressView().controlSize(.small) }
+                    }
                     Picker(S.displayMode, selection: $model.displayMode) {
-                        ForEach(ModelDisplayMode.allCases) { Text(S.displayModeName($0.rawValue)).tag($0) }
+                        ForEach(ModelDisplayMode.allCases) { Text($0.title).tag($0) }
                     }
                     VStack(alignment: .leading, spacing: 8) {
                         Button { Task { await model.saveOBJ() } } label: {
@@ -108,8 +113,20 @@ struct ResultView: View {
                         .disabled(model.capture == nil)
                     }
                     .controlSize(.large)
-                    ReportView(report: result.report)
-                    Spacer()
+                    .disabled(model.isWriting)
+                    if model.resultSettingsChanged {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(S.resultSettingsChanged).font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button(S.reconstructAgain, systemImage: "arrow.triangle.2.circlepath") { model.reconstruct() }
+                        }
+                    }
+                    // The report grows with the pipeline's notes: it scrolls instead of pushing the panel out of a
+                    // window at its minimum height.
+                    ScrollView(.vertical) {
+                        ReportView(report: result.report)
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
                     if model.canReturnToPreview {
                         Button(S.newScan, systemImage: "arrow.counterclockwise") { model.backToPreview() }
                     }
@@ -152,7 +169,7 @@ struct ReportView: View {
                 Divider()
                 Text(S.reportNotes).font(.caption.weight(.semibold))
                 ForEach(Array(report.notes.enumerated()), id: \.offset) { _, note in
-                    Text("• " + note).font(.caption).foregroundStyle(.secondary)
+                    Text("• " + S.reportNote(note)).font(.caption).foregroundStyle(.secondary)
                 }
             }
         }

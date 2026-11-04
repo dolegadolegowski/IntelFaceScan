@@ -142,9 +142,11 @@ private struct SettingsSections: View {
             }
             if scanning {
                 Text(S.settingsLockedDuringScan).font(.caption).foregroundStyle(.secondary)
+            } else if model.isRecording {
+                Text(S.settingsLockedDuringRecording).font(.caption).foregroundStyle(.secondary)
             }
         }
-        .disabled(scanning)
+        .disabled(model.depthSettingsLocked)
 
         Section(S.filters) {
             Toggle(S.spatialFilter, isOn: $model.settings.spatialFilter)
@@ -162,6 +164,9 @@ private struct SettingsSections: View {
 
         Section(S.scanSection) {
             Toggle(S.keepShoulders, isOn: $model.settings.keepShoulders)
+            if model.shouldersMissingFromCapture {
+                Text(S.shouldersNeedNewScan).font(.caption).foregroundStyle(.secondary)
+            }
             Toggle(S.diagonalPoses, isOn: $model.settings.diagonalPoses)
             Stepper(value: $model.settings.framesPerPose, in: 1 ... 6) {
                 LabeledContent(S.framesPerPose, value: "\(model.settings.framesPerPose)")
@@ -189,7 +194,7 @@ private struct SettingsSections: View {
             Toggle(S.landmarks, isOn: $model.settings.showLandmarks)
             Toggle(S.autoExposureFace, isOn: $model.settings.autoExposureOnFace)
             Button(S.resetSettings, role: .destructive) { model.resetSettings() }
-                .disabled(scanning)
+                .disabled(model.depthSettingsLocked)
         }
     }
 }

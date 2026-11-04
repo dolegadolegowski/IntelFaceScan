@@ -27,7 +27,7 @@ enum PreviewRendererError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .noDevice: return "No Metal device."
+        case .noDevice: return S.noMetalDevice
         case .setup(let m): return m
         }
     }
@@ -60,7 +60,7 @@ final class PreviewRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     /// - Parameter device: nil = the system default Metal device.
     init(device preferred: MTLDevice?) throws {
         guard let device = preferred ?? MTLCreateSystemDefaultDevice() else { throw PreviewRendererError.noDevice }
-        guard let queue = device.makeCommandQueue() else { throw PreviewRendererError.setup("No Metal command queue.") }
+        guard let queue = device.makeCommandQueue() else { throw PreviewRendererError.setup(S.noMetalQueue) }
         self.device = device
         self.queue = queue
         do {
@@ -71,7 +71,7 @@ final class PreviewRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
             pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
         } catch {
-            throw PreviewRendererError.setup("Preview shaders: \(error.localizedDescription)")
+            throw PreviewRendererError.setup(S.previewShaders(error.localizedDescription))
         }
         super.init()
     }
