@@ -248,6 +248,54 @@ struct TextureBakingTests {
         #expect(dark == 0)
     }
 
+    /// Colors of surface no frame sees are diffused from the seen region over the surface, not over the seam-split
+    /// atlas mesh: a chart without any seen vertex must not fall back to the global mean color (in a head scan:
+    /// skin-colored patches in the hair at the open back). Vertex colors and the baked texture of an unwrapped mesh
+    /// must equal those of the same surface without seams.
+    @Test func unseenColorsDoNotDependOnUVSeams() throws {
+        let whole = MeshFactory.icosphere(level: 3, radius: TexturedSphere.radius)
+        let split = try Self.unwrappedSphere(level: 3, size: 512)
+        #expect(split.vertexCount > whole.vertexCount)
+        // One view from the front: the back half of the sphere is unseen.
+        let views = [SyntheticView.render(pose: TexturedSphere.surroundingPoses()[0])]
+        let store = FrameStore(views)
+        var params = fr_texture_params()
+        fr_texture_params_default(&params)
+        func colorize(_ mesh: ReconMesh) throws -> ReconMesh {
+            var m = mesh
+            try m.withCoreMesh { core in
+                try store.withPointers { frames, poses, count in
+                    try check(fr_colorize_vertices(core, frames, poses, nil, count, &params))
+                }
+            }
+            return m
+        }
+        let wholeColored = try colorize(whole), splitColored = try colorize(split)
+        var reference: [SIMD3<Float>: SIMD3<Float>] = [:]
+        for (p, c) in zip(wholeColored.positions, wholeColored.colors) { reference[p] = SIMD3<Float>(c) }
+        // Unseen = facing away from the camera at -Z (surroundingPoses()[0] looks at the sphere from there).
+        let unseen = split.positions.indices.filter { split.positions[$0].z > 0.02 }
+        #expect(unseen.count > split.vertexCount / 4)
+        var vertexError: Float = 0
+        for i in split.positions.indices {
+            let expected = try #require(reference[split.positions[i]])
+            vertexError = max(vertexError, simd_reduce_max(simd_abs(SIMD3<Float>(splitColored.colors[i]) - expected)))
+        }
+        let texture = try Self.bake(split, views: views, size: 512)
+        var textureError: Float = 0
+        texture.rgba.withUnsafeBytes { raw in
+            let rgba = raw.bindMemory(to: UInt8.self).baseAddress!
+            for i in unseen {
+                let c = TextureMeasure.sample(rgba, width: texture.width, height: texture.height, uv: split.uvs[i])
+                textureError += simd_reduce_max(simd_abs(c - reference[split.positions[i]]!))
+            }
+        }
+        textureError /= Float(unseen.count)
+        print("unseen colors: max vertex color difference split vs whole \(vertexError), mean texture difference \(textureError)")
+        #expect(vertexError <= 1)
+        #expect(textureError < 3)
+    }
+
     @Test func bakingRejectsBadInput() throws {
         let plain = MeshFactory.icosphere(level: 2)
         let core = try plain.makeCoreMesh()

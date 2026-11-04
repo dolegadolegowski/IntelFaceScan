@@ -202,6 +202,22 @@ enum MeshMeasure {
         return sum
     }
 
+    /// Triangles folded over: the triangle's normal points against the surrounding surface (the sum of the
+    /// area-weighted vertex normals of its corners). Zero-area triangles do not count.
+    static func foldedTriangles(_ mesh: ReconMesh) -> Int {
+        var vertexNormal = [SIMD3<Float>](repeating: .zero, count: mesh.vertexCount)
+        var faceNormal = [SIMD3<Float>](repeating: .zero, count: mesh.triangleCount)
+        for t in 0 ..< mesh.triangleCount {
+            let i = (0 ..< 3).map { Int(mesh.indices[3 * t + $0]) }
+            faceNormal[t] = simd_cross(mesh.positions[i[1]] - mesh.positions[i[0]], mesh.positions[i[2]] - mesh.positions[i[0]])
+            for v in i { vertexNormal[v] += faceNormal[t] }
+        }
+        return (0 ..< mesh.triangleCount).filter { t in
+            let around = (0 ..< 3).reduce(SIMD3<Float>.zero) { $0 + vertexNormal[Int(mesh.indices[3 * t + $1])] }
+            return simd_length_squared(faceNormal[t]) > 0 && simd_dot(faceNormal[t], around) <= 0
+        }.count
+    }
+
     static func rms(_ values: [Float]) -> Float {
         guard !values.isEmpty else { return 0 }
         return sqrt(values.reduce(0) { $0 + $1 * $1 } / Float(values.count))

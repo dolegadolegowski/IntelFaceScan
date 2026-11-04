@@ -8,6 +8,10 @@ import Foundation
 
 public enum MeshExport {
     /// Writes <name>.obj, <name>.mtl and <name>.png (when textured); returns the written files.
+    ///
+    /// A textured OBJ carries its color in the texture only: ModelIO and SceneKit (QuickLook, Preview, Xcode) multiply
+    /// the diffuse texture by the vertex colors of "v x y z r g b" lines, which renders the head about twice as dark
+    /// and oversaturated. `includeVertexColors` applies to untextured OBJs (and to the PLY).
     @discardableResult
     public static func writeOBJ(_ result: ReconstructionResult, to url: URL,
                                 options: ExportOptions = ExportOptions()) throws -> [URL] {
@@ -15,6 +19,7 @@ public enum MeshExport {
         try checkExportable(mesh, url: url)
         let textured = options.includeTexture && result.texture != nil && !mesh.uvs.isEmpty
         var coreOptions = exportOptions(result, options, writeUVs: textured)
+        if textured { coreOptions.write_colors = 0 }
         let core = try mesh.makeCoreMesh()
         defer { fr_mesh_free(core) }
         var texture: UnsafeMutablePointer<fr_texture>?

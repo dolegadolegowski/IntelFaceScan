@@ -400,14 +400,28 @@ bool vertex_colors( const fr_mesh & m, const float * normals, const view_set & v
 {
     const uint32_t n = m.vertex_count;
     rgb.assign( size_t( n ) * 3, 0.f );
+    // Vertices split on UV seams are one surface point: only the lowest-numbered copy (the representative) is colored,
+    // and the diffusion into unseen regions runs on the welded topology, so it crosses chart borders. On the split
+    // mesh a chart without any seen vertex would otherwise fall back to the global mean color (skin-colored patches
+    // in the hair at the open back of a head scan).
+    std::vector< uint32_t > rep, welded;
+    const uint32_t * idx = m.indices;
+    if( m.uvs && n > 1 )
+    {
+        rep = coincident_representatives( m.positions, n );
+        welded = remap_indices( m.indices, size_t( m.triangle_count ) * 3, rep );
+        idx = welded.data();
+    }
+    auto is_representative = [&]( size_t v ) { return rep.empty() || rep[v] == v; };
     std::vector< uint8_t > seen( n, 0 );
     parallel_for( n, 2048, [&]( size_t begin, size_t end ) {
         for( size_t v = begin; v < end; ++v )
-            seen[v] = vs.blend_color( vec3::load( m.positions + v * 3 ), vec3::load( normals + v * 3 ), &rgb[v * 3] );
+            if( is_representative( v ) )
+                seen[v] = vs.blend_color( vec3::load( m.positions + v * 3 ), vec3::load( normals + v * 3 ), &rgb[v * 3] );
     } );
 
     // Unseen vertices take the mean color of their already colored neighbors, wave by wave from the seen region.
-    const csr nb = vertex_neighbors( n, m.indices, m.triangle_count );
+    const csr nb = vertex_neighbors( n, idx, m.triangle_count );
     std::vector< uint32_t > frontier, next;
     for( uint32_t v = 0; v < n; ++v )
         if( ! seen[v] )
@@ -469,9 +483,13 @@ bool vertex_colors( const fr_mesh & m, const float * normals, const view_set & v
     for( int c = 0; c < 3; ++c )
         mean[c] = colored ? mean[c] / double( colored ) : 128.0;
     for( uint32_t v = 0; v < n; ++v )
-        if( ! seen[v] )
+        if( ! seen[v] && is_representative( v ) )
             for( int c = 0; c < 3; ++c )
                 rgb[size_t( v ) * 3 + c] = float( mean[c] );
+    // Seam copies take their representative's color.
+    for( uint32_t v = 0; v < uint32_t( rep.size() ); ++v )
+        if( rep[v] != v )
+            std::copy_n( &rgb[size_t( rep[v] ) * 3], 3, &rgb[size_t( v ) * 3] );
     return colored > 0;
 }
 
