@@ -489,6 +489,42 @@ import Testing
         #expect(absolute.0 == .capturing(.left), "the absolute target is out of reach")
     }
 
+    @Test func toleranceIsWiderAcrossThePoseDirection() {
+        func within(_ pose: ScanPose, _ yaw: Float, _ pitch: Float) -> Bool {
+            let delta = ScanController.poseDelta(pose: pose, current: SIMD2(yaw, pitch), frontOffset: .zero, overshootDeg: 15)
+            return ScanController.withinTolerance(delta, pose: pose, along: 8, across: 12)
+        }
+        // Left: 8 degrees short of the target along yaw, 12 degrees of pitch across it, the ellipse in between.
+        #expect(within(.left, 37.5, 0) && !within(.left, 36.5, 0))
+        #expect(within(.left, 45, 11.5) && !within(.left, 45, 12.5) && within(.left, 55, -11.5))
+        #expect(within(.left, 39, 7) && !within(.left, 38, 8))
+        // Down: yaw is across.
+        #expect(within(.down, 11, -25) && !within(.down, 13, -25) && !within(.down, 0, -16))
+        // The front pose has no direction: a circle of 8 degrees.
+        #expect(within(.front, 0, 7.5) && !within(.front, 0, 8.5) && !within(.front, 8.5, 0))
+        // Equal semi-axes: the old circle.
+        let delta = ScanController.poseDelta(pose: .left, current: SIMD2(45, 9), frontOffset: .zero, overshootDeg: 15)
+        #expect(!ScanController.withinTolerance(delta, pose: .left, along: 8, across: 8))
+    }
+
+    @Test func pitchReadOnTheSidePosesDoesNotBlockThem() async {
+        // Vision reads 45 degrees of yaw as 9 degrees of pitch too (the synthetic head reads +6..+11 at 640x400): the
+        // side poses must still complete. An 8-degree circle around the target never accepted them.
+        func run(across: Float) async -> (ScanPhase?, Int) {
+            var configuration = ScanConfiguration.testOffline
+            configuration.perpendicularToleranceDeg = across
+            let (controller, tracker) = makeController(configuration)
+            var sim = ScanSimulation()
+            sim.user.visionPitchPerYaw = 0.2
+            await sim.run(controller, tracker: tracker, maxFrames: 900)
+            return (sim.updates.last?.phase, controller.finish().keyframes.count)
+        }
+        let relaxed = await run(across: 12)
+        #expect(relaxed.0 == .finished && relaxed.1 == 15)
+        let circle = await run(across: 8)
+        #expect(circle.0 == .capturing(.left))
+    }
+
     @Test func overestimatedTurnsAreAccepted() async {
         // Vision overestimates yaw by 20%: left reads 54 degrees, beyond the 8 degree tolerance but inside the
         // overshoot window.

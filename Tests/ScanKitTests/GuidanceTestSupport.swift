@@ -167,6 +167,8 @@ struct SimulatedUser {
     /// Vision error model: observed = true * scale + bias.
     var visionYawScale: Float = 1
     var visionYawBias: Float = 0
+    /// Vision reads yaw partly as pitch: observed pitch += this * yaw.
+    var visionPitchPerYaw: Float = 0
     /// Per-frame reading errors (nil: exact readings).
     var jitter: VisionJitter?
 
@@ -185,7 +187,8 @@ struct SimulatedUser {
 
     mutating func observation(faceRect: CGRect, confidence: Float = 0.95) -> HeadObservation {
         let e = jitter?.next() ?? .zero
-        return HeadObservation(pose: HeadPose(yaw: yaw * visionYawScale + visionYawBias + e.x, pitch: pitch + e.y,
+        return HeadObservation(pose: HeadPose(yaw: yaw * visionYawScale + visionYawBias + e.x,
+                                              pitch: pitch + visionPitchPerYaw * yaw + e.y,
                                               roll: roll + e.z, confidence: confidence),
                                faceRect: faceRect, landmarks: [SIMD2(Float(faceRect.midX), Float(faceRect.midY))],
                                personMask: nil)

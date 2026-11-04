@@ -13,8 +13,14 @@ public struct ScanConfiguration: Sendable, Hashable {
     public var poses: [ScanPose] = ScanPose.required
     /// Keyframes accepted per pose.
     public var framesPerPose: Int = 3
-    /// Maximum angular distance (degrees) from a pose's target.
+    /// Maximum angular distance (degrees) from a pose's target, along the direction of the target (the front pose:
+    /// in every direction).
     public var angleTolerance: Float = 8
+    /// Maximum deviation (degrees) across the direction of a pose's target: pitch on the side poses, yaw on up and
+    /// down. A side pose a little up or down still shows that side of the head (the keyframe keeps its measured
+    /// pose), and Vision reads large yaw partly as pitch: the synthetic head at yaw +44..+52 reads pitch +4..+10 at
+    /// 640x400 (mean ~+8), which an 8-degree circle rarely accepted. The tolerance is the ellipse of both semi-axes.
+    public var perpendicularToleranceDeg: Float = 12
     /// Targets of the other poses are relative to the person's own frontal pose (mean of the front keyframes):
     /// Vision's yaw/pitch of a face looking straight at the camera is biased per person by a few degrees.
     public var targetsRelativeToFront: Bool = true
@@ -473,7 +479,7 @@ public final class ScanController: @unchecked Sendable {
             update.instructionKind = .moveCloser; update.rejection = .tooFar
             return .none
         }
-        if error > c.angleTolerance {
+        if !Self.withinTolerance(delta, pose: pose, along: c.angleTolerance, across: c.perpendicularToleranceDeg) {
             work.holdSince = nil
             update.instructionKind = .turn(pose, yawDelta: delta.x, pitchDelta: delta.y)
             return .none
@@ -579,6 +585,18 @@ public final class ScanController: @unchecked Sendable {
             remaining = magnitude + overshootDeg - along              // turned too far: turn back
         }
         return perpendicular + remaining * direction
+    }
+
+    /// Whether a remaining turn (poseDelta) is within the tolerance ellipse: semi-axis `along` in the direction of the
+    /// pose's target and `across` perpendicular to it; a circle of radius `along` for the front pose.
+    static func withinTolerance(_ delta: SIMD2<Float>, pose: ScanPose, along: Float, across: Float) -> Bool {
+        let target = SIMD2(pose.target.yaw, pose.target.pitch)
+        let magnitude = simd_length(target)
+        guard magnitude > 0, along > 0, across > 0 else { return simd_length(delta) <= along }
+        let direction = target / magnitude
+        let a = simd_dot(delta, direction) / along
+        let p = simd_length(delta - simd_dot(delta, direction) * direction) / across
+        return a * a + p * p <= 1
     }
 
     private func commit(_ decision: Decision, update: inout ScanUpdate, generation: UInt64, t: Double) {
