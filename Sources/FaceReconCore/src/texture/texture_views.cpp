@@ -5,6 +5,8 @@
 #include "texture_views.h"
 
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
+#include <Eigen/SparseCholesky>
 
 #include <string>
 
@@ -297,7 +299,8 @@ bool view_set::blend_color( const vec3 & p, const vec3 & n, float rgb[3], float 
     return true;
 }
 
-void estimate_gains( const float * positions, const float * normals, uint32_t n, view_set & vs )
+void estimate_gains( const float * positions, const float * normals, uint32_t n, const uint8_t * synthesized,
+                     view_set & vs )
 {
     const size_t F = vs.views.size();
     if( F < 2 || n == 0 )
@@ -320,6 +323,8 @@ void estimate_gains( const float * positions, const float * normals, uint32_t n,
         for( size_t i = begin; i < end; ++i )
         {
             const size_t v = i * stride;
+            if( synthesized && synthesized[v] )
+                continue;
             const vec3 p = vec3::load( positions + v * 3 ), nrm = vec3::load( normals + v * 3 );
             const int count = vs.evaluate( p, nrm, s, max_views );
             for( int a = 0; a < count; ++a )
@@ -396,12 +401,13 @@ void estimate_gains( const float * positions, const float * normals, uint32_t n,
             vs.views[i].gain[k] = float( std::clamp( std::exp( x( Eigen::Index( i ), k ) - mean( k ) ), 1.0 / 3.0, 3.0 ) );
 }
 
-bool vertex_colors( const fr_mesh & m, const float * normals, const view_set & vs, std::vector< float > & rgb )
+bool vertex_colors( const fr_mesh & m, const float * normals, const view_set & vs, const uint8_t * synthesized,
+                    std::vector< float > & rgb )
 {
     const uint32_t n = m.vertex_count;
     rgb.assign( size_t( n ) * 3, 0.f );
     // Vertices split on UV seams are one surface point: only the lowest-numbered copy (the representative) is colored,
-    // and the diffusion into unseen regions runs on the welded topology, so it crosses chart borders. On the split
+    // and the interpolation into unseen regions runs on the welded topology, so it crosses chart borders. On the split
     // mesh a chart without any seen vertex would otherwise fall back to the global mean color (skin-colored patches
     // in the hair at the open back of a head scan).
     std::vector< uint32_t > rep, welded;
@@ -416,65 +422,157 @@ bool vertex_colors( const fr_mesh & m, const float * normals, const view_set & v
     std::vector< uint8_t > seen( n, 0 );
     parallel_for( n, 2048, [&]( size_t begin, size_t end ) {
         for( size_t v = begin; v < end; ++v )
-            if( is_representative( v ) )
+            if( is_representative( v ) && ! ( synthesized && synthesized[v] ) )
                 seen[v] = vs.blend_color( vec3::load( m.positions + v * 3 ), vec3::load( normals + v * 3 ), &rgb[v * 3] );
     } );
-
-    // Unseen vertices take the mean color of their already colored neighbors, wave by wave from the seen region.
     const csr nb = vertex_neighbors( n, idx, m.triangle_count );
-    std::vector< uint32_t > frontier, next;
+
+    // Unseen representatives, and whether their connected unseen region touches a seen vertex.
+    std::vector< int32_t > unknown( n, -1 );
+    std::vector< uint32_t > unknowns;
     for( uint32_t v = 0; v < n; ++v )
-        if( ! seen[v] )
-            for( uint32_t k = nb.begin( v ); k < nb.end( v ); ++k )
-                if( seen[nb.data[k]] )
-                {
-                    frontier.push_back( v );
-                    break;
-                }
-    std::vector< uint8_t > queued( n, 0 );
-    for( uint32_t v : frontier )
-        queued[v] = 1;
-    while( ! frontier.empty() )
+        if( ! seen[v] && is_representative( v ) && nb.size( v ) > 0 )
+        {
+            unknown[v] = int32_t( unknowns.size() );
+            unknowns.push_back( v );
+        }
+    std::vector< uint8_t > anchored( unknowns.size(), 0 );
     {
-        std::vector< float > colors( frontier.size() * 3, 0.f );
-        for( size_t i = 0; i < frontier.size(); ++i )
-        {
-            const uint32_t v = frontier[i];
-            int count = 0;
-            for( uint32_t k = nb.begin( v ); k < nb.end( v ); ++k )
-                if( seen[nb.data[k]] )
+        std::vector< uint32_t > stack;
+        for( uint32_t v = 0; v < n; ++v )
+            if( seen[v] )
+                for( uint32_t k = nb.begin( v ); k < nb.end( v ); ++k )
                 {
-                    for( int c = 0; c < 3; ++c )
-                        colors[i * 3 + c] += rgb[size_t( nb.data[k] ) * 3 + c];
-                    ++count;
+                    const int32_t u = unknown[nb.data[k]];
+                    if( u >= 0 && ! anchored[u] )
+                    {
+                        anchored[u] = 1;
+                        stack.push_back( nb.data[k] );
+                    }
                 }
-            for( int c = 0; c < 3; ++c )
-                colors[i * 3 + c] /= float( std::max( count, 1 ) );
-        }
-        next.clear();
-        for( size_t i = 0; i < frontier.size(); ++i )
+        while( ! stack.empty() )
         {
-            const uint32_t v = frontier[i];
-            std::copy_n( &colors[i * 3], 3, &rgb[size_t( v ) * 3] );
-            seen[v] = 1;
-        }
-        for( uint32_t v : frontier )
+            const uint32_t v = stack.back();
+            stack.pop_back();
             for( uint32_t k = nb.begin( v ); k < nb.end( v ); ++k )
             {
-                const uint32_t w = nb.data[k];
-                if( ! seen[w] && ! queued[w] )
+                const int32_t u = unknown[nb.data[k]];
+                if( u >= 0 && ! anchored[u] )
                 {
-                    queued[w] = 1;
-                    next.push_back( w );
+                    anchored[u] = 1;
+                    stack.push_back( nb.data[k] );
                 }
             }
-        frontier.swap( next );
+        }
+    }
+    // Border values: the seen colors within three rings of the unseen regions, averaged with their seen neighbors three
+    // times (the colors at a scan's border come from grazing views; a blur keeps their noise out of the interpolation).
+    std::vector< float > border = rgb;
+    {
+        std::vector< uint8_t > band( n, 0 );
+        std::vector< uint32_t > frontier;
+        for( uint32_t u : unknowns )
+            for( uint32_t k = nb.begin( u ); k < nb.end( u ); ++k )
+                if( seen[nb.data[k]] && ! band[nb.data[k]] )
+                {
+                    band[nb.data[k]] = 1;
+                    frontier.push_back( nb.data[k] );
+                }
+        std::vector< uint32_t > members = frontier;
+        for( int ring = 1; ring < 3; ++ring )
+        {
+            std::vector< uint32_t > next;
+            for( uint32_t v : frontier )
+                for( uint32_t k = nb.begin( v ); k < nb.end( v ); ++k )
+                    if( seen[nb.data[k]] && ! band[nb.data[k]] )
+                    {
+                        band[nb.data[k]] = 1;
+                        next.push_back( nb.data[k] );
+                    }
+            members.insert( members.end(), next.begin(), next.end() );
+            frontier.swap( next );
+        }
+        std::vector< float > blurred( members.size() * 3 );
+        for( int it = 0; it < 3; ++it )
+        {
+            for( size_t i = 0; i < members.size(); ++i )
+            {
+                const uint32_t v = members[i];
+                float sum[3] = { border[size_t( v ) * 3], border[size_t( v ) * 3 + 1], border[size_t( v ) * 3 + 2] };
+                int count = 1;
+                for( uint32_t k = nb.begin( v ); k < nb.end( v ); ++k )
+                    if( seen[nb.data[k]] )
+                    {
+                        for( int c = 0; c < 3; ++c )
+                            sum[c] += border[size_t( nb.data[k] ) * 3 + c];
+                        ++count;
+                    }
+                for( int c = 0; c < 3; ++c )
+                    blurred[i * 3 + c] = sum[c] / float( count );
+            }
+            for( size_t i = 0; i < members.size(); ++i )
+                std::copy_n( &blurred[i * 3], 3, &border[size_t( members[i] ) * 3] );
+        }
+    }
+    // Harmonic interpolation (uniform graph Laplacian) over the anchored unseen vertices.
+    {
+        std::vector< int32_t > col( unknowns.size(), -1 );
+        int count = 0;
+        for( size_t i = 0; i < unknowns.size(); ++i )
+            if( anchored[i] )
+                col[i] = count++;
+        if( count > 0 )
+        {
+            using triplet = Eigen::Triplet< double >;
+            std::vector< triplet > t;
+            Eigen::MatrixXd B = Eigen::MatrixXd::Zero( count, 3 );
+            for( size_t i = 0; i < unknowns.size(); ++i )
+            {
+                if( col[i] < 0 )
+                    continue;
+                const uint32_t v = unknowns[i];
+                double degree = 0;
+                for( uint32_t k = nb.begin( v ); k < nb.end( v ); ++k )
+                {
+                    const uint32_t w = nb.data[k];
+                    if( seen[w] )
+                    {
+                        for( int c = 0; c < 3; ++c )
+                            B( col[i], c ) += border[size_t( w ) * 3 + c];
+                        ++degree;
+                    }
+                    else if( unknown[w] >= 0 && col[unknown[w]] >= 0 )
+                    {
+                        t.emplace_back( col[i], col[unknown[w]], -1.0 );
+                        ++degree;
+                    }
+                }
+                t.emplace_back( col[i], col[i], degree );
+            }
+            Eigen::SparseMatrix< double > A( count, count );
+            A.setFromTriplets( t.begin(), t.end() );
+            Eigen::SimplicialLDLT< Eigen::SparseMatrix< double > > ldlt( A );
+            Eigen::MatrixXd x;
+            bool ok = ldlt.info() == Eigen::Success;
+            if( ok )
+            {
+                x = ldlt.solve( B );
+                ok = ldlt.info() == Eigen::Success && x.allFinite();
+            }
+            for( size_t i = 0; i < unknowns.size(); ++i )
+                if( col[i] >= 0 && ok )
+                {
+                    for( int c = 0; c < 3; ++c )
+                        rgb[size_t( unknowns[i] ) * 3 + c] = float( std::clamp( x( col[i], c ), 0.0, 255.0 ) );
+                    seen[unknowns[i]] = 2;
+                }
+        }
     }
     // Components no frame sees at all get the mean color.
     double mean[3] = { 0, 0, 0 };
     size_t colored = 0;
     for( uint32_t v = 0; v < n; ++v )
-        if( seen[v] )
+        if( seen[v] == 1 )
         {
             for( int c = 0; c < 3; ++c )
                 mean[c] += rgb[size_t( v ) * 3 + c];

@@ -31,6 +31,10 @@ typedef struct fr_texture_params {
     float occlusion_epsilon_m;   /* depth test tolerance against each frame's depth map, e.g. 0.004 */
     int32_t dilate_px;           /* fill the atlas gutter by dilation, e.g. 8 */
     int32_t exposure_compensation; /* 1 = per-frame gain normalization before blending */
+    /* Nullable, one byte per mesh vertex: non-zero marks surface that was synthesized, not measured (hole filling,
+       the closed back of a head; fr_fill_report.first_new_vertex). The frames are not projected onto it (its
+       position is a guess); it takes a smooth interpolation of the surrounding measured colors instead. */
+    const uint8_t *synthesized;
 } fr_texture_params;
 
 void fr_texture_params_default(fr_texture_params *params);
