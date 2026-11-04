@@ -59,9 +59,12 @@ enum class ReadResult
     error,     // I/O error or protocol violation (message in 'error'); the connection must be closed
 };
 
-// Reads one message from the app. Enforces the framing rules: valid header, JSON object within the size limit,
-// no payload (no command carries one), a descriptor only on the first byte of an IFS_CMD_RECORD_START message.
-// Every unexpected descriptor is closed.
+// Deepest array/object nesting accepted in a command body (the deepest command, CONFIGURE, needs 3).
+constexpr int kMaxJsonDepth = 32;
+
+// Reads one message from the app. Enforces the framing rules: valid header, JSON object within the size limit and
+// kMaxJsonDepth, no payload (no command carries one), a descriptor only on the first byte of an IFS_CMD_RECORD_START
+// message. Every unexpected descriptor is closed.
 ReadResult read_message( int sock, InMessage & out, std::string & error );
 
 // One message to the app: header + JSON + payload segments that point into memory kept alive by 'keepalive'.

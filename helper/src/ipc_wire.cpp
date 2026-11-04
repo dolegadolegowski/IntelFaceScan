@@ -134,6 +134,38 @@ Recv recv_exact( int sock, uint8_t * buf, size_t size, std::vector< int > * firs
     }
     return Recv::ok;
 }
+
+// True when no array or object in 'text' is nested deeper than 'max_depth' (brackets inside strings do not count).
+// nlohmann::json parses iteratively, but copying, comparing or dumping a value recurses once per level: a 256 KiB
+// body of '[' (about 100000 levels) overflows the stack of whoever copies it (the CONFIGURE handler does), and a
+// crash of the root helper leaves the camera captured. Applied to the raw text so nothing deep is ever built.
+bool nesting_within( const std::string & text, int max_depth )
+{
+    int depth = 0;
+    bool in_string = false, escaped = false;
+    for( char ch : text )
+    {
+        if( in_string )
+        {
+            if( escaped )
+                escaped = false;
+            else if( ch == '\\' )
+                escaped = true;
+            else if( ch == '"' )
+                in_string = false;
+        }
+        else if( ch == '"' )
+            in_string = true;
+        else if( ch == '[' || ch == '{' )
+        {
+            if( ++depth > max_depth )
+                return false;
+        }
+        else if( ch == ']' || ch == '}' )
+            --depth;
+    }
+    return true;
+}
 }  // namespace
 
 ReadResult read_message( int sock, InMessage & out, std::string & error )
@@ -182,6 +214,11 @@ ReadResult read_message( int sock, InMessage & out, std::string & error )
     if( r != Recv::ok )
         return ReadResult::error;
 
+    if( ! nesting_within( json, kMaxJsonDepth ) )
+    {
+        error = "message body nested deeper than " + std::to_string( kMaxJsonDepth ) + " levels";
+        return ReadResult::error;
+    }
     out.body = nlohmann::json::parse( json, nullptr, false );
     if( out.body.is_discarded() || ! out.body.is_object() )
     {

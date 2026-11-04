@@ -24,7 +24,8 @@ IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> --playback <f
 IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> --fake [--fake-row-padding <bytes>]
 IntelFaceScanHelper --probe ...        camera measurements (capture module, run with sudo)
 IntelFaceScanHelper --release [-w]     hand RealSense cameras back to macOS (USB re-enumeration; -w waits 5 s for
-                                       the system drivers), same as tools/release/rs-macos-release
+                                       the system drivers), same as tools/release/rs-macos-release; its lines go
+                                       to stderr, which the administrator launch shows when the release fails
 IntelFaceScanHelper --help | --version
 ```
 
@@ -58,7 +59,8 @@ app shows it: `do shell script` reports it as the error message); afterwards eve
 6. End: on `QUIT` (answered first), socket EOF, a protocol violation, the parent exiting, or SIGINT/SIGTERM/SIGHUP the
    helper ends a running recording (still delivered), calls `engine->shutdown()`, in live mode re-enumerates the
    RealSense devices and waits up to 5 s for the macOS drivers, sends `BYE {"reason"}` if the connection is intact,
-   flushes for at most 2 s, and exits 0.
+   flushes for at most 2 s, and exits 0. An internal error (an exception escaping the session loop) takes the same
+   way out and exits 70.
 
 Waits are bounded except camera commands themselves: a command in progress (advanced mode re-enumeration, a recording
 copy) is never interrupted, because killing the process in the middle of a camera command can hang the firmware until
@@ -90,7 +92,9 @@ Measured with the fake camera (M-series Mac, 1280×800 RGB8 + aligned Z16, 5.1 M
 median 2.5–4 ms from the helper creating a frameset to the decoded `CameraFrame` in the app, about 1 ms of app CPU
 per frameset (the reader reuses one receive buffer and copies the planes out once).
 
-Command validation is strict: every command needs an unsigned `request_id` (otherwise the connection is closed),
+Command validation is strict: every command needs an unsigned `request_id` (otherwise the connection is closed), a
+body nested deeper than 32 arrays/objects closes the connection (checked on the raw text before parsing: copying a
+deeply nested value recurses once per level and would overflow the stack),
 fields other than the documented ones are an error reply (`unknown field 'x'`), types are checked (`x` of SET_ROI must
 be an integer), unknown command types get an error reply, and each command gets exactly one REPLY. `CONFIGURE` and
 `SET_FILTERS` pass the object without `request_id` to the engine, which validates the content.
@@ -127,7 +131,11 @@ written against it works with the camera unchanged).
   not exit gets SIGTERM, then SIGKILL; the root helper cannot be signalled by the app and exits on its own once the
   socket is closed.
 * `HelperLocator.swift` – `CameraSources.locateHelper()`: the bundle, then (development) `$IFS_HELPER_PATH`,
-  `../Helpers` next to the executable, or `build/helper/IntelFaceScanHelper` above it. Sources created with the
+  `../Helpers` next to the executable, or `build/helper/IntelFaceScanHelper` above it. The search above the
+  executable can leave the repository, so a candidate there is only taken when it and every folder above it belong to
+  root or the user and nobody else can write to them (sticky folders such as `/Users/Shared`, and the wheel/admin
+  groups, excepted): otherwise any local user could plant `/Users/Shared/build/helper/IntelFaceScanHelper` for a
+  checkout below `/Users/Shared` and have it run as root after the password prompt. Sources created with the
   default `bundledHelperURL` fall back to it when there is no bundle (`swift run`).
 
 Frame and event streams end at `shutdown()`. When the helper ends unexpectedly the streams stay open, the events
@@ -171,9 +179,9 @@ with `SMAppService` and code-signing requirements on both sides – planned for 
 |---|---|
 | The root helper connects to an attacker's socket | path must be absolute and canonical; every component is opened with `O_NOFOLLOW` from `/`; the final directory must be owned by `--uid` with mode exactly 0700; the socket itself must be a socket owned by `--uid`; the connection is made relative to the verified directory descriptor (`fchdir` + relative `sun_path`, no TOCTOU on the path); then peer uid = `--uid` and peer pid = `--parent-pid` |
 | Something else connects to the app | the socket directory is private to the user; one connection is accepted and listening stops; peer uid (0 for live) and executable identity (`proc_pidpath`, device + inode) are checked |
-| Hostile messages | header validated by the shared C code (magic, version, flags, 256 KiB JSON, 64 MiB payload); commands may not carry payloads; JSON must be an object; unknown fields and wrong types are errors; at most 1024 queued commands (16 MiB); every exception of a command becomes its error reply, and nothing thrown in the IPC layer reaches a librealsense thread |
-| File system access as root | the helper never opens, creates or deletes a path from the app. A recording goes to `mkdtemp` inside root's own Darwin temporary directory (`/var/folders/zz/…/T`, verified root-owned and not accessible to others; fallback `/private/var/run/IntelFaceScanHelper`), and is copied into the descriptor the app opened as itself (`SCM_RIGHTS`, only with `RECORD_START`, only on its first byte, must be a regular file open for writing; any other descriptor is closed and the connection dropped), then the spool is removed without following links |
-| Environment and inherited state | the app starts the helper with `env -i` (no `DYLD_*` or other variables reach root); the helper still clears its environment to a fixed `PATH`/`HOME`, sets `umask 077`, closes every inherited descriptor above 2 and points stdin at `/dev/null`; no `system()`, no shell, no `exec` |
+| Hostile messages | header validated by the shared C code (magic, version, flags, 256 KiB JSON, 64 MiB payload); commands may not carry payloads; JSON must be an object nested at most 32 levels deep; unknown fields and wrong types are errors; at most 1024 queued commands (16 MiB); every exception of a command becomes its error reply, and nothing thrown in the IPC layer reaches a librealsense thread |
+| File system access as root | the helper never opens, creates or deletes a path from the app. A recording goes to `mkdtemp` inside root's own Darwin temporary directory (`/var/folders/zz/…/T`, verified root-owned and not accessible to others; fallback `/private/var/run/IntelFaceScanHelper`), and is copied into the descriptor the app opened as itself (`SCM_RIGHTS`, only with `RECORD_START`, only on its first byte, must be a regular file without set-user-ID/set-group-ID bits (root writing does not clear them, unlike any other writer) open for writing; any other descriptor is closed and the connection dropped), then the spool is removed without following links; spools left by a helper that died mid-recording (untouched for a day) are removed when the next recording starts |
+| Environment and inherited state | the app starts the helper with `env -i` (no `DYLD_*` or other variables reach root); the helper still clears its environment to a fixed `PATH`/`HOME`, sets `umask 077`, closes every inherited descriptor above 2 (from the kernel's list of its descriptors, so also those above a lowered `RLIMIT_NOFILE`) and points stdin at `/dev/null`; no `system()`, no shell, no `exec` |
 | Unprivileged modes used to gain or misuse privileges | playback and fake refuse to run as root and require `--uid` to be the caller |
 | Helper left running as root | it exits when the app exits (kqueue on the parent pid), when the socket closes, on QUIT and on SIGINT/SIGTERM/SIGHUP (the signals are ignored and read from the kqueue, so no work happens in a signal handler and the default action cannot skip the USB release) |
 | Camera left unusable | USB re-enumeration on every exit path except SIGKILL; recovery with `--release` / `rs-macos-release`; patched librealsense bounds USB waits |
@@ -185,5 +193,8 @@ with `SMAppService` and code-signing requirements on both sides – planned for 
 `$IFS_HELPER_PATH`, e.g. the bundled one; skipped with a message when absent): full sessions through
 `FakeCameraSource`, padded rows, the recording hand-over, lost connections, hardware reset, the socket path and peer
 checks on both sides, strict command validation, protocol violations, backpressure (a stalled reader loses old
-framesets but no reply) and throughput. The codec and the PROTOCOL.md JSON have unit tests of their own. The live mode
+framesets but no reply) and throughput. `HelperSecurityTests` attack the boundary: deeply nested bodies, set-id
+recording destinations, integer overflow in commands, a descriptor inherited above the soft limit, the administrator
+command's quoting run through `osascript` and `sh` (quotes, backslashes, newlines, shell syntax, emoji), and where a
+helper may be taken from. The codec and the PROTOCOL.md JSON have unit tests of their own. The live mode
 needs a camera and the password; it shares everything except `create_live` and the USB release with the fake mode.

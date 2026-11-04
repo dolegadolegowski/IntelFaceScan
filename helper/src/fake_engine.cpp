@@ -342,8 +342,9 @@ public:
     {
         std::lock_guard< std::mutex > lock( mutex_ );
         check_alive();
-        if( width <= 0 || height <= 0 || x < 0 || y < 0 || x + width > settings_.color.width
-            || y + height > settings_.color.height )
+        // 64-bit sums: x + width of two valid ints can overflow int.
+        if( width <= 0 || height <= 0 || x < 0 || y < 0 || int64_t( x ) + width > settings_.color.width
+            || int64_t( y ) + height > settings_.color.height )
             throw std::runtime_error( "auto-exposure ROI outside the color image" );
     }
 

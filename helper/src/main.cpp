@@ -261,6 +261,35 @@ ifs::HelperService::EngineFactory make_factory( const Options & o )
     return nullptr;
 }
 
+// Runs commands until something ends the session; returns why.
+std::string session_loop( ifs::Lifecycle & life, ifs::Connection & connection, ifs::HelperService & service )
+{
+    uint64_t reported_drops = 0;
+    for( ;; )
+    {
+        if( life.wait( 5000 ) == ifs::Lifecycle::Event::terminate )
+            return life.reason();
+        while( auto command = connection.pop_command() )
+        {
+            service.handle( *command );
+            if( service.quit_requested() )
+                return "the app asked the helper to quit";
+            // A command can take seconds (advanced mode, recordings): do not start another one after the app is gone.
+            if( life.wait( 0 ) == ifs::Lifecycle::Event::terminate )
+                return life.reason();
+        }
+        if( connection.broken() )
+            return connection.broken_reason();
+        const uint64_t drops = connection.framesets_dropped();
+        if( drops > reported_drops )
+        {
+            service.log( "debug", std::to_string( drops - reported_drops )
+                                      + " framesets dropped because the app read them slower than they arrived" );
+            reported_drops = drops;
+        }
+    }
+}
+
 int run_session( const Options & o )
 {
     // Signals are ignored and recorded from here on, before anything that could be interrupted.
@@ -296,67 +325,74 @@ int run_session( const Options & o )
     ifs::Connection connection( std::move( sock ), [&life] { life.wake(); } );
     connection.start();
     ifs::HelperService service( connection, o.mode, std::move( factory ), o.real_time );
-    service.send_hello();
-    service.create_engine();
 
+    // From here on every way out, an exception included (e.g. bad_alloc while framing a reply), goes through the
+    // shutdown sequence: a root helper that skipped it would leave the camera captured until it is re-plugged.
     std::string reason;
-    uint64_t reported_drops = 0;
-    for( ;; )
+    int status = 0;
+    try
     {
-        if( life.wait( 5000 ) == ifs::Lifecycle::Event::terminate )
-        {
-            reason = life.reason();
-            break;
-        }
-        bool stop = false;
-        while( auto command = connection.pop_command() )
-        {
-            service.handle( *command );
-            if( service.quit_requested() )
-            {
-                reason = "the app asked the helper to quit";
-                stop = true;
-                break;
-            }
-            // A command can take seconds (advanced mode, recordings): do not start another one after the app is gone.
-            if( life.wait( 0 ) == ifs::Lifecycle::Event::terminate )
-            {
-                reason = life.reason();
-                stop = true;
-                break;
-            }
-        }
-        if( stop )
-            break;
-        if( connection.broken() )
-        {
-            reason = connection.broken_reason();
-            break;
-        }
-        const uint64_t drops = connection.framesets_dropped();
-        if( drops > reported_drops )
-        {
-            service.log( "debug", std::to_string( drops - reported_drops )
-                                      + " framesets dropped because the app read them slower than they arrived" );
-            reported_drops = drops;
-        }
+        service.send_hello();
+        service.create_engine();
+        reason = session_loop( life, connection, service );
+    }
+    catch( const std::exception & e )
+    {
+        reason = std::string( "internal error: " ) + e.what();
+        status = kExitSoftware;
+    }
+    catch( ... )
+    {
+        reason = "internal error";
+        status = kExitSoftware;
     }
 
-    service.log( "info", "helper shutting down: " + reason );
-    service.shutdown_engine();
+    auto log = [&service]( const char * level, const std::string & line ) {
+        try
+        {
+            service.log( level, line );
+        }
+        catch( ... )
+        {
+        }
+    };
+    log( "info", "helper shutting down: " + reason );
+    try
+    {
+        service.shutdown_engine();
+    }
+    catch( ... )
+    {
+        status = kExitSoftware;
+    }
     connection.drop_pending_framesets();
     if( o.mode == ifs::HelperMode::live )
     {
-        ifs::UsbReleaseResult r = ifs::release_realsense_devices(
-            kReleaseWaitMs, [&service]( const std::string & line ) { service.log( "info", line ); } );
+        // After shutdown_engine(): the librealsense context is gone, nothing uses the device any more.
+        ifs::UsbReleaseResult r;
+        try
+        {
+            r = ifs::release_realsense_devices( kReleaseWaitMs,
+                                                [&log]( const std::string & line ) { log( "info", line ); } );
+        }
+        catch( ... )
+        {
+            r.failed = 1;
+        }
         if( r.failed )
-            service.log( "warning", "the camera could not be handed back to macOS; re-plug it or run "
-                                    "'sudo IntelFaceScanHelper --release'" );
+            log( "warning", "the camera could not be handed back to macOS; re-plug it or run "
+                            "'sudo IntelFaceScanHelper --release'" );
     }
-    if( ! connection.broken() )
-        connection.send( IFS_MSG_BYE, { { "reason", reason } } );
+    try
+    {
+        if( ! connection.broken() )
+            connection.send( IFS_MSG_BYE, { { "reason", reason } } );
+    }
+    catch( ... )
+    {
+    }
     connection.finish( kByeTimeout );
-    return 0;
+    return status;
 }
 }  // namespace
 
