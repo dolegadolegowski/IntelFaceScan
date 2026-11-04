@@ -368,10 +368,10 @@ private func writeTimedDataset(spacingMs: Double) throws -> (URL, ScanCapture) {
     #expect(count == 3)
     // A paced source never delivers frame k before k * 150 ms. Pairwise gaps are not checked: on a loaded machine
     // (the reconstruction suites run in parallel) the consumer may wake late for one frame and early for the next.
-    // The upper bound only catches timestamps paced in the wrong unit (seconds would be 300 s): a 3-core CI runner
-    // with the reconstruction suites running took more than 3 s.
+    // The upper bound only catches timestamps paced in the wrong unit (seconds would be 300 s): on a 3-core CI runner
+    // the first Vision requests of the other suites held every thread for 54 s before this consumer ran.
     #expect(arrivals[2] - startedAt > 0.27, "the last frame arrived \(arrivals[2] - startedAt) s after start")
-    #expect(arrivals[2] - startedAt < 30, "the last frame arrived \(arrivals[2] - startedAt) s after start")
+    #expect(arrivals[2] - startedAt < 150, "the last frame arrived \(arrivals[2] - startedAt) s after start")
 
     // Restarting replays from the first frame; looping continues past the end.
     await source.shutdown()
