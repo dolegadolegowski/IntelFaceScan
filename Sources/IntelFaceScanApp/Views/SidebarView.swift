@@ -162,6 +162,9 @@ private struct SettingsSections: View {
 
         Section(S.scanSection) {
             Toggle(S.keepShoulders, isOn: $model.settings.keepShoulders)
+            if model.shouldersMissingFromCapture {
+                Text(S.shouldersNeedNewScan).font(.caption).foregroundStyle(.secondary)
+            }
             Toggle(S.diagonalPoses, isOn: $model.settings.diagonalPoses)
             Stepper(value: $model.settings.framesPerPose, in: 1 ... 6) {
                 LabeledContent(S.framesPerPose, value: "\(model.settings.framesPerPose)")

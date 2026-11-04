@@ -108,6 +108,10 @@ enum S {
     static var maxDistance: String { tr("Maximum distance", "Maksymalna odległość") }
     static var scanSection: String { tr("Scan", "Skan") }
     static var keepShoulders: String { tr("Keep neck and shoulders", "Zachowaj szyję i ramiona") }
+    static var shouldersNeedNewScan: String {
+        tr("The current scan cut off the neck and shoulders: scan again to keep them.",
+           "Obecny skan odciął szyję i ramiona: zeskanuj ponownie, aby je zachować.")
+    }
     static var diagonalPoses: String { tr("Diagonal poses (optional)", "Pozy ukośne (opcjonalne)") }
     static var framesPerPose: String { tr("Frames per pose", "Klatki na pozę") }
     static var reconstructionSection: String { tr("Reconstruction", "Rekonstrukcja") }

@@ -106,6 +106,9 @@ final class AppModel {
     private(set) var revealableURL: URL?
     private(set) var playbackEnded = false
     private(set) var capture: ScanCapture?
+    /// Whether the scan behind `capture` kept the neck and shoulders in its keyframe masks; nil when unknown (a
+    /// dataset). The reconstruction cannot add what the masks cut off.
+    private(set) var captureKeptShoulders: Bool?
     /// The keyframes of an opened dataset: they were accepted by a scan already and can be reconstructed as is.
     private(set) var datasetCapture: ScanCapture?
     private(set) var reconstructionProgress: ReconstructionProgress?
@@ -175,6 +178,10 @@ final class AppModel {
     var canReturnToPreview: Bool { pipeline != nil }
     /// Opening another source would end a scan or abandon a reconstruction, or a source is still connecting.
     var canOpenSource: Bool { !isConnecting && !isQuitting && screen != .scanning && screen != .reconstructing }
+    /// "Keep neck and shoulders" was switched on after a scan that cut them off: it applies from the next scan.
+    var shouldersMissingFromCapture: Bool {
+        settings.keepShoulders && capture != nil && captureKeptShoulders == false && screen != .scanning
+    }
 
     var previewDisplay: PreviewDisplay {
         PreviewDisplay(mode: settings.previewMode, mirrored: settings.mirrored,
@@ -436,6 +443,7 @@ final class AppModel {
         scanController = controller
         scanUpdate = nil
         capture = nil
+        captureKeptShoulders = nil
         result = nil
         pipeline.setController(controller)
         screen = .scanning
@@ -462,6 +470,7 @@ final class AppModel {
     private func completeScan() {
         guard let controller = scanController else { return }
         capture = controller.finish()
+        captureKeptShoulders = scanConfiguration.keepShoulders
         scanController = nil
         if let previewController { pipeline?.setController(previewController) }
         screen = .scanComplete
@@ -485,6 +494,7 @@ final class AppModel {
     func useDatasetCapture() {
         guard let datasetCapture, screen == .preview else { return }
         capture = datasetCapture
+        captureKeptShoulders = nil
         result = nil
         screen = .scanComplete
     }

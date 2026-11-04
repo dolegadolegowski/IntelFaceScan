@@ -62,6 +62,30 @@ struct AppModelLifecycleTests {
         #expect(log.sources.allSatisfy { $0.shutdownFinished != nil }, "a source was left running")
     }
 
+    /// "Keep neck and shoulders" switched on after a scan that cut them off cannot bring them back (the keyframe
+    /// masks end at the chin): the sidebar says so until the next scan.
+    @Test func shouldersSwitchedOnAfterScan() async throws {
+        let (model, _) = AppTest.makeModel()
+        try await AppTest.openAndWaitForFrames(model, .synthetic)
+        model.startScan()
+        model.finishScan()
+        #expect(model.screen == .scanComplete)
+        #expect(model.captureKeptShoulders == false)
+        #expect(!model.shouldersMissingFromCapture)
+        model.settings.keepShoulders = true
+        #expect(model.shouldersMissingFromCapture, "the setting looks applied to a scan without shoulders")
+        model.settings.keepShoulders = false
+        #expect(!model.shouldersMissingFromCapture, "switching it off does apply (the reconstruction cuts the neck)")
+        model.settings.keepShoulders = true
+        model.backToPreview()
+        model.startScan()
+        #expect(!model.shouldersMissingFromCapture, "no hint while scanning")
+        model.finishScan()
+        #expect(model.captureKeptShoulders == true)
+        #expect(!model.shouldersMissingFromCapture)
+        await model.closeSource()
+    }
+
     /// No source can be opened while a scan runs (it would end the scan) or while a reconstruction runs.
     @Test func noSwitchDuringScan() async throws {
         let (model, log) = AppTest.makeModel()
