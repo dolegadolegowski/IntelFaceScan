@@ -120,8 +120,10 @@ enum HelperLauncher {
             + " </dev/null >/dev/null"
     }
 
-    static func appleScriptSource(command: String, prompt: String) -> String {
-        "do shell script \(appleScriptQuote(command)) with administrator privileges with prompt \(appleScriptQuote(prompt))"
+    /// `privileged: false` only exists so tests can run the exact quoting through AppleScript and sh without a prompt.
+    static func appleScriptSource(command: String, prompt: String, privileged: Bool = true) -> String {
+        guard privileged else { return "do shell script \(appleScriptQuote(command))" }
+        return "do shell script \(appleScriptQuote(command)) with administrator privileges with prompt \(appleScriptQuote(prompt))"
     }
 
     static func checkExecutable(_ helper: URL) throws {
