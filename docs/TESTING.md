@@ -15,16 +15,23 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
 
 * `scripts/test.sh` wraps `swift test`. With only the Command Line Tools installed it adds the Swift Testing macro
   plugin path that SwiftPM does not find on its own; with Xcode it is plain `swift test`. XCTest is not used.
-* Timing on an M3 Ultra (28 cores, Command Line Tools): about 1.5 min from a clean `.build` (about 40 s of it
-  building), about 1 min when nothing changed. The test targets run one after another: ReconKitTests ~30 s
-  (end-to-end reconstructions), ScanKitTests ~15 s (Vision), FaceReconCoreTests ~8 s, CameraKitTests ~5 s.
+* The four test targets run one after another, as separate test runs (the tests of a target in parallel). Timing
+  on an M3 Ultra (28 cores, Command Line Tools), November 2026: ScanKitTests 94 tests ~15 s (Vision),
+  ReconKitTests 64 tests ~55–63 s (the longest single test sets it: the combined-imperfections reconstruction of
+  `Pipeline robustness`), FaceReconCoreTests 79 tests ~7 s, CameraKitTests 70 tests ~30 s (most of it
+  `Helper playback backpressure`); about 2 min in all when nothing changed, about 2.5 min from a clean debug build
+  (about 40 s of it building).
 * Skipped, with a reason (`➜ Test ... skipped: "..."`), never failed: benchmarks and measurement sweeps that are
   run by hand (`PipelineBenchmark`, `Mesh performance`, `ReconCaptureRange`, ...), `endToEndRecordingsReconstruct`
   without `IFS_TEST_RECORDINGS`, the `CoreAvailability` placeholder tests (the core is integrated), and the
   CameraKit helper integration tests when `build/helper/IntelFaceScanHelper` is not built (or `IFS_HELPER_PATH` is
-  not set). `IFS_HELPER` is the variable `ifscan` and the recording tests use.
+  not set); the playback ones also need `build/helper/tests/make-test-recording` (`-DIFS_HELPER_TESTS=ON`).
+  `IFS_HELPER` is the variable `ifscan` and the recording tests use.
 * C++ capture engine tests of the helper (synthetic recordings, no camera): build the helper with
-  `-DIFS_HELPER_TESTS=ON`, then `ctest --test-dir build/helper --output-on-failure`.
+  `-DIFS_HELPER_TESTS=ON`, then `ctest --test-dir build/helper --output-on-failure` (one ctest entry running the 25
+  `capture-tests`, ~25 s; the benchmark is skipped unless run as `build/helper/tests/capture-tests bench`).
+* The SDK bookkeeping of the build scripts (moving between versions of `patches/`, the SDK's input stamp):
+  `scripts/test-build-scripts.sh`, against a stand-in librealsense in a temporary folder (no network, ~10 s).
 * Do not run anything with `sudo` for tests; only the live camera needs administrator rights.
 
 | Target / file | What it checks |
@@ -33,13 +40,15 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
 | `ScanKitTests/DatasetRoundTripTests` | `ScanDataset`: bit-exact pixels (every 16-bit depth value), all metadata, documented snake_case layout, 16-bit grayscale depth PNGs, broken manifests, path traversal, refusing to replace foreign folders, `DatasetCameraSource` offline/real-time/loop replay |
 | `ScanKitTests/SyntheticCameraSourceTests` | `SyntheticCameraSource`: lifecycle and events, 30 fps pacing, configured resolution, threshold filter, the pose animation |
 | `ReconKitTests/SyntheticScanTests` | synthetic ground truth: depth equals an independent brute-force ray cast of the ground-truth mesh, back-projected depth lies on the surface, noise statistics, invalid pixels at silhouettes, `HeadPose` sign conventions, determinism, closed outward mesh |
-| `ReconKitTests/CLIArgumentTests`, `CLIToolTests` | `ifscan` parsing (31 invalid command lines), commands run in-process, exit codes, outputs checked before any work (unwritable paths, `--save-dataset` onto the input), ground-truth evaluation of a scan that does not start with the frontal pose (world frames aligned), `synthetic-camera` stopping at `--time-limit`, OBJ dialects |
+| `ReconKitTests/CLIArgumentTests`, `CLIToolTests` | `ifscan` parsing (32 invalid command lines), commands run in-process, exit codes, outputs checked before any work (unwritable paths, `--save-dataset` onto the input), ground-truth evaluation of a scan that does not start with the frontal pose (world frames aligned), `synthetic-camera` stopping at `--time-limit`, OBJ dialects |
 | `ReconKitTests/EndToEndSyntheticTests` | synthetic 1280×800 scan → `ReconstructionPipeline` (decimated to 60k triangles before texturing) → rotation error mean < 1°, worst frame < 1.5°, head misalignment < 5 mm, surface distance mean < 1 mm and p95 < 2.5 mm, export frame upright; the same through `ifscan reconstruct`, and the exported OBJ measured through `--report` matches the report's distance. Enabled by `CoreAvailability` (the core is integrated); recordings from `IFS_TEST_RECORDINGS` |
 
 The other suites belong to the modules' work streams: `CameraKitTests` (wire format, JSON, the helper in fake-camera
-mode end to end), `ScanKitTests/Guidance*` (head tracker, masks, quality, scan controller),
-`FaceReconCoreTests/Recon*`, `Mesh*`, `Texture*`, `ExportFile*` and `ReconKitTests/Pipeline*`, `MeshProcessing*`,
-`Export*`, `TextureBake*` (registration, fusion, mesh processing, texturing, export).
+mode end to end, session lifecycle, frame broadcasting, playback backpressure, the helper's security checks),
+`ScanKitTests/Guidance*` (head tracker, masks, quality, scan controller), `FaceReconCoreTests/Recon*`, `Mesh*`,
+`Texture*`, `ExportFile*` and `ReconKitTests/Pipeline*` (with the registration check and robustness to real-data
+imperfections), `MeshProcessing*`, `Export*`, `TextureBake*` (registration, fusion, mesh processing, texturing,
+export).
 
 `CoreAvailability` (SyntheticData) probes the core with arguments a real implementation rejects without side
 effects and reports which stages still return `FR_ERR_NOT_IMPLEMENTED`; use it for any test that needs a stage
@@ -110,7 +119,7 @@ $IFSCAN synth -o /tmp/hard.ifsdataset --poses all --noise 3 --seed 7 --gt-mesh /
 $IFSCAN info /tmp/head.ifsdataset                       # device, configuration, per-frame pose and quality
 $IFSCAN reconstruct /tmp/head.ifsdataset -o /tmp/head.obj --ply /tmp/head.ply --report /tmp/report.json
 $IFSCAN reconstruct ~/IntelFaceScanData/recordings/anna-0001.db3 -o /tmp/anna.obj --save-dataset /tmp/anna.ifsdataset
-$IFSCAN reconstruct synthetic-camera -o /tmp/live.obj    # the app's live flow without the UI (~2-3 min)
+$IFSCAN reconstruct synthetic-camera -o /tmp/live.obj    # the app's live flow without the UI (~4.5 min; release ~2.5)
 $IFSCAN eval /tmp/head.obj --gt /tmp/head.ifsdataset/ground_truth.obj --report /tmp/report.json --symmetric
 ```
 
@@ -119,8 +128,9 @@ $IFSCAN eval /tmp/head.obj --gt /tmp/head.ifsdataset/ground_truth.obj --report /
   runs `ReconstructionPipeline` and `MeshExport` – the app's code path. The input `synthetic-camera` scans the
   animated `SyntheticCameraSource` head in real time through Vision and the guided scan instead. Options: `--ply`,
   `--voxel-mm`, `--method tsdf|poisson`, `--keep-shoulders`, `--icp colored|geometric` (default geometric =
-  point-to-plane), `--triangles` (decimate before texturing; UV unwrapping a full-resolution 0.75 mm head mesh
-  takes minutes), `--texture-size`, `--save-dataset` (not onto the input), `--helper`, `--report`, `-q`,
+  point-to-plane), `--triangles` (decimate before texturing; UV unwrapping and baking the full-resolution
+  0.75 mm head mesh of `ifscan synth`, ~500k triangles, take ~16 s of its ~18 s reconstruction in a release
+  build), `--texture-size`, `--save-dataset` (not onto the input), `--helper`, `--report`, `-q`,
   `--time-limit` (synthetic-camera: stop the guided scan after this many seconds, default 600, and reconstruct
   what it accepted; it would otherwise wait forever for a pose Vision never detects). Every
   output path is checked (folders created, writable) before the input is read, so a long scan is not lost at the
@@ -131,7 +141,7 @@ $IFSCAN eval /tmp/head.obj --gt /tmp/head.ifsdataset/ground_truth.obj --report /
 * The report (`--report`) holds the reconstruction report, timings, `export_transform`/`export_scale`
   (world meters → exported millimeters), camera poses, and for synthetic datasets pose errors relative to
   keyframe 0, `ground_truth_from_world` and the surface distance to the ground truth (in the ground truth's frame).
-* The distance command reads both OBJs as millimeters and samples the first mesh area-uniformly (fixed seed,
+* `eval` reads both OBJs as millimeters and samples the first mesh area-uniformly (fixed seed,
   `--samples`, default 200 000): mean, RMS, median, 95th percentile and maximum (one-sided Hausdorff) distance.
   An exported mesh is in the export frame (head upright, face +Z, origin at the head center); `--report` maps it
   back to the world frame of the ground truth.
@@ -179,14 +189,20 @@ accepted keyframes each; it needs the helper (`build/helper/IntelFaceScanHelper`
 `.github/workflows/ci.yml` runs on pushes to `main`, pull requests and manual dispatch, with a read-only token and
 no secrets. It uses GitHub's `xcode-27` image (Apple Silicon, macOS 27, Xcode 27.x; GitHub names macOS images after
 Xcode since Xcode 27, so there is no `macos-27` label) and selects the newest Xcode 27. Steps: checkout with
-submodules → restore `build/sdk/install` from the cache (key: librealsense submodule commit + hash of `patches/`,
-`build-sdk.sh`, `apply-patches.sh`) → `scripts/build-sdk.sh` → save the cache → helper with its tests (CMake,
-`-DIFS_HELPER_TESTS=ON`) → `ctest` → `swift build` → `scripts/test.sh` → `ifscan synth`/`info` smoke test →
-`scripts/build.sh` (the documented one-command build; the SDK comes from the cache) → bundle smoke test (signature,
-the helper's `@rpath` librealsense, no absolute build paths under `$HOME` in any shipped file, the bundled `ifscan`
-running `synth` and reading a generated `.db3` through the bundled helper) → upload the zipped app. A run takes
-about 7 minutes with the SDK cache. In November 2026 the image still reports macOS 27.0.1; the job and
-`scripts/build.sh` warn that the app needs 27.2 to run (building only needs the 27.2 SDK).
+submodules → `scripts/test-build-scripts.sh` → restore `build/sdk/install` from the cache (key: librealsense
+submodule commit + deployment target + hash of `patches/`, `build-sdk.sh`, `apply-patches.sh`) →
+`scripts/build-sdk.sh` (a restored SDK carries its input stamp `.ifs-sdk-inputs` and must count as current: a rebuild
+after a cache hit fails the job) → save the cache → helper with its tests (CMake, `-DIFS_HELPER_TESTS=ON`) → `ctest`
+→ `swift build` → `scripts/test.sh` → `ifscan synth`/`info` smoke test → `scripts/build.sh` (the documented
+one-command build; the SDK comes from the cache) → bundle smoke test (signature, the helper's `@rpath` librealsense,
+no absolute build paths under `$HOME` in any shipped file, no linker debug map in the bundled Swift executables and
+their dSYMs in `build/dSYMs`, the bundled `ifscan` running `synth` and reading a generated `.db3` through the
+bundled helper) → upload the zipped app. The smoke tests and `scripts/build.sh` also run when a test failed (the job
+still fails). A run takes about 10–11 minutes with the SDK cache and about 14–16 without (the SDK build takes ~4
+minutes on the runner); `scripts/test.sh` takes ~5 of them, the runner being several times slower than an M3 Ultra.
+Timing-sensitive tests are less reliable there: the tests of a target share Swift's cooperative thread pool, which
+the synchronous reconstructions of other tests can fill. In November 2026 the image still reports macOS 27.0.1; the
+job and `scripts/build.sh` warn that the app needs 27.2 to run (building only needs the 27.2 SDK).
 
 ## Troubleshooting
 
@@ -201,6 +217,18 @@ about 7 minutes with the SDK cache. In November 2026 the image still reports mac
 * The first `scripts/build.sh` needs the network: the submodules, and librealsense's CMake downloads libusb,
   nlohmann/json, fastcdr, yaml-cpp and sqlite into `build/sdk/build`.
 * A worktree made with `git worktree add` (or by Claude Code): `scripts/dev-worktree-setup.sh` fills the submodules
-  from the main checkout and prints the helper's CMake command against the main checkout's SDK.
+  from the main checkout and prints the helper's CMake command against the main checkout's SDK. Reconfiguring
+  `build/helper` with another `-DIFS_SDK_DIR` links that SDK (the helper's CMake searches it on every configure).
+* `scripts/build-sdk.sh` rebuilds librealsense when what it was built from changes – the librealsense commit, a
+  patch, `build-sdk.sh` itself, `BUILD_TYPE` or `MACOSX_DEPLOYMENT_TARGET`, recorded in
+  `build/sdk/install/.ifs-sdk-inputs` – and prints the new values; file times do not matter, `IFS_SDK_REBUILD=1`
+  forces a rebuild. It refuses an `IFS_SDK_DIR` whose build folder was configured from another checkout.
+* `apply-patches.sh: ... local changes that conflict with patches/`: something edited `third_party/librealsense` by
+  hand. `scripts/apply-patches.sh --reset` restores it and applies every patch again (changes to librealsense belong
+  in `patches/`). A pull that changes, adds or removes a patch, or moves librealsense to another commit, needs
+  nothing: `scripts/build.sh` restores the submodule and applies the new patches (the applied ones are recorded in
+  `third_party/librealsense/.ifs-patches`).
+* `rs-record`, `rs-convert` and the other tools in `build/sdk/install/bin` find the library through
+  `@loader_path/../lib` (older SDK builds lack that rpath; the next `scripts/build-sdk.sh` rebuilds them).
 * `ifscan reconstruct ... exit 69`: a stage is still a placeholder in this build, or the helper is missing; the
   notes below the error name it.

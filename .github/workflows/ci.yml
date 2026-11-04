@@ -62,8 +62,13 @@ jobs:
             echo "::warning::The runner image runs macOS $os; IntelFaceScan targets macOS 27.2+ (tests still run here)."
           fi
 
+      - name: Test the SDK bookkeeping of the build scripts (patch versions, input stamp)
+        run: scripts/test-build-scripts.sh
+
       # The SDK build takes most of the job: cache build/sdk/install keyed on the librealsense submodule commit, the
       # patches and the build script. Restore and save are separate steps so a failing test does not lose the cache.
+      # The install carries build-sdk.sh's input stamp (.ifs-sdk-inputs: the same commit, patches and script), so a
+      # restored SDK counts as current without any file time games.
       - name: Compute the SDK cache key
         id: sdk-key
         run: |
@@ -75,13 +80,17 @@ jobs:
         with:
           path: build/sdk/install
           key: librealsense-v1-${{ runner.os }}-${{ runner.arch }}-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ steps.sdk-key.outputs.librealsense }}-${{ hashFiles('patches/**', 'scripts/build-sdk.sh', 'scripts/apply-patches.sh') }}
-      - name: Mark the restored SDK as current
-        if: steps.sdk-cache.outputs.cache-hit == 'true'
-        # build-sdk.sh rebuilds when the library is older than patches/ (whose mtime is the checkout time); the cache
-        # key already pins the submodule commit and the patches.
-        run: touch build/sdk/install/lib/librealsense2*.dylib
       - name: Build librealsense 2.58.4 with the macOS patches
-        run: scripts/build-sdk.sh
+        env:
+          SDK_CACHE_HIT: ${{ steps.sdk-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/ci
+          scripts/build-sdk.sh | tee build/ci/build-sdk.log
+          if [ "$SDK_CACHE_HIT" = "true" ] && ! grep -q '^librealsense already built' build/ci/build-sdk.log; then
+            echo "::error::build-sdk.sh rebuilt the SDK restored from the cache (its input stamp disagrees with the cache key)"
+            exit 1
+          fi
       - name: Save the librealsense build
         if: steps.sdk-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
@@ -101,12 +110,16 @@ jobs:
         run: ctest --test-dir build/helper --output-on-failure
 
       - name: Build the Swift package
+        id: swift-build
         run: swift build
 
       - name: Run the tests
         run: scripts/test.sh
 
+      # The smoke tests and the app build do not depend on the test results: they also run when a test failed (the job
+      # still fails), so one run reports both. They need everything up to the Swift build.
       - name: Smoke-test ifscan on a synthetic scan
+        if: ${{ !cancelled() && steps.swift-build.outcome == 'success' }}
         run: |
           set -euo pipefail
           ifscan="$(swift build --show-bin-path)/ifscan"
@@ -117,9 +130,12 @@ jobs:
       # The documented one-command build (docs/ARCHITECTURE.md, "Build"): its tool checks, the SDK (restored above),
       # the helper, the release Swift build and the app bundle.
       - name: Build the app with scripts/build.sh
+        id: app
+        if: ${{ !cancelled() && steps.swift-build.outcome == 'success' }}
         run: scripts/build.sh
 
       - name: Smoke-test the app bundle (bundled helper, librealsense and ifscan)
+        if: ${{ !cancelled() && steps.app.outcome == 'success' }}
         run: |
           set -euo pipefail
           app="$PWD/build/IntelFaceScan.app"
@@ -129,11 +145,19 @@ jobs:
           grep -q '@rpath/librealsense2' build/ci/helper-libs.txt
           "$app/Contents/Helpers/IntelFaceScanHelper" --version
           # Shipped binaries must not contain absolute build paths (they carry the builder's user name): __FILE__ in
-          # C/C++ code, the linker's debug map. -a: macOS grep skips binary files otherwise.
+          # C/C++ code, the linker's debug map (bundle-app.sh strips it). -a: macOS grep skips binary files otherwise.
           if grep -rlaF "$HOME/" "$app/Contents"; then
             echo "::error::absolute build paths in the app bundle (files above)"
             exit 1
           fi
+          for exe in IntelFaceScan ifscan; do
+            # (no grep -q: an early exit would make nm fail with SIGPIPE and pipefail hide the match)
+            if nm -ap "$app/Contents/MacOS/$exe" | grep ' OSO ' > /dev/null; then
+              echo "::error::Contents/MacOS/$exe still has the linker's debug map (object file paths)"
+              exit 1
+            fi
+          done
+          ls build/dSYMs/IntelFaceScan.dSYM build/dSYMs/ifscan.dSYM > /dev/null
           build/helper/tests/make-test-recording -o build/ci/bundle/rec.db3 --frames 10 --fast
           # From a folder without build/helper: ifscan must find the helper inside the bundle.
           cd build/ci/bundle

@@ -30,5 +30,6 @@ if [ "$MAIN" != "$ROOT" ] && [ -f "$MAIN/build/sdk/install/lib/librealsense2.dyl
     SDK="$MAIN/build/sdk/install"
     echo "librealsense SDK: $SDK"
     echo "  helper: cmake -S helper -B build/helper -DIFS_SDK_DIR=$SDK -DIFS_HELPER_TESTS=ON && cmake --build build/helper -j"
-    echo "  (scripts/build.sh builds its own SDK in this worktree's build/sdk; do not point IFS_SDK_DIR at the main checkout)"
+    echo "  (scripts/build.sh builds its own SDK in this worktree's build/sdk; IFS_SDK_DIR=$MAIN/build/sdk reuses the main"
+    echo "  checkout's while it was built from the same librealsense commit, patches and build-sdk.sh, and stops otherwise)"
 fi

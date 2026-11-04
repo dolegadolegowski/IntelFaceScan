@@ -61,6 +61,13 @@ private func parseError(_ line: String) -> String? {
     limited.timeLimitSeconds = 120
     #expect(try parse("reconstruct synthetic-camera -o h.obj --time-limit 120") == .reconstruct(limited))
     #expect(ReconstructCommand(input: "a", output: "b.obj").timeLimitSeconds == 600)
+    // --icp: point-to-plane (geometric) unless colored is asked for
+    #expect(ReconstructCommand(input: "a", output: "b.obj").coloredICP == false)
+    var colored = ReconstructCommand(input: "a.ifsdataset", output: "h.obj")
+    colored.coloredICP = true
+    #expect(try parse("reconstruct a.ifsdataset -o h.obj --icp Colored") == .reconstruct(colored))
+    #expect(try parse("reconstruct a.ifsdataset -o h.obj --icp=geometric")
+        == .reconstruct(ReconstructCommand(input: "a.ifsdataset", output: "h.obj")))
     // "--" ends the options: inputs may start with a dash
     #expect(try parse("reconstruct -o h.obj -- -odd.bag") == .reconstruct(ReconstructCommand(input: "-odd.bag", output: "h.obj")))
 }
@@ -117,6 +124,7 @@ private func parseError(_ line: String) -> String? {
     ("reconstruct a.ifsdataset -o head.stl", ".obj"),
     ("reconstruct a.ifsdataset -o head.obj --ply head.obj", ".ply"),
     ("reconstruct a.ifsdataset -o head.obj --method marching", "tsdf or poisson"),
+    ("reconstruct a.ifsdataset -o head.obj --icp photometric", "not colored or geometric"),
     ("reconstruct a.ifsdataset -o head.obj --voxel-mm 0", "not a number"),
     ("reconstruct a.ifsdataset -o head.obj --triangles 10", "not an integer in 1000...50000000"),
     ("reconstruct a.ifsdataset -o head.obj --texture-size 100000", "not an integer in 256...16384"),
