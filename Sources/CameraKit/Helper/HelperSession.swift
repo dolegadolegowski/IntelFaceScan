@@ -373,7 +373,8 @@ final class HelperCameraSession: @unchecked Sendable {
                                                       helperPath: helper.path, expectedPID: process.processIdentifier)
             } catch {
                 Darwin.close(fd)
-                throw error
+                // A helper that exits right after connecting leaves no peer pid to read; its exit status says more.
+                throw Self.launchFailure(process, waitingError: error)
             }
             server.stopListening()
 
