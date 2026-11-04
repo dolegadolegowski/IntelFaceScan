@@ -1,7 +1,9 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
 // The helper's side of the connection: a reader thread that receives and validates commands, and a writer thread
-// that sends replies, events, logs and framesets from one ordered queue. Replies, events and logs are never dropped.
+// that sends replies, events, logs and framesets from one ordered queue. Replies, events and logs are never dropped;
+// an app that lets more than kMaxQueuedMessages / kMaxQueuedMessageBytes of them pile up has stopped reading, and the
+// connection is marked broken so the session ends through the normal shutdown (engine shutdown, USB release).
 // Framesets (docs/PROTOCOL.md, backpressure): at most kMaxPendingFramesets wait to be sent. Lossy delivery (live
 // camera, real-time playback) replaces the oldest with a newer one when the app is slower than the camera; lossless
 // delivery (non-real-time playback) makes send_frameset() wait for room instead, except while the command thread is
@@ -37,6 +39,12 @@ public:
     // option changes at display rate meanwhile; far beyond that the peer is not the app.
     static constexpr size_t kMaxPendingCommands = 1024;
     static constexpr size_t kMaxPendingCommandBytes = 16 * 1024 * 1024;
+    // Replies, events, logs and BYE waiting to be sent (beyond the 4 MiB socket buffer). The app reads all the time
+    // (while a reply is due even behind the frames it waits for), so at most about kMaxPendingCommands replies and a
+    // few events can wait legitimately; this much only piles up when the peer sends commands and never reads the
+    // replies, and without a bound the root helper grew by every reply (~4 KB per QUERY_DEVICE).
+    static constexpr size_t kMaxQueuedMessages = 4096;
+    static constexpr size_t kMaxQueuedMessageBytes = 16 * 1024 * 1024;
 
     // 'wake' is called from the reader/writer threads whenever a command arrived or the connection broke.
     Connection( UniqueFd sock, std::function< void() > wake );
@@ -48,7 +56,8 @@ public:
     void start();
 
     // Thread-safe and never waits. Returns false when the message exceeds the protocol limits (it is not sent) or the
-    // connection is closing or broken.
+    // connection is closing or broken. A message beyond kMaxQueuedMessages / kMaxQueuedMessageBytes breaks the
+    // connection ("the app stopped reading").
     bool send( uint16_t type, const nlohmann::json & body );
     // Thread-safe. Lossy: queues the frameset, replacing the oldest queued one when kMaxPendingFramesets wait.
     // Lossless: first waits until fewer than kMaxPendingFramesets wait, the connection is closing or broken, or an
@@ -93,8 +102,12 @@ public:
 private:
     void reader_loop();
     void writer_loop();
+    void read_commands();
+    void write_queue();
     bool write( const OutMessage & msg );
     void mark_broken( const std::string & reason );
+    // For catch blocks of the connection threads: never throws (the reason is kept only if it can be stored).
+    void mark_broken_noexcept( const char * reason ) noexcept;
     bool push( OutMessage && msg );
 
     UniqueFd sock_;
@@ -106,6 +119,8 @@ private:
     std::condition_variable room_cv_;     // lossless send_frameset(): room, engine call, lossy, closing or broken
     std::deque< OutMessage > out_;
     size_t pending_framesets_ = 0;        // queued, not yet being written
+    size_t queued_messages_ = 0;          // other messages queued, not yet being written
+    size_t queued_message_bytes_ = 0;     // their size on the wire
     bool lossless_ = false;
     int engine_calls_ = 0;
     bool writing_ = false;
@@ -121,7 +136,8 @@ private:
     std::thread reader_;
     std::thread writer_;
     bool finished_ = false;
-    std::atomic< bool > abort_writes_{ false };  // finish() gave up waiting: a send that times out fails
+    std::atomic< bool > abort_writes_{ false };  // finish() gave up waiting, or the connection broke: a send that
+                                                 // times out fails
 };
 
 }  // namespace ifs

@@ -19,6 +19,11 @@ namespace
 {
 // How often a writer waiting for an app that does not read checks whether finish() gave up on it.
 constexpr timeval kSendTimeout{ 0, 100 * 1000 };
+
+size_t wire_bytes( const OutMessage & msg )
+{
+    return sizeof( msg.header ) + msg.json.size() + size_t( msg.payload_bytes() );
+}
 }  // namespace
 
 Connection::Connection( UniqueFd sock, std::function< void() > wake )
@@ -88,6 +93,7 @@ Connection::EngineCall::~EngineCall()
 bool Connection::push( OutMessage && msg )
 {
     OutMessage dropped;  // released outside the lock: it may hold the last reference to a camera frame
+    bool overflow = false;
     {
         std::unique_lock< std::mutex > lock( mutex_ );
         if( msg.frameset && lossless_ )
@@ -101,7 +107,9 @@ bool Connection::push( OutMessage && msg )
             msg = OutMessage();
             return false;
         }
-        if( msg.frameset )
+        const bool frameset = msg.frameset;
+        size_t bytes = 0;
+        if( frameset )
         {
             const size_t limit = lossless_ && engine_calls_ > 0 ? kMaxPendingFramesetsInEngineCall
                                                                 : kMaxPendingFramesets;
@@ -119,9 +127,32 @@ bool Connection::push( OutMessage && msg )
                     }
                 }
             }
-            ++pending_framesets_;
         }
-        out_.push_back( std::move( msg ) );
+        else
+        {
+            // Never dropped, so bounded instead: this much waiting means the app stopped reading.
+            bytes = wire_bytes( msg );
+            overflow = queued_messages_ >= kMaxQueuedMessages
+                    || bytes > kMaxQueuedMessageBytes - queued_message_bytes_;
+        }
+        if( ! overflow )
+        {
+            out_.push_back( std::move( msg ) );
+            if( frameset )
+                ++pending_framesets_;
+            else
+            {
+                ++queued_messages_;
+                queued_message_bytes_ += bytes;
+            }
+        }
+    }
+    if( overflow )
+    {
+        msg = OutMessage();
+        mark_broken( "the app stopped reading (" + std::to_string( kMaxQueuedMessages ) + " messages or "
+                     + std::to_string( kMaxQueuedMessageBytes >> 20 ) + " MiB waiting to be sent)" );
+        return false;
     }
     out_cv_.notify_one();
     return true;
@@ -193,13 +224,62 @@ void Connection::mark_broken( const std::string & reason )
             broken_reason_ = reason;
         }
     }
+    // Nothing queued will be sent any more: a writer blocked on an app that does not read gives up.
+    abort_writes_ = true;
     out_cv_.notify_all();
     room_cv_.notify_all();
     if( wake_ )
         wake_();
 }
 
+void Connection::mark_broken_noexcept( const char * reason ) noexcept
+{
+    try
+    {
+        std::lock_guard< std::mutex > lock( mutex_ );
+        if( ! broken_ )
+        {
+            broken_ = true;
+            try
+            {
+                broken_reason_ = reason;
+            }
+            catch( ... )
+            {
+            }
+        }
+    }
+    catch( ... )
+    {
+    }
+    abort_writes_ = true;
+    out_cv_.notify_all();
+    room_cv_.notify_all();
+    try
+    {
+        if( wake_ )
+            wake_();
+    }
+    catch( ... )
+    {
+    }
+}
+
+// The thread functions catch everything: an exception escaping a thread (e.g. bad_alloc) would std::terminate the root
+// helper and skip the shutdown sequence, leaving the camera captured until it is re-plugged.
 void Connection::reader_loop()
+{
+    try
+    {
+        read_commands();
+    }
+    catch( ... )
+    {
+        mark_broken_noexcept( "internal error while receiving commands" );
+    }
+}
+
+void Connection::read_commands()
 {
     for( ;; )
     {
@@ -231,8 +311,9 @@ void Connection::reader_loop()
                 overflow = true;
             else
             {
-                in_bytes_ += msg.json_bytes;
+                const size_t bytes = msg.json_bytes;
                 in_.push_back( std::move( msg ) );
+                in_bytes_ += bytes;
             }
         }
         if( overflow )
@@ -246,6 +327,43 @@ void Connection::reader_loop()
 }
 
 void Connection::writer_loop()
+{
+    try
+    {
+        write_queue();
+    }
+    catch( ... )
+    {
+        mark_broken_noexcept( "internal error while sending" );
+    }
+    // Whatever is left can no longer be delivered; free the frames now rather than at destruction.
+    std::deque< OutMessage > rest;
+    bool notify = false;
+    {
+        std::lock_guard< std::mutex > lock( mutex_ );
+        rest.swap( out_ );
+        pending_framesets_ = 0;
+        queued_messages_ = 0;
+        queued_message_bytes_ = 0;
+        writer_done_ = true;
+        notify = broken_ && ! closing_;
+    }
+    drained_cv_.notify_all();
+    room_cv_.notify_all();
+    rest.clear();
+    if( notify && wake_ )
+    {
+        try
+        {
+            wake_();
+        }
+        catch( ... )
+        {
+        }
+    }
+}
+
+void Connection::write_queue()
 {
     std::unique_lock< std::mutex > lock( mutex_ );
     for( ;; )
@@ -264,6 +382,11 @@ void Connection::writer_loop()
         const bool frameset = msg.frameset;
         if( frameset )
             --pending_framesets_;
+        else
+        {
+            --queued_messages_;
+            queued_message_bytes_ -= std::min( queued_message_bytes_, wire_bytes( msg ) );
+        }
         writing_ = true;
         lock.unlock();
         if( frameset )
@@ -286,18 +409,6 @@ void Connection::writer_loop()
         if( out_.empty() )
             drained_cv_.notify_all();
     }
-    // Whatever is left can no longer be delivered; free the frames now rather than at destruction.
-    std::deque< OutMessage > rest;
-    rest.swap( out_ );
-    pending_framesets_ = 0;
-    writer_done_ = true;
-    const bool notify = broken_ && ! closing_;
-    lock.unlock();
-    drained_cv_.notify_all();
-    room_cv_.notify_all();
-    rest.clear();
-    if( notify && wake_ )
-        wake_();
 }
 
 // write_message() that can be abandoned: shutdown() does not wake a thread blocked in a send on a macOS AF_UNIX socket

@@ -269,8 +269,13 @@ std::string session_loop( ifs::Lifecycle & life, ifs::Connection & connection, i
     {
         if( life.wait( 5000 ) == ifs::Lifecycle::Event::terminate )
             return life.reason();
-        while( auto command = connection.pop_command() )
+        // Nothing more is run once the connection broke: the replies could not be sent, and each command could take
+        // a while on the camera (up to kMaxPendingCommands of them may still be queued).
+        while( ! connection.broken() )
         {
+            auto command = connection.pop_command();
+            if( ! command )
+                break;
             service.handle( *command );
             if( service.quit_requested() )
                 return "the app asked the helper to quit";
