@@ -106,8 +106,8 @@ struct AppLocalizationTests {
         expectTranslated(AppSettings.PreviewMode.allCases, "previewMode") { $0.label }
         expectTranslated(AppSettings.DepthPreset.allCases, "preset") { $0.label }
         expectTranslated(ScanRejection.allCases, "rejection", S.rejection)
-        let timings = ["segmentation", "registration", "registration check", "bounds", "fusion", "poisson", "cleanup",
-                       "texturing"]
+        let timings = ["undistortion", "segmentation", "registration", "registration check", "bounds", "fusion", "poisson",
+                       "cleanup", "texturing"]
         expectTranslated(timings, "timingName", S.timingName)
     }
 
@@ -166,6 +166,10 @@ struct AppLocalizationTests {
             "1 keyframes without usable head depth skipped",
             "initial poses: 14 landmark fits, 0 Vision rotation + landmark translation, 0 Vision rotation + head centroid",
             "keyframes excluded after registration (surface does not fit): 7, 12",
+            "keyframes excluded after registration (face landmarks do not fit): #3",
+            String(format: "%.0f of %.0f cm² synthesized by hole filling: not measured", 549.0, 1390.0),
+            "lens distortion removed: inverse_brown_conrady",
+            "unknown lens distortion model ftheta: treated as a pinhole",
             String(format: "volume too large for %.2f mm voxels; using %.2f mm", 0.5, 0.62),
             "no depth at the chin: neck not cropped",
             "Metal unavailable: fused on the CPU",
@@ -188,6 +192,11 @@ struct AppLocalizationTests {
                 == "klatki wykluczone po rejestracji (powierzchnia nie pasuje): 7, 12")
         #expect(pl("volume too large for 0.50 mm voxels; using 0.62 mm") == "objętość za duża dla wokseli 0.50 mm; użyto 0.62 mm")
         #expect(pl("texture failed: no views") == "błąd kroku „tekstura”: no views")
+        #expect(pl("keyframes excluded after registration (face landmarks do not fit): #3")
+                == "klatki wykluczone po rejestracji (punkty twarzy nie pasują): #3")
+        #expect(pl("549 of 1390 cm² synthesized by hole filling: not measured")
+                == "549 z 1390 cm² wygenerowano przy wypełnianiu dziur: to nie pomiar")
+        #expect(pl("lens distortion removed: inverse_brown_conrady") == "usunięto dystorsję obiektywu: inverse_brown_conrady")
         #expect(pl("a note added later") == "a note added later", "an unknown note must still show")
     }
 

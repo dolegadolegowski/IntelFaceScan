@@ -384,6 +384,7 @@ enum S {
     /// Stage names of ReconstructionReport.durations.
     static func timingName(_ key: String) -> String {
         switch key {
+        case "undistortion": return tr("Lens undistortion", "Usuwanie dystorsji obiektywu")
         case "segmentation": return stageName(.segmentation)
         case "registration": return stageName(.registration)
         case "registration check": return tr("Registration check", "Kontrola rejestracji")
@@ -419,8 +420,18 @@ enum S {
             return "pozy początkowe: \(m.1) z dopasowania punktów twarzy, \(m.2) z obrotu Vision i przesunięcia z punktów "
                 + "twarzy, \(m.3) z obrotu Vision i środka głowy"
         }
-        if let m = note.wholeMatch(of: #/keyframes excluded after registration \(surface does not fit\): (.+)/#) {
-            return "klatki wykluczone po rejestracji (powierzchnia nie pasuje): \(m.1)"
+        if let m = note.wholeMatch(of: #/keyframes excluded after registration \((surface|face landmarks) do(?:es)? not fit\): (.+)/#) {
+            let reason = m.1 == "surface" ? "powierzchnia nie pasuje" : "punkty twarzy nie pasują"
+            return "klatki wykluczone po rejestracji (\(reason)): \(m.2)"
+        }
+        if let m = note.wholeMatch(of: #/(\d+) of (\d+) cm² synthesized by hole filling: not measured/#) {
+            return "\(m.1) z \(m.2) cm² wygenerowano przy wypełnianiu dziur: to nie pomiar"
+        }
+        if let m = note.wholeMatch(of: #/lens distortion removed: (.+)/#) {
+            return "usunięto dystorsję obiektywu: \(m.1)"
+        }
+        if let m = note.wholeMatch(of: #/unknown lens distortion model (.+): treated as a pinhole/#) {
+            return "nieznany model dystorsji obiektywu \(m.1): przyjęto model otworkowy"
         }
         if let m = note.wholeMatch(of: #/(\d+) keyframes with inconsistent image data skipped/#), let n = Int(m.1) {
             return "pominięto \(n) \(polishPlural(n, "klatkę", "klatki", "klatek")) z niespójnymi danymi obrazu"

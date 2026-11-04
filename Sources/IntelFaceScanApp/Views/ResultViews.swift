@@ -188,8 +188,8 @@ struct ReportView: View {
     /// Stage timings in pipeline order and the total. The pipeline reports its wall-clock total as "total"; it is
     /// the sum, not one of the stages.
     static func timings(_ durations: [String: Double]) -> (stages: [(key: String, seconds: Double)], total: Double) {
-        let order = ["segmentation", "registration", "registration check", "bounds", "fusion", "poisson", "cleanup",
-                     "texturing"]
+        let order = ["undistortion", "segmentation", "registration", "registration check", "bounds", "fusion", "poisson",
+                     "cleanup", "texturing"]
         let stages = durations.filter { $0.key != "total" }
             .map { (key: $0.key, seconds: $0.value) }
             .sorted { a, b in
