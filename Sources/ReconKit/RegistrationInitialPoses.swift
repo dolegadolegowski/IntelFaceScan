@@ -301,8 +301,19 @@ enum RegistrationCheck {
         var rmse: Float
     }
 
-    /// Scores every frame's registered cloud against its most similar view; frames whose surface does not fit
-    /// (failed or ambiguous registration) are marked false. Frame 0 (the world reference) always passes.
+    /// Views closer than this (relative rotation) form one pose group.
+    static let groupAngle: Float = 12 * .pi / 180
+    /// Views farther apart than this overlap too little to be compared.
+    static let maxPairAngle: Float = 60 * .pi / 180
+    static let minFitness: Float = 0.25
+
+    /// Scores every frame's registered cloud against the most similar view of its own pose group and of every other
+    /// pose group within maxPairAngle. A pair fits when the surfaces overlap (fitness) with an RMSE close to the
+    /// typical pair's. A frame passes when a chain of fitting pairs links it to frame 0 (the world reference, which
+    /// always passes). Judging each frame by its single most similar view failed both ways: a misregistered pose
+    /// group fits itself (its frames are each other's most similar views) and passed, while a correct frame whose
+    /// most similar view was the misregistered one was dropped. The comparisons across pose groups are what link a
+    /// group to the reference.
     static func verify(frames: RGBDFrameSet, poses: [simd_float4x4]) throws -> (passed: [Bool], scores: [FrameScore]) {
         let n = frames.count
         guard n > 1 else { return (Array(repeating: true, count: n), Array(repeating: FrameScore(fitness: 1, rmse: 0), count: n)) }
@@ -330,28 +341,64 @@ enum RegistrationCheck {
         icp.max_iterations = 0
         icp.colored = 0
         icp.max_correspondence_m = 0.003
-        var scores = Array(repeating: FrameScore(fitness: 1, rmse: 0), count: n)
         let identity = matrix_identity_float4x4.floats
-        for i in 0 ..< n {
-            guard fr_cloud_size(clouds[i]) >= 50 else { scores[i] = FrameScore(fitness: 0, rmse: .infinity); continue }
-            // The most similar view (smallest relative rotation) overlaps most.
-            var best = -1
-            var bestAngle = Float.infinity
-            for j in 0 ..< n where j != i && fr_cloud_size(clouds[j]) >= 50 {
-                let rel = simd_quatf(poses[j].upperLeft3x3.transpose * poses[i].upperLeft3x3)
-                let angle = abs(rel.angle)
-                if angle < bestAngle { bestAngle = angle; best = j }
-            }
-            guard best >= 0 else { continue }
-            var result = fr_icp_result()
-            let status = identity.withUnsafeBufferPointer { fr_icp(clouds[i], clouds[best], $0.baseAddress, &icp, &result) }
-            scores[i] = status == FR_OK ? FrameScore(fitness: result.fitness, rmse: result.inlier_rmse_m)
-                                        : FrameScore(fitness: 0, rmse: .infinity)
+        let enough = (0 ..< n).map { fr_cloud_size(clouds[$0]) >= 50 }
+        func angle(_ i: Int, _ j: Int) -> Float {
+            let a = simd_quatf(poses[j].upperLeft3x3.transpose * poses[i].upperLeft3x3).angle
+            return min(a, 2 * .pi - a)
         }
-        let finite = scores.map(\.rmse).filter { $0.isFinite }.sorted()
+        // Pose groups (greedy, by the rotation relative to each group's first frame).
+        var group = [Int](repeating: -1, count: n)
+        var groupHeads: [Int] = []
+        for i in 0 ..< n where enough[i] {
+            if let g = groupHeads.firstIndex(where: { angle($0, i) < groupAngle }) {
+                group[i] = g
+            } else {
+                group[i] = groupHeads.count
+                groupHeads.append(i)
+            }
+        }
+        // Pairs: each frame with the most similar view of every pose group in reach (unordered, evaluated once).
+        var pairs: [(Int, Int)] = []
+        var seen = Set<Int>()
+        for i in 0 ..< n where enough[i] {
+            for g in groupHeads.indices {
+                let candidates = (0 ..< n).filter { $0 != i && group[$0] == g }
+                guard let j = candidates.min(by: { angle(i, $0) < angle(i, $1) }), angle(i, j) <= maxPairAngle else { continue }
+                if seen.insert(min(i, j) * n + max(i, j)).inserted { pairs.append((i, j)) }
+            }
+        }
+        var pairScores: [FrameScore] = []
+        for (i, j) in pairs {
+            var result = fr_icp_result()
+            let status = identity.withUnsafeBufferPointer { fr_icp(clouds[i], clouds[j], $0.baseAddress, &icp, &result) }
+            pairScores.append(status == FR_OK ? FrameScore(fitness: result.fitness, rmse: result.inlier_rmse_m)
+                                              : FrameScore(fitness: 0, rmse: .infinity))
+        }
+        let finite = pairScores.filter { $0.fitness >= minFitness }.map(\.rmse).filter { $0.isFinite }.sorted()
         let median = finite.isEmpty ? 0 : finite[finite.count / 2]
         let limit = max(2 * median, median + 0.0007)
-        let passed = scores.enumerated().map { i, s in i == 0 || (s.fitness >= 0.25 && s.rmse <= limit) }
+        // Fitting pairs are links (either direction); frames linked to frame 0 pass. Each frame reports its best pair.
+        var links = [[Int]](repeating: [], count: n)
+        var scores = Array(repeating: FrameScore(fitness: 0, rmse: .infinity), count: n)
+        for ((i, j), s) in zip(pairs, pairScores) {
+            if s.fitness >= minFitness && s.rmse <= limit {
+                links[i].append(j)
+                links[j].append(i)
+            }
+            for k in [i, j] where s.rmse < scores[k].rmse || !scores[k].rmse.isFinite && s.fitness > scores[k].fitness {
+                scores[k] = s
+            }
+        }
+        var passed = [Bool](repeating: false, count: n)
+        passed[0] = true
+        var stack = [0]
+        while let k = stack.popLast() {
+            for j in links[k] where !passed[j] {
+                passed[j] = true
+                stack.append(j)
+            }
+        }
         return (passed, scores)
     }
 

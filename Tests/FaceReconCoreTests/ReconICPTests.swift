@@ -79,6 +79,57 @@ struct ReconICPTests {
         #expect(e2.rotationDeg < 0.1, "colored ICP rotation error \(e2.rotationDeg) deg")
     }
 
+    /// Head geometry with sharp-edged dark spots (brows, pupils, freckles): where the linear intensity model of colored
+    /// ICP fails.
+    struct SpottedHeadScene: SynthScene {
+        var head = HeadScene()
+        func intersect(origin: V3, dir: V3) -> SurfaceHit? { head.intersect(origin: origin, dir: dir) }
+        func color(at p: V3) -> (UInt8, UInt8, UInt8) {
+            let d = p - head.center
+            let s = sin(310 * d.x + 2 * sin(90 * d.y)) * sin(270 * d.y + 40 * d.z) * sin(230 * d.z + 20 * d.x)
+            let spot = 0.5 + 0.5 * tanh((s - 0.3) * 25)   // ~0.3 mm transition
+            let skin = 0.75 + 0.1 * sin(60 * d.x) * sin(50 * d.y)
+            let v = skin * (1 - 0.7 * spot)
+            return (UInt8(200 * v), UInt8(160 * v), UInt8(135 * v))   // no clipping after a 20% gain
+        }
+    }
+
+    @Test func coloredICPStaysAtTheTruthDespiteTextureEdgesAndExposure() throws {
+        // Two views 20 degrees apart, the source 20% brighter (auto exposure). Started at the true pose, colored ICP
+        // must stay there. Without a robust photometric kernel the correspondences on spot edges, with residuals
+        // 10-50x the noise, dominated the normal equations, and the additive intensity offset could not absorb the
+        // gain: 2.2-2.4 degrees / 1.2-1.6 mm off. Now 0.17 degrees / 0.05 mm (point-to-plane: 0.03 degrees / 0.05 mm).
+        let scene = SpottedHeadScene()
+        let camera = SynthCamera.d455(width: 640, height: 400)
+        let a = 20 * Double.pi / 180
+        let poses = lookAtPoses(target: scene.head.center, distance: 0.6, directions: [V3(0, 0, -1), V3(sin(a), 0, -cos(a))])
+        let target = render(scene, camera: camera, worldFromCamera: poses[0], noiseAt1m: 0.002, seed: 1)
+        let source = render(scene, camera: camera, worldFromCamera: poses[1], noiseAt1m: 0.002, seed: 2)
+        for i in 0 ..< source.rgb.count { source.rgb[i] = UInt8(min(255, (Double(source.rgb[i]) * 1.2).rounded())) }
+        func cloud(_ f: RenderedFrame) throws -> CoreCloud {
+            var frame = f.coreFrame()
+            var p = fr_cloud_params()
+            fr_cloud_params_default(&p)
+            var out: OpaquePointer?
+            try #require(fr_cloud_from_rgbd(&frame, &p, &out) == FR_OK)
+            return CoreCloud(try #require(out))
+        }
+        let s = try cloud(source), t = try cloud(target)
+        let truth = poses[0].inverse * poses[1]   // target_from_source
+        let headInSource = poses[1].inverse.apply(scene.head.center)
+        for start in [truth, Rigid(axis: V3(1, -2, 1), angleDeg: 2, t: V3(0.002, -0.001, 0.002)) * truth] {
+            var params = fr_icp_params()
+            fr_icp_params_default(&params)   // colored, 3 levels, 1 mm voxels
+            var result = fr_icp_result()
+            try #require(fr_icp(s.pointer, t.pointer, start.floats, &params, &result) == FR_OK, "\(String(cString: fr_last_error()))")
+            let estimate = Rigid(floats: withUnsafeBytes(of: result.target_from_source) { Array($0.bindMemory(to: Float.self)) })
+            let rotation = Rigid.error(estimate, truth).rotationDeg
+            let displacement = (estimate.apply(headInSource) - truth.apply(headInSource)).length
+            #expect(rotation < 0.3, "rotation error \(rotation) deg")
+            #expect(displacement < 0.0003, "head displacement \(displacement * 1000) mm")
+        }
+    }
+
     @Test func zeroIterationsEvaluatesTheInitialAlignment() throws {
         let pts = bumpySpherePoints(count: 20000, radius: 0.08, center: V3(0, 0, 0.5), jitterSeed: 3)
         let c = try #require(CoreCloud.make(points: pts))

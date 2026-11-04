@@ -76,6 +76,38 @@ struct ReconCloudTests {
         #expect(c.points.contains { $0.z < 0.51 } && c.points.contains { $0.z > 0.99 })
     }
 
+    @Test func isolatedDepthHolesAreNotTreatedAsSilhouettes() throws {
+        // A plane at 0.6 m with 8% scattered one-pixel holes (stereo matching failures) and one 12 x 12 hole. Only
+        // the large hole is a silhouette: its 2-pixel rim goes, the speckle neighbors stay. Treating every speckle as
+        // a silhouette erased (2 * 2 + 1)^2 pixels per hole: 88% of this plane, 98% of a synthetic head cloud.
+        var rng = SplitMix64(seed: 5)
+        var speckle = Set<Int>()
+        for i in 0 ..< Self.camera.width * Self.camera.height where rng.uniform() < 0.08 { speckle.insert(i) }
+        let big = (x: 70 ..< 82, y: 50 ..< 62)
+        let f = Self.frame { u, v in
+            if big.x.contains(u) && big.y.contains(v) { return 0 }
+            return speckle.contains(v * Self.camera.width + u) ? 0 : 0.6
+        }
+        let c = try Self.cloud(f)
+        let pixels = c.points.map { (Int(($0.x / $0.z * Self.camera.fx + Self.camera.cx).rounded()),
+                                     Int(($0.y / $0.z * Self.camera.fy + Self.camera.cy).rounded())) }
+        // Valid pixels away from the image border and the big hole (2-pixel erosion each).
+        var eligible = 0
+        for v in 3 ..< Self.camera.height - 3 {
+            for u in 3 ..< Self.camera.width - 3 where !speckle.contains(v * Self.camera.width + u) {
+                if (big.x.lowerBound - 2 ..< big.x.upperBound + 2).contains(u) && (big.y.lowerBound - 2 ..< big.y.upperBound + 2).contains(v) {
+                    continue
+                }
+                eligible += 1
+            }
+        }
+        #expect(c.count > eligible * 95 / 100, "\(c.count) points of \(eligible) valid pixels")
+        let nearBig = pixels.filter { (big.x.lowerBound - 2 ..< big.x.upperBound + 2).contains($0.0)
+            && (big.y.lowerBound - 2 ..< big.y.upperBound + 2).contains($0.1) }
+        #expect(nearBig.isEmpty, "\(nearBig.count) points on the rim of the large hole")
+        #expect(c.normals.allSatisfy { $0.z < -0.99 })
+    }
+
     @Test func voxelDownsampleAveragesPerVoxel() throws {
         let points = [V3(0.0011, 0.0011, 0.5011), V3(0.0019, 0.0019, 0.5019), V3(0.0051, 0.0011, 0.5011)]
         let normals = [V3(0, 0, -1), V3(0, 0.6, -0.8), V3(1, 0, 0)]

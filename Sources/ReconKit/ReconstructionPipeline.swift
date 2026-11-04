@@ -216,7 +216,7 @@ final class PipelineRun: @unchecked Sendable {
 
         var mesh: ReconMesh
         var voxel = options.voxelSizeMM / 1000
-        let truncation = max(options.truncationMM / 1000, 2 * voxel)
+        var truncation = max(options.truncationMM / 1000, 2 * voxel)
         let margin = max(3 * truncation, 0.015)
         let bounds = try timed("bounds") { try RegistrationCheck.bounds(frames: fusionFrames, poses: fusionPoses, margin: margin) }
         switch options.method {
@@ -225,6 +225,7 @@ final class PipelineRun: @unchecked Sendable {
             let voxels = Double(extent.x / voxel + 1) * Double(extent.y / voxel + 1) * Double(extent.z / voxel + 1)
             if voxels > Double(Self.maxVoxels) {
                 voxel *= Float(pow(voxels / Double(Self.maxVoxels), 1.0 / 3.0)) * 1.01
+                truncation = max(truncation, 2 * voxel)   // fr_tsdf_create needs truncation > voxel
                 report.notes.append(String(format: "volume too large for %.2f mm voxels; using %.2f mm",
                                            options.voxelSizeMM, voxel * 1000))
             }
