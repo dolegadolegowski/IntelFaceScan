@@ -301,8 +301,14 @@ enum RegistrationCheck {
         var rmse: Float
     }
 
-    /// Scores every frame's registered cloud against its most similar view; frames whose surface does not fit
-    /// (failed or ambiguous registration) are marked false. Frame 0 (the world reference) always passes.
+    /// Views each frame is compared with (the most similar ones by relative rotation).
+    static let neighborsPerFrame = 4
+
+    /// Scores every frame's registered cloud against its most similar views. A pair fits when the surfaces overlap
+    /// (fitness) with an RMSE close to the typical pair's. A frame passes when a chain of fitting pairs links it to
+    /// frame 0 (the world reference, which always passes). Judging each frame by its single most similar view
+    /// failed both ways: a misregistered pose group fits itself (its frames are each other's most similar views) and
+    /// passed, while a correct frame whose most similar view was the misregistered one was dropped.
     static func verify(frames: RGBDFrameSet, poses: [simd_float4x4]) throws -> (passed: [Bool], scores: [FrameScore]) {
         let n = frames.count
         guard n > 1 else { return (Array(repeating: true, count: n), Array(repeating: FrameScore(fitness: 1, rmse: 0), count: n)) }
@@ -330,30 +336,52 @@ enum RegistrationCheck {
         icp.max_iterations = 0
         icp.colored = 0
         icp.max_correspondence_m = 0.003
-        var scores = Array(repeating: FrameScore(fitness: 1, rmse: 0), count: n)
         let identity = matrix_identity_float4x4.floats
-        for i in 0 ..< n {
-            guard fr_cloud_size(clouds[i]) >= 50 else { scores[i] = FrameScore(fitness: 0, rmse: .infinity); continue }
-            // The most similar view (smallest relative rotation) overlaps most.
-            var best = -1
-            var bestAngle = Float.infinity
-            for j in 0 ..< n where j != i && fr_cloud_size(clouds[j]) >= 50 {
-                let rel = simd_quatf(poses[j].upperLeft3x3.transpose * poses[i].upperLeft3x3)
-                let angle = abs(rel.angle)
-                if angle < bestAngle { bestAngle = angle; best = j }
-            }
-            guard best >= 0 else { continue }
-            var result = fr_icp_result()
-            let status = identity.withUnsafeBufferPointer { fr_icp(clouds[i], clouds[best], $0.baseAddress, &icp, &result) }
-            scores[i] = status == FR_OK ? FrameScore(fitness: result.fitness, rmse: result.inlier_rmse_m)
-                                        : FrameScore(fitness: 0, rmse: .infinity)
+        let enough = (0 ..< n).map { fr_cloud_size(clouds[$0]) >= 50 }
+        // Pairs: each frame with its most similar views (smallest relative rotation: largest overlap).
+        var pairs: [(Int, Int)] = []
+        for i in 0 ..< n where enough[i] {
+            let others = (0 ..< n).filter { $0 != i && enough[$0] }
+                .map { j -> (Int, Float) in
+                    let angle = simd_quatf(poses[j].upperLeft3x3.transpose * poses[i].upperLeft3x3).angle
+                    return (j, min(angle, 2 * .pi - angle))
+                }
+                .sorted { $0.1 < $1.1 }
+            for (j, _) in others.prefix(neighborsPerFrame) { pairs.append((i, j)) }
         }
-        let finite = scores.map(\.rmse).filter { $0.isFinite }.sorted()
+        var pairScores: [FrameScore] = []
+        for (i, j) in pairs {
+            var result = fr_icp_result()
+            let status = identity.withUnsafeBufferPointer { fr_icp(clouds[i], clouds[j], $0.baseAddress, &icp, &result) }
+            pairScores.append(status == FR_OK ? FrameScore(fitness: result.fitness, rmse: result.inlier_rmse_m)
+                                              : FrameScore(fitness: 0, rmse: .infinity))
+        }
+        let finite = pairScores.filter { $0.fitness >= minFitness }.map(\.rmse).filter { $0.isFinite }.sorted()
         let median = finite.isEmpty ? 0 : finite[finite.count / 2]
         let limit = max(2 * median, median + 0.0007)
-        let passed = scores.enumerated().map { i, s in i == 0 || (s.fitness >= 0.25 && s.rmse <= limit) }
+        // Fitting pairs are links (either direction); frames linked to frame 0 pass. Each frame reports its best pair.
+        var links = [[Int]](repeating: [], count: n)
+        var scores = Array(repeating: FrameScore(fitness: 0, rmse: .infinity), count: n)
+        for ((i, j), s) in zip(pairs, pairScores) {
+            if s.fitness >= minFitness && s.rmse <= limit {
+                links[i].append(j)
+                links[j].append(i)
+            }
+            if s.rmse < scores[i].rmse || !scores[i].rmse.isFinite && s.fitness > scores[i].fitness { scores[i] = s }
+        }
+        var passed = [Bool](repeating: false, count: n)
+        passed[0] = true
+        var stack = [0]
+        while let k = stack.popLast() {
+            for j in links[k] where !passed[j] {
+                passed[j] = true
+                stack.append(j)
+            }
+        }
         return (passed, scores)
     }
+
+    static let minFitness: Float = 0.25
 
     /// Axis-aligned bounds of the registered frames (robust percentiles) plus a margin, in the world frame.
     static func bounds(frames: RGBDFrameSet, poses: [simd_float4x4], margin: Float) throws -> (min: SIMD3<Float>, max: SIMD3<Float>) {
