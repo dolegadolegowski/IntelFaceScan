@@ -205,6 +205,26 @@ import Testing
         #expect((sim.updates.last { $0.rejection == .tooFewDepthPoints }?.quality?.validDepthPoints ?? 0) > 500)
     }
 
+    @Test func segmentationThatMissesTheFaceDoesNotBlockThePose() async throws {
+        // Vision's person segmentation of the synthetic head at 1280x800 returns little more than the neck; the scan
+        // used to reject every frame as "too few depth points" until the segmentation happened to work.
+        let (controller, tracker) = makeController()
+        var sim = ScanSimulation()
+        let face = sim.factory.faceRect
+        var neckOnly = Data(count: sim.factory.width * sim.factory.height)
+        for y in Int(face.maxY) - 2 ..< sim.factory.height {
+            for x in Int(face.midX) - 10 ..< Int(face.midX) + 10 { neckOnly[y * sim.factory.width + x] = 255 }
+        }
+        tracker.segmentation = neckOnly
+        await sim.run(controller, tracker: tracker, maxFrames: 300) { $0.keyframeCount >= 3 }
+        #expect(!sim.rejections.contains(.tooFewDepthPoints))
+        let capture = controller.finish()
+        #expect(capture.keyframes.count == 3)
+        let mask = try #require(capture.keyframes.first?.mask)
+        #expect(HeadMaskBuilder.count(mask) > 500)
+        #expect(tracker.segmentationCalls >= 3)
+    }
+
     @Test func offlineTimingUsesFrameTimestamps() async {
         // Frames 1 ms apart: 200 frames are only 0.2 s of scan time, less than positioning (0.5 s) + hold.
         let (controller, tracker) = makeController()

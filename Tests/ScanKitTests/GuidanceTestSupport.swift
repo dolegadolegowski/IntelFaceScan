@@ -108,6 +108,12 @@ final class ScriptedTracker: HeadTracking, @unchecked Sendable {
     private let lock = NSLock()
     private var script: (CameraFrame) throws -> HeadObservation?
     private(set) var segmentationCalls = 0
+    /// What segmentPerson returns (nil: no segmentation, the head mask falls back to the ellipse).
+    var segmentation: Data? {
+        get { lock.withLock { _segmentation } }
+        set { lock.withLock { _segmentation = newValue } }
+    }
+    private var _segmentation: Data?
 
     init(_ script: @escaping (CameraFrame) throws -> HeadObservation?) { self.script = script }
 
@@ -121,8 +127,10 @@ final class ScriptedTracker: HeadTracking, @unchecked Sendable {
     }
 
     func segmentPerson(in frame: CameraFrame) throws -> Data? {
-        lock.withLock { segmentationCalls += 1 }
-        return nil
+        lock.withLock {
+            segmentationCalls += 1
+            return _segmentation
+        }
     }
 }
 

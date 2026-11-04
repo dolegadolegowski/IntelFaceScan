@@ -1,7 +1,7 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
-// Head segmentation at color resolution: person mask (or a face-rect ellipse when segmentation is unavailable)
-// ∩ depth band around the face ∩ above the neck cut (unless keepShoulders), lightly eroded.
+// Head segmentation at color resolution: person mask (or a face-rect ellipse when segmentation is unavailable or
+// missed the face) ∩ depth band around the face ∩ above the neck cut (unless keepShoulders), silhouette eroded.
 
 import Accelerate
 import CameraKit
@@ -19,7 +19,11 @@ public struct HeadMaskParameters: Sendable, Hashable {
     /// The neck cut lies this fraction of the face height below the chin, so the underside of the jaw survives.
     public var neckMarginFraction: Float = 0.12
     /// Erosion radius in pixels: drops the silhouette pixels where aligned depth mixes head and background.
+    /// Holes inside the head (pixels without depth) up to 2 * radius + 1 pixels wide are not widened.
     public var erosionRadius: Int = 2
+    /// A person mask that covers less than this fraction of the central face region missed the face (Vision's
+    /// person segmentation sometimes returns only the neck or shoulders); the face-rectangle ellipse is used instead.
+    public var minPersonMaskFaceCoverage: Float = 0.5
 
     public init() {}
 }
@@ -37,13 +41,19 @@ public enum HeadMaskBuilder {
         let face = observation.faceRect
         guard face.width > 1, face.height > 1, face.minX.isFinite, face.minY.isFinite else { return mask }
 
-        let personMask = observation.personMask.flatMap { $0.count == width * height ? $0 : nil }
+        let personMask = observation.personMask.flatMap {
+            $0.count == width * height
+                && personMaskCoversFace($0, width: width, height: height, face: face,
+                                        minCoverage: parameters.minPersonMaskFaceCoverage) ? $0 : nil
+        }
         let usableDepth = depth.flatMap { $0.isValidZ16 && $0.width == width && $0.height == height ? $0 : nil }
         let band: (lo: UInt16, hi: UInt16)? = {
             guard let d = faceDistanceM, d.isFinite, d > 0, let depth = usableDepth else { return nil }
-            let lo = max(0, d - parameters.nearMarginM) / depth.depthScale
-            let hi = min(Float(UInt16.max), (d + parameters.farMarginM) / depth.depthScale)
-            return (UInt16(max(1, lo.rounded())), UInt16(hi.rounded()))
+            // Clamped to the Z16 range: a distance beyond what the depth unit can represent must not trap.
+            let limit = Float(UInt16.max)
+            let lo = min(limit, max(1, (max(0, d - parameters.nearMarginM) / depth.depthScale).rounded()))
+            let hi = min(limit, max(lo, ((d + parameters.farMarginM) / depth.depthScale).rounded()))
+            return (UInt16(lo), UInt16(hi))
         }()
 
         let roi = regionOfInterest(face: face, keepShoulders: parameters.keepShoulders, width: width, height: height)
@@ -79,13 +89,65 @@ public enum HeadMaskBuilder {
                 }
             }
         }
-        if parameters.erosionRadius > 0 { erode(&mask, width: width, height: height, radius: parameters.erosionRadius) }
+        if parameters.erosionRadius > 0 {
+            erodeSilhouette(&mask, width: width, height: height, radius: parameters.erosionRadius)
+        }
         return mask
     }
 
     /// Number of non-zero mask pixels.
     public static func count(_ mask: Data) -> Int {
         mask.withUnsafeBytes { raw in raw.bindMemory(to: UInt8.self).reduce(0) { $0 + ($1 != 0 ? 1 : 0) } }
+    }
+
+    /// Whether the person mask covers the central face region (where any correct person mask is "person").
+    static func personMaskCoversFace(_ person: Data, width: Int, height: Int, face: CGRect, minCoverage: Float) -> Bool {
+        guard minCoverage > 0 else { return true }
+        guard let core = PixelRect(DepthStatistics.distanceRegion(face), clippedTo: width, height) else { return false }
+        var inside = 0
+        person.withUnsafeBytes { raw in
+            let p = raw.bindMemory(to: UInt8.self)
+            for y in core.y ..< core.y + core.height {
+                let row = y * width
+                for x in core.x ..< core.x + core.width where p[row + x] >= 128 { inside += 1 }
+            }
+        }
+        return Float(inside) >= minCoverage * Float(core.area)
+    }
+
+    /// Erodes the outer silhouette by `radius` pixels without widening small holes inside the mask: an erosion of
+    /// the closed mask (dilate by r, erode by 2r), intersected with the mask itself. A plain erosion would grow every
+    /// pixel without depth (speckle, the eyes) into a (2r+1)^2 hole and drop ~20-30 % of the head's depth points.
+    static func erodeSilhouette(_ mask: inout Data, width: Int, height: Int, radius: Int) {
+        var shrunk = mask
+        morphology(&shrunk, width: width, height: height, kernel: 2 * radius + 1, erode: false)
+        morphology(&shrunk, width: width, height: height, kernel: 4 * radius + 1, erode: true)
+        mask.withUnsafeMutableBytes { outRaw in
+            shrunk.withUnsafeBytes { shrunkRaw in
+                let out = outRaw.bindMemory(to: UInt8.self), s = shrunkRaw.bindMemory(to: UInt8.self)
+                for i in 0 ..< out.count where s[i] == 0 { out[i] = 0 }
+            }
+        }
+    }
+
+    /// In-place min (erode) or max (dilate) filter with a square kernel.
+    static func morphology(_ mask: inout Data, width: Int, height: Int, kernel: Int, erode: Bool) {
+        let k = vImagePixelCount(kernel)
+        let source = mask
+        source.withUnsafeBytes { srcRaw in
+            mask.withUnsafeMutableBytes { dstRaw in
+                guard let s = srcRaw.baseAddress, let d = dstRaw.baseAddress else { return }
+                var src = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: s), height: vImagePixelCount(height),
+                                        width: vImagePixelCount(width), rowBytes: width)
+                var dst = vImage_Buffer(data: d, height: vImagePixelCount(height), width: vImagePixelCount(width),
+                                        rowBytes: width)
+                if erode {
+                    _ = vImageMin_Planar8(&src, &dst, nil, 0, 0, k, k, vImage_Flags(kvImageEdgeExtend))
+                } else {
+                    _ = vImageMax_Planar8(&src, &dst, nil, 0, 0, k, k, vImage_Flags(kvImageEdgeExtend))
+                }
+            }
+        }
     }
 
     /// Pixels that can belong to the head: generous around the face rectangle (hair, ears, back of the head in
@@ -97,21 +159,6 @@ public enum HeadMaskBuilder {
         return PixelRect(r, clippedTo: width, height) ?? PixelRect(x: 0, y: 0, width: 0, height: 0)
     }
 
-    /// In-place min filter (erosion) with a (2r+1)^2 square kernel.
-    static func erode(_ mask: inout Data, width: Int, height: Int, radius: Int) {
-        let k = vImagePixelCount(2 * radius + 1)
-        let source = mask
-        source.withUnsafeBytes { srcRaw in
-            mask.withUnsafeMutableBytes { dstRaw in
-                guard let s = srcRaw.baseAddress, let d = dstRaw.baseAddress else { return }
-                var src = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: s), height: vImagePixelCount(height),
-                                        width: vImagePixelCount(width), rowBytes: width)
-                var dst = vImage_Buffer(data: d, height: vImagePixelCount(height), width: vImagePixelCount(width),
-                                        rowBytes: width)
-                _ = vImageMin_Planar8(&src, &dst, nil, 0, 0, k, k, vImage_Flags(kvImageEdgeExtend))
-            }
-        }
-    }
 }
 
 /// Runs body with the bytes of data, or nil.
