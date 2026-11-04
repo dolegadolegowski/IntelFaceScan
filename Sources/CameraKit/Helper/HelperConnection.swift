@@ -293,8 +293,11 @@ final class HelperConnection: @unchecked Sendable {
     func close() {
         io.shutdown()
         waitUntilClosed(timeout: 5)
-        writeQueue.sync {}
-        if waitUntilClosed(timeout: 0) { io.close() }
+        // On the write queue: a write still queued (a request registered just before the reader finished) runs
+        // before the descriptor is closed or fails cleanly after, and never writes to a reused descriptor number.
+        writeQueue.sync {
+            if waitUntilClosed(timeout: 0) { io.close() }
+        }
     }
 }
 
