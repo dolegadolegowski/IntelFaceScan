@@ -25,7 +25,7 @@ private func parseError(_ line: String) -> String? {
 @Test func cliParsesSynthWithDefaultsAndOptions() throws {
     #expect(try parse("synth -o out.ifsdataset") == .synth(SynthCommand(output: "out.ifsdataset")))
     let command = try parse("synth --output=a.ifsdataset --width 640 --height=400 --frames-per-pose 3 --noise 1.5 "
-        + "--seed 42 --distance 0.7 --poses front,LEFT,upRight --no-background --mesh-resolution 64 --gt-mesh gt.obj")
+        + "--seed 42 --distance 0.7 --poses front,LEFT,upRight --no-background --lighting 0 --mesh-resolution 64 --gt-mesh gt.obj")
     var expected = SynthCommand(output: "a.ifsdataset")
     expected.width = 640
     expected.height = 400
@@ -35,6 +35,7 @@ private func parseError(_ line: String) -> String? {
     expected.distanceM = 0.7
     expected.poses = [.front, .left, .upRight]
     expected.background = false
+    expected.lighting = 0
     expected.meshResolution = 64
     expected.groundTruthMesh = "gt.obj"
     #expect(command == .synth(expected))
@@ -48,12 +49,14 @@ private func parseError(_ line: String) -> String? {
     expected.voxelMM = 0.5
     expected.method = .poisson
     expected.keepShoulders = true
+    expected.targetTriangles = 250_000
+    expected.textureSize = 2048
     expected.saveDataset = "keys.ifsdataset"
     expected.helper = "/opt/IntelFaceScanHelper"
     expected.report = "report.json"
     expected.quiet = true
     #expect(try parse("reconstruct -o out/head.OBJ --ply head.ply --voxel-mm 0.5 --method Poisson --keep-shoulders "
-        + "--save-dataset keys.ifsdataset --helper /opt/IntelFaceScanHelper --report report.json -q rec.db3") == .reconstruct(expected))
+        + "--triangles 250000 --texture-size 2048 --save-dataset keys.ifsdataset --helper /opt/IntelFaceScanHelper --report report.json -q rec.db3") == .reconstruct(expected))
     // "--" ends the options: inputs may start with a dash
     #expect(try parse("reconstruct -o h.obj -- -odd.bag") == .reconstruct(ReconstructCommand(input: "-odd.bag", output: "h.obj")))
 }
@@ -111,6 +114,8 @@ private func parseError(_ line: String) -> String? {
     ("reconstruct a.ifsdataset -o head.obj --ply head.obj", ".ply"),
     ("reconstruct a.ifsdataset -o head.obj --method marching", "tsdf or poisson"),
     ("reconstruct a.ifsdataset -o head.obj --voxel-mm 0", "not a number"),
+    ("reconstruct a.ifsdataset -o head.obj --triangles 10", "not an integer in 1000...50000000"),
+    ("reconstruct a.ifsdataset -o head.obj --texture-size 100000", "not an integer in 256...16384"),
     ("eval head.obj", "missing --gt"),
     ("eval --gt gt.obj", "missing <mesh.obj>"),
     ("eval head.obj --gt gt.obj --samples 0", "not an integer"),

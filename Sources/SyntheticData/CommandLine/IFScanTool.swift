@@ -94,6 +94,7 @@ public enum IFScanTool {
         options.poses = c.poses
         options.backgroundDistanceM = c.background ? max(1.1, c.distanceM + 0.5) : nil
         options.meshResolution = c.meshResolution
+        options.lighting = c.lighting
         let start = Date()
         let result = SyntheticScan.make(options)
         let url = URL(fileURLWithPath: c.output)
@@ -200,6 +201,8 @@ public enum IFScanTool {
         options.voxelSizeMM = c.voxelMM
         options.method = c.method
         options.keepShoulders = c.keepShoulders
+        options.targetTriangles = c.targetTriangles
+        options.textureSize = c.textureSize
         let progress = ProgressPrinter(enabled: !c.quiet, io: io)
         let reconstructionStart = Date()
         let result: ReconstructionResult
@@ -256,7 +259,8 @@ public enum IFScanTool {
         if let gt = groundTruth {
             if !gt.poses.isEmpty {
                 io.out("Pose error vs ground truth: rotation mean \(format(gt.meanRotationDeg, 3))°, max \(format(gt.maxRotationDeg, 3))°; "
-                    + "translation mean \(format(gt.meanTranslationMm, 3)) mm, max \(format(gt.maxTranslationMm, 3)) mm")
+                    + "head misalignment mean \(format(gt.meanHeadMisalignmentMm, 3)) mm, max \(format(gt.maxHeadMisalignmentMm, 3)) mm; "
+                    + "camera center max \(format(gt.maxTranslationMm, 2)) mm")
             }
             if let s = gt.surfaceToGroundTruth {
                 io.out("Surface distance to ground truth: mean \(format(s.meanMm, 3)) mm, median \(format(s.medianMm, 3)), "

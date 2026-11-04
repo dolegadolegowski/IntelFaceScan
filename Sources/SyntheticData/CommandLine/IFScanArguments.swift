@@ -8,7 +8,7 @@
 //                [--distance 0.6] [--poses front,up,down,left,right] [--no-background] [--gt-mesh gt.obj]
 //   ifscan reconstruct <input.ifsdataset | recording.db3 | recording.bag> -o head.obj [--ply head.ply]
 //                [--voxel-mm 0.75] [--method tsdf|poisson] [--keep-shoulders] [--save-dataset out.ifsdataset]
-//                [--helper <IntelFaceScanHelper>] [--report report.json] [--quiet]
+//                [--triangles N] [--texture-size 4096] [--helper <IntelFaceScanHelper>] [--report report.json] [--quiet]
 //   ifscan eval <mesh.obj> --gt <gt.obj> [--samples 200000] [--report report.json] [--symmetric] [--json]
 //   ifscan info <file> [--json]
 
@@ -43,6 +43,8 @@ public struct SynthCommand: Equatable, Sendable {
     public var distanceM: Float = 0.6
     public var poses: [ScanPose] = ScanPose.required
     public var background = true
+    /// Shading by the camera-mounted light, 0 (flat albedo) ... 1.
+    public var lighting: Float = 0.25
     public var groundTruthMesh: String?
     public var meshResolution = 128
 
@@ -56,6 +58,9 @@ public struct ReconstructCommand: Equatable, Sendable {
     public var voxelMM: Float = 0.75
     public var method: SurfaceMethod = .tsdf
     public var keepShoulders = false
+    /// Decimate to this many triangles before texturing (nil = full resolution).
+    public var targetTriangles: Int?
+    public var textureSize = 4096
     public var saveDataset: String?
     public var helper: String?
     public var report: String?
@@ -119,6 +124,7 @@ public enum IFScanArguments {
               --poses <list>             Comma-separated scan poses (default front,up,down,left,right;
                                          also upLeft,upRight,downLeft,downRight, or 'all')
               --no-background            No wall behind the head
+              --lighting <0-1>           Shading by a light at the camera (default 0.25; 0 = flat albedo)
               --mesh-resolution <n>      Head tessellation, 12*n^2 triangles (default 128)
               --gt-mesh <file.obj>       Also write the ground-truth mesh here (millimeters, world frame)
             """
@@ -134,6 +140,8 @@ public enum IFScanArguments {
               --voxel-mm <mm>            TSDF voxel size (default 0.75)
               --method <tsdf|poisson>    Surface reconstruction (default tsdf)
               --keep-shoulders           Keep neck and shoulders instead of cutting below the chin
+              --triangles <n>            Decimate to n triangles before texturing (default: full resolution)
+              --texture-size <px>        Texture atlas size (default 4096)
               --save-dataset <dir>       Save the accepted keyframes as a dataset
               --helper <path>            IntelFaceScanHelper for recordings (default: $IFS_HELPER, next to
                                          ifscan, build/helper/, the app bundle)
@@ -213,7 +221,7 @@ public enum IFScanArguments {
                      Spec(name: "height", short: nil, takesValue: true), Spec(name: "frames-per-pose", short: nil, takesValue: true),
                      Spec(name: "noise", short: nil, takesValue: true), Spec(name: "seed", short: nil, takesValue: true),
                      Spec(name: "distance", short: nil, takesValue: true), Spec(name: "poses", short: nil, takesValue: true),
-                     Spec(name: "no-background", short: nil, takesValue: false),
+                     Spec(name: "no-background", short: nil, takesValue: false), Spec(name: "lighting", short: nil, takesValue: true),
                      Spec(name: "mesh-resolution", short: nil, takesValue: true), Spec(name: "gt-mesh", short: nil, takesValue: true)]
         guard let p = try parse(arguments, specs, command: "synth") else { return .help("synth") }
         guard p.positionals.isEmpty else { throw ArgumentError("synth: unexpected argument '\(p.positionals[0])'") }
@@ -231,6 +239,7 @@ public enum IFScanArguments {
         c.meshResolution = try integer(p, "mesh-resolution", c.meshResolution, in: 16 ... 512)
         if let list = p.values["poses"] { c.poses = try poses(list) }
         c.background = !p.flags.contains("no-background")
+        c.lighting = try number(p, "lighting", c.lighting, in: 0 ... 1)
         c.groundTruthMesh = p.values["gt-mesh"]
         return .synth(c)
     }
@@ -239,6 +248,7 @@ public enum IFScanArguments {
         let specs = [Spec(name: "output", short: "o", takesValue: true), Spec(name: "ply", short: nil, takesValue: true),
                      Spec(name: "voxel-mm", short: nil, takesValue: true), Spec(name: "method", short: nil, takesValue: true),
                      Spec(name: "keep-shoulders", short: nil, takesValue: false),
+                     Spec(name: "triangles", short: nil, takesValue: true), Spec(name: "texture-size", short: nil, takesValue: true),
                      Spec(name: "save-dataset", short: nil, takesValue: true), Spec(name: "helper", short: nil, takesValue: true),
                      Spec(name: "report", short: nil, takesValue: true), Spec(name: "quiet", short: "q", takesValue: false)]
         guard let p = try parse(arguments, specs, command: "reconstruct") else { return .help("reconstruct") }
@@ -259,6 +269,8 @@ public enum IFScanArguments {
             c.method = value
         }
         c.keepShoulders = p.flags.contains("keep-shoulders")
+        if p.values["triangles"] != nil { c.targetTriangles = try integer(p, "triangles", 0, in: 1_000 ... 50_000_000) }
+        c.textureSize = try integer(p, "texture-size", c.textureSize, in: 256 ... 16384)
         c.saveDataset = p.values["save-dataset"]
         c.helper = p.values["helper"]
         c.report = p.values["report"]

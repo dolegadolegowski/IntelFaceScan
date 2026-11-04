@@ -26,7 +26,7 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
 | `ScanKitTests/SyntheticCameraSourceTests` | `SyntheticCameraSource`: lifecycle and events, 30 fps pacing, configured resolution, threshold filter, the pose animation |
 | `ReconKitTests/SyntheticScanTests` | synthetic ground truth: depth equals an independent brute-force ray cast of the ground-truth mesh, back-projected depth lies on the surface, noise statistics, invalid pixels at silhouettes, `HeadPose` sign conventions, determinism, closed outward mesh |
 | `ReconKitTests/CLIArgumentTests`, `CLIToolTests` | `ifscan` parsing (28 invalid command lines), commands run in-process, exit codes, OBJ dialects |
-| `ReconKitTests/EndToEndSyntheticTests` | synthetic D455 scan → `ReconstructionPipeline` → pose error < 1° / 2 mm and mean surface distance < 1 mm; the same through `ifscan reconstruct` and the distance command. Enabled automatically once `fr_register_frames` and `fr_tsdf_create` are implemented (`CoreAvailability`); recordings from `IFS_TEST_RECORDINGS` |
+| `ReconKitTests/EndToEndSyntheticTests` | synthetic 1280×800 scan → `ReconstructionPipeline` (decimated to 60k triangles before texturing) → rotation error mean < 1°, worst frame < 1.5°, head misalignment < 5 mm, surface distance mean < 1 mm and p95 < 2.5 mm, export frame upright; the same through `ifscan reconstruct` and the distance command. Enabled automatically once `fr_register_frames` and `fr_tsdf_create` are implemented (`CoreAvailability`); recordings from `IFS_TEST_RECORDINGS` |
 
 `CoreAvailability` (SyntheticData) probes the core with arguments a real implementation rejects without side
 effects and reports which stages still return `FR_ERR_NOT_IMPLEMENTED`; use it for any test that needs a stage
@@ -59,6 +59,8 @@ of another work stream: `@Test(.enabled(if: CoreAvailability.reconstruction, "..
 * **Determinism**: the same options give identical bytes (fixed-sequence RNG, counter-based per-pixel noise).
 * Measured: noise-free depth back-projected with the true poses lies 0.02 mm (mean) from the true surface; a
   640×400 render takes ~11 ms and a 1280×800 render ~33 ms in a debug build.
+* `lighting` (`ifscan synth --lighting`) controls the view-dependent shading. It matters for colored ICP: with the
+  first integrated pipeline the worst-frame rotation error was 1.40° with the default shading and 0.98° without.
 
 `SyntheticScene` renders arbitrary poses (`render(cameraFromWorld:frameIndex:)` also returns the noise-free depth);
 `SyntheticCameraSource` is a `CameraSource` ("Synthetic D455") that turns the head through the scan poses at the
@@ -93,7 +95,8 @@ $IFSCAN eval /tmp/head.obj --gt /tmp/head.ifsdataset/ground_truth.obj --report /
 * `reconstruct` reads a dataset directly, or plays a `.db3`/`.bag` recording through the camera helper (as the
   user, no password, every frame) and the guided-scan logic (`ScanController`, `ScanConfiguration.offline`), then
   runs `ReconstructionPipeline` and `MeshExport` – the app's code path. Options: `--voxel-mm`, `--method
-  tsdf|poisson`, `--keep-shoulders`, `--save-dataset`, `--helper`, `--report`, `-q`.
+  tsdf|poisson`, `--keep-shoulders`, `--triangles` (decimate before texturing; UV unwrapping a full-resolution
+  0.75 mm head mesh takes minutes), `--texture-size`, `--save-dataset`, `--helper`, `--report`, `-q`.
 * The helper is looked up as `--helper`, `$IFS_HELPER`, next to `ifscan`, `../Helpers/` (app bundle),
   `build/helper/IntelFaceScanHelper`, `build/IntelFaceScan.app`, `/Applications/IntelFaceScan.app`.
 * The report (`--report`) holds the reconstruction report, timings, `export_transform`/`export_scale`

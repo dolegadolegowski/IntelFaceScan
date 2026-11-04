@@ -89,6 +89,28 @@ public enum MeshEvaluation {
         return zip(estimated, groundTruth).map { poseError(e0inv * $0.0, g0inv * $0.1) }
     }
 
+    /// What each registration error does to the head: the largest displacement (meters) of points on a sphere of
+    /// `radius` around the head `center` (world frame) between the estimated and the true relative poses. Unlike the
+    /// camera-center distance, this is not inflated by the ~0.6 m lever arm of a small rotation error.
+    public static func relativeHeadMisalignment(estimated: [simd_float4x4], groundTruth: [simd_float4x4],
+                                                center: SIMD3<Float>, radius: Float = 0.09) -> [Float] {
+        guard let e0 = estimated.first, let g0 = groundTruth.first else { return [] }
+        let e0inv = e0.inverse, g0inv = g0.inverse
+        // Fibonacci sphere: evenly spread directions.
+        let points: [SIMD4<Float>] = (0 ..< 64).map { k in
+            let y = 1 - 2 * (Float(k) + 0.5) / 64, r = (1 - y * y).squareRoot(), phi = Float(k) * 2.399_963
+            return SIMD4(center + radius * SIMD3(r * cos(phi), y, r * sin(phi)), 1)
+        }
+        return zip(estimated, groundTruth).map { e, g in
+            // A world point seen by camera i at the true pose, mapped back through the estimated pose.
+            let error = (e0inv * e) * (g0inv * g).inverse
+            return points.map { p in
+                let d = error * p - p
+                return simd_length(SIMD3(d.x, d.y, d.z))
+            }.max() ?? 0
+        }
+    }
+
     private static func check(_ status: fr_status) throws {
         guard status == FR_OK else {
             let detail = String(cString: fr_last_error())

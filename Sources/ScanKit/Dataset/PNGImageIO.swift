@@ -71,7 +71,8 @@ public enum PNGImageIO {
             return Image(width: w, height: h, pixels: packRows(data as Data, rowBytes: 3 * w, stride: image.bytesPerRow, height: h))
         }
         // Foreign layout (alpha, palette, 16-bit, gray): draw into RGBA8 in the image's own RGB space and drop alpha.
-        let space = image.colorSpace?.model == .rgb ? image.colorSpace! : CGColorSpaceCreateDeviceRGB()
+        var space = CGColorSpaceCreateDeviceRGB()
+        if let own = image.colorSpace, own.model == .rgb { space = own }
         let rgba = try draw(image, bytesPerPixel: 4, space: space,
                             bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
         var rgb = Data(count: w * h * 3)

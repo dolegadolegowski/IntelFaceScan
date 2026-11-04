@@ -12,7 +12,7 @@ import Testing
 // MARK: - Helpers
 
 /// Deterministic generator for test data (splitmix64 + Box-Muller).
-private struct TestRandom {
+private struct EvalRandom {
     var state: UInt64
     init(_ seed: UInt64) { state = seed }
     mutating func next() -> UInt64 {
@@ -227,7 +227,7 @@ func evalPointToTriangleRegionsAreExact(point: SIMD3<Float>, expected: Double) t
 // MARK: - fr_fit_plane
 
 private func planePoints(normal n: SIMD3<Double>, d: Double, count: Int, noise: Double, seed: UInt64) -> [Float] {
-    var random = TestRandom(seed)
+    var random = EvalRandom(seed)
     let normal = simd_normalize(n)
     let u = simd_normalize(simd_cross(normal, abs(normal.x) < 0.9 ? SIMD3(1, 0, 0) : SIMD3(0, 1, 0)))
     let v = simd_cross(normal, u)
@@ -273,7 +273,7 @@ private func fit(_ points: [Float], threshold: Float) -> (fr_status, fr_plane_fi
     let normal = simd_normalize(SIMD3<Double>(0.3, 0.1, -1))
     let sigma = 0.0005
     var points = planePoints(normal: normal, d: 0.7, count: 7_000, noise: sigma, seed: 5)
-    var random = TestRandom(99)
+    var random = EvalRandom(99)
     for _ in 0 ..< 3_000 {   // 30% clutter in front of the wall
         points += [Float(random.uniform() - 0.5) * 0.3, Float(random.uniform() - 0.5) * 0.3,
                    Float(0.3 + random.uniform() * 0.3)]

@@ -301,6 +301,24 @@ private func depthMesh(_ frame: CameraFrame, worldFromCamera: simd_float4x4) -> 
     #expect(a.groundTruthMesh.positions == c.groundTruthMesh.positions)
 }
 
+@Test func syntheticEvaluationSeparatesRotationFromItsLeverArm() {
+    let scene = SyntheticScene(options: noiseFree())
+    let truth = [matrix_identity_float4x4, scene.cameraFromWorld(headPose: HeadPose(yaw: 45, pitch: 0, roll: 0)).inverse]
+    #expect(MeshEvaluation.relativeHeadMisalignment(estimated: truth, groundTruth: truth, center: scene.headCenter) == [0, 0])
+
+    // Frame 1 off by 1 degree about the head center: the head surface (9 cm sphere) moves by r * angle = 1.57 mm,
+    // while the camera center, 0.68 m away, moves by ~12 mm.
+    let c = scene.headCenter
+    let spin = simd_float4x4(simd_quatf(angle: Float.pi / 180, axis: [0, 1, 0]))
+    let toCenter = simd_float4x4(columns: ([1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], SIMD4(c, 1)))
+    let estimated = [truth[0], toCenter * spin * toCenter.inverse * truth[1]]
+    let misalignment = MeshEvaluation.relativeHeadMisalignment(estimated: estimated, groundTruth: truth, center: c)
+    #expect(abs(misalignment[1] - 0.09 * Float.pi / 180) < 0.0001)
+    let error = MeshEvaluation.relativePoseErrors(estimated: estimated, groundTruth: truth)[1]
+    #expect(abs(error.rotationDeg - 1) < 0.01)
+    #expect(error.translationM > 0.01)
+}
+
 @Test func syntheticGroundTruthMeshIsAClosedOutwardSurface() throws {
     let options = noiseFree { $0.meshResolution = 64 }
     let mesh = SyntheticScan.make(options).groundTruthMesh
