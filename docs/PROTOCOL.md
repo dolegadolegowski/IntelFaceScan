@@ -182,5 +182,16 @@ JSON metadata, then the planes back to back in the payload:
   them).
 * `rotation` is column-major (librealsense `rs2_extrinsics`), `translation` in meters.
 * Rows are `stride` bytes; Z16 is little-endian `uint16`, multiplied by `depth_scale` gives meters, 0 = no data.
-* Backpressure: the helper keeps at most 2 unsent framesets and drops the oldest; commands, replies and events are
-  never dropped.
+* Backpressure: the helper keeps at most 2 unsent framesets. Replies, events, logs and BYE are never dropped.
+  * Live camera and real-time playback: a newer frameset replaces the oldest unsent one, so an app slower than the
+    camera gets the newest frames.
+  * Non-real-time playback (`--no-real-time`, or `PLAYBACK` with `"real_time": false`; offline processing): nothing
+    is dropped. The helper's processing thread waits until one of the 2 slots is free, so the recording plays at the
+    speed the app reads it. Commands are never held up by this: while the helper runs one (STOP, QUIT, CONFIGURE,
+    PLAYBACK, ... – the engine may wait for that very thread), framesets are queued without waiting (at most 8, then
+    the oldest is dropped), and QUIT, socket EOF, a protocol error or a signal end the wait.
+  * App side: a `PlaybackCameraSource(realTime: false)` frame stream is lossless as well – once `bufferingNewest`
+    frames wait for a consumer, the reader stops reading (and so the helper waits) until that consumer takes one.
+    While a command waits for its reply, which arrives behind those frames, frames are queued beyond that limit
+    instead; at shutdown or when the helper exits the reader stops waiting for good. Other sources keep only the
+    newest `bufferingNewest` frames per consumer.

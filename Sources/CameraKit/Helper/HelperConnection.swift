@@ -75,7 +75,7 @@ final class HelperConnection: @unchecked Sendable {
         let registered: Result<Void, Error> = lock.withLock {
             allocated.remove(id)
             if cancelled.remove(id) != nil { return .failure(CancellationError()) }
-            if isClosed { return .failure(closeError ?? CameraError.notConnected) }
+            if isClosed { return .failure(closeFailure) }
             pending[id] = Pending(completion: completion, timeout: timeoutItem)
             return .success(())
         }
@@ -260,7 +260,7 @@ final class HelperConnection: @unchecked Sendable {
             helloWaiters.removeAll()
             return (requests, waiters)
         }
-        let failure = error ?? CameraError.connectionFailed("the camera helper closed the connection")
+        let failure = closeFailure(error)
         for request in requests {
             request.timeout.cancel()
             request.completion(.failure(failure))
@@ -274,6 +274,14 @@ final class HelperConnection: @unchecked Sendable {
     }
 
     // MARK: Teardown
+
+    /// How requests fail once the connection ended: the same error for those pending then and those sent later.
+    private func closeFailure(_ error: CameraError?) -> CameraError {
+        error ?? CameraError.connectionFailed("the camera helper closed the connection")
+    }
+
+    /// Callers hold `lock`.
+    private var closeFailure: CameraError { closeFailure(closeError) }
 
     var closed: Bool { lock.withLock { isClosed } }
 
@@ -293,8 +301,11 @@ final class HelperConnection: @unchecked Sendable {
     func close() {
         io.shutdown()
         waitUntilClosed(timeout: 5)
-        writeQueue.sync {}
-        if waitUntilClosed(timeout: 0) { io.close() }
+        // On the write queue: a write still queued (a request registered just before the reader finished) runs
+        // before the descriptor is closed or fails cleanly after, and never writes to a reused descriptor number.
+        writeQueue.sync {
+            if waitUntilClosed(timeout: 0) { io.close() }
+        }
     }
 }
 
