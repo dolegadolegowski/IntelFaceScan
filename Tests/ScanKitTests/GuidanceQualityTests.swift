@@ -153,6 +153,89 @@ import Testing
         #expect(speed < 20, "speed \(speed)")
     }
 
+    /// Speeds of a 30 fps pose sequence, one per frame once the window allows a speed. minJumpRate infinity: the plain
+    /// least-squares slope (no jump removal).
+    private func speeds(frames: Int, minJumpRate: Double = 60, _ pose: (Int) -> HeadPose) -> [Float] {
+        var history = PoseHistory(window: 0.25)
+        history.minJumpRate = minJumpRate
+        var result: [Float] = []
+        for i in 0 ..< frames {
+            history.add(pose(i), at: 10 + Double(i) / 30)
+            if let s = history.angularSpeed() { result.append(s) }
+        }
+        return result
+    }
+
+    @Test func jumpRemovalLowersTheSpeedOfAStillHead() {
+        // Vision on a held head: steps of 4 degrees every 6-14 frames, 5-degree single-frame outliers, 0.5 degree jitter.
+        // Each step is a least-squares slope of up to 23 deg/s for several frames.
+        for seed: UInt64 in 1 ... 5 {
+            func run(_ minJumpRate: Double) -> [Float] {
+                var jitter = VisionJitter(seed: seed)
+                return speeds(frames: 300, minJumpRate: minJumpRate) { _ in
+                    let e = jitter.next()
+                    return HeadPose(yaw: 45 + e.x, pitch: -3 + e.y, roll: e.z)
+                }
+            }
+            let plain = run(.infinity), robust = run(60)
+            let plainFast = plain.filter { $0 > 20 }.count, robustFast = robust.filter { $0 > 20 }.count
+            #expect(plainFast >= 3 * robustFast && robustFast * 100 <= 6 * robust.count,
+                    "seed \(seed): \(plainFast) -> \(robustFast) of \(robust.count) windows above 20 deg/s")
+            #expect(plainFast >= 60, "seed \(seed): the jitter model should trip the plain slope (\(plainFast) of 298)")
+        }
+    }
+
+    @Test func angularSpeedStillMeasuresMotionThroughJumps() {
+        for seed: UInt64 in 1 ... 3 {
+            // Turns at 30 and 60 deg/s with the same jumps: what the jump removal takes away stays small.
+            for rate: Float in [30, 60] {
+                var jitter = VisionJitter(seed: seed)
+                let measured = speeds(frames: 90) { i in
+                    let e = jitter.next()
+                    return HeadPose(yaw: rate * Float(i) / 30 + e.x, pitch: e.y, roll: e.z)
+                }
+                let median = measured.sorted()[measured.count / 2]
+                #expect(abs(median - rate) < 0.25 * rate, "seed \(seed), \(rate) deg/s: median \(median)")
+            }
+            // A 2.5 Hz shake of +-6 degrees with jumps still reads as fast motion in most windows.
+            var jitter = VisionJitter(seed: seed)
+            let shake = speeds(frames: 120) { i in
+                let e = jitter.next()
+                return HeadPose(yaw: 6 * Float(sin(2 * Double.pi * 2.5 * Double(i) / 30)) + e.x, pitch: e.y, roll: e.z)
+            }
+            #expect(shake.filter { $0 > 20 }.count * 2 >= shake.count, "seed \(seed): \(shake)")
+        }
+        // Without jitter a turn is measured exactly, also right after an abrupt start.
+        let ramp = speeds(frames: 30) { i in HeadPose(yaw: i < 15 ? 0 : 4 * Float(i - 15), pitch: 0, roll: 0) }
+        #expect(abs(ramp.last! - 120) < 1e-3)
+    }
+
+    @Test func jumpRemovalKeepsMotionAndTheNewestChange() {
+        let t = (0 ..< 8).map { Double($0) / 30 }
+        func clean(_ x: [Double]) -> [Double] {
+            PoseHistory.withoutJumps(x, t: t, minJumpRate: 60, neighborRatio: 0.5)
+        }
+        func near(_ a: [Double], _ b: [Double]) -> Bool { zip(a, b).allSatisfy { abs($0 - $1) < 1e-9 } }
+        // An isolated step: gone. Outliers of one and two frames: gone, also right next to a step.
+        #expect(near(clean([0, 0, 0, 5, 5, 5, 5, 5]), [0, 0, 0, 0, 0, 0, 0, 0]))
+        #expect(near(clean([0.3, 0, 0, 5, 5, 5.2, 5, 5]), [0.3, 0, 0, 0, 0, 0.2, 0, 0]))
+        #expect(near(clean([0, 0, 0, 6, 0, 0, 0, 0]), [0, 0, 0, 0, 0, 0, 0, 0]))
+        #expect(near(clean([1, 1, 7, 7, 1, 1, 1, 1]), [1, 1, 1, 1, 1, 1, 1, 1]))
+        #expect(clean([0, 0, 0, 5, -1, 5, 5, 5]).allSatisfy { abs($0) <= 1 })
+        // A step during a slow turn (1 degree per frame), also against the turn, and an outlier on a turn.
+        #expect(near(clean([0, 1, 2, 8, 9, 10, 11, 12]), [0, 1, 2, 3, 4, 5, 6, 7]))
+        #expect(near(clean([0, 1, 2, -2, -1, 0, 1, 2]), [0, 1, 2, 3, 4, 5, 6, 7]))
+        #expect(near(clean([0, 1, 2, 9, 4, 5, 6, 7]), [0, 1, 2, 4, 4, 5, 6, 7]))
+        // A step and an outlier in the same frame.
+        #expect(clean([0, 0, 0, -11, -5, -5, -5, -5]).allSatisfy { abs($0) <= 1e-9 })
+        // Continuous fast motion is kept, also when it has just started, and so is a change at the newest sample.
+        #expect(near(clean([0, 3, 6, 9, 12, 15, 18, 21]), [0, 3, 6, 9, 12, 15, 18, 21]))
+        #expect(near(clean([0, 0, 0, 0, 0, 3, 6, 9]), [0, 0, 0, 0, 0, 3, 6, 9]))
+        #expect(near(clean([0, 0, 0, 0, 0, 0, 0, 6]), [0, 0, 0, 0, 0, 0, 0, 6]))
+        // A step slower than the jump rate (1.5 degrees in a frame = 45 deg/s) is not removed.
+        #expect(near(clean([0, 0, 0, 1.5, 1.5, 1.5, 1.5, 1.5]), [0, 0, 0, 1.5, 1.5, 1.5, 1.5, 1.5]))
+    }
+
     @Test func poseHistoryResetsOnGapsAndBackwardTime() {
         var history = PoseHistory(window: 0.25, maxGap: 0.5)
         history.add(HeadPose(yaw: 0, pitch: 0, roll: 0), at: 1.0)

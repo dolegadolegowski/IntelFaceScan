@@ -148,10 +148,19 @@ public enum CameraMotion {
 ///
 /// Vision's angles jitter by about a degree from frame to frame; differencing consecutive frames at 30 fps would
 /// turn that into ~30 deg/s of fake motion, so the speed is the least-squares slope over the window instead.
+/// Vision's readings also jump while the head is still: a reading switches by several degrees within one frame and
+/// stays there, or is off for a single frame (on the held synthetic head: 2-4 degrees in pitch on "down", up to 12
+/// degrees in yaw at +45 at 1280x800). One step in the 0.25 s window is a least-squares slope of up to 5.7 deg/s
+/// per degree, so a 4-degree step alone exceeded the 20 deg/s gate for several frames. A head cannot move like that
+/// (a step is a turn at hundreds of deg/s that stops within a frame), so single-frame outliers and isolated steps
+/// are removed before the fit; real motion changes the pose over several frames and is measured as before.
 public struct PoseHistory: Sendable {
     public var window: Double
     /// A gap longer than this (seconds) or a timestamp going backwards starts a new history.
     public var maxGap: Double
+    /// A frame-to-frame change faster than this (deg/s; 2 degrees at 30 fps) can be a jump (see withoutJumps).
+    public var minJumpRate: Double = 60
+    public var jumpNeighborRatio: Double = 0.5
     private var samples: [(t: Double, pose: HeadPose)] = []
 
     public init(window: Double = 0.25, maxGap: Double = 0.5) {
@@ -182,23 +191,62 @@ public struct PoseHistory: Sendable {
         return HeadPose(yaw: yaw / n, pitch: pitch / n, roll: roll / n, confidence: confidence / n)
     }
 
-    /// Angular speed (deg/s) from the least-squares slopes of yaw, pitch and roll; nil until the window spans
-    /// at least `minSpan` seconds.
+    /// Angular speed (deg/s) from the least-squares slopes of yaw, pitch and roll after removing Vision's jumps;
+    /// nil until the window spans at least `minSpan` seconds.
     public func angularSpeed(minSpan: Double = 0.06) -> Float? {
         guard samples.count >= 2, let first = samples.first, let last = samples.last,
               last.t - first.t >= minSpan else { return nil }
-        let n = Double(samples.count)
-        let tMean = samples.reduce(0) { $0 + $1.t } / n
-        var stt = 0.0
-        var sty = 0.0, stp = 0.0, str = 0.0
-        for s in samples {
-            let dt = s.t - tMean
-            stt += dt * dt
-            sty += dt * Double(s.pose.yaw); stp += dt * Double(s.pose.pitch); str += dt * Double(s.pose.roll)
-        }
+        let t = samples.map(\.t)
+        let tMean = t.reduce(0, +) / Double(t.count)
+        let stt = t.reduce(0) { $0 + ($1 - tMean) * ($1 - tMean) }
         guard stt > 0 else { return nil }
-        let (vy, vp, vr) = (sty / stt, stp / stt, str / stt)
-        return Float((vy * vy + vp * vp + vr * vr).squareRoot())
+        var squared = 0.0
+        for axis in [samples.map { Double($0.pose.yaw) }, samples.map { Double($0.pose.pitch) },
+                     samples.map { Double($0.pose.roll) }] {
+            let values = Self.withoutJumps(axis, t: t, minJumpRate: minJumpRate, neighborRatio: jumpNeighborRatio)
+            var sty = 0.0
+            for (ti, v) in zip(t, values) { sty += (ti - tMean) * v }
+            squared += (sty / stt) * (sty / stt)
+        }
+        return Float(squared.squareRoot())
+    }
+
+    /// One angle over time with Vision's jumps removed. A jump is a change faster than `minJumpRate`:
+    ///   * a single-frame outlier is reached and left by jumps in opposite directions: it takes the value of the
+    ///     nearer neighbor (the median of the three), which leaves at most a step when it sat on one;
+    ///   * an isolated step has changes at most `neighborRatio` times as fast before and after it: it is replaced by
+    ///     the slower of those changes, so a turn through a step still counts.
+    /// An outlier of two frames is two steps. The newest change has no successor yet and is kept, so a fresh jump
+    /// counts as motion for a frame rather than hiding the start of a real turn.
+    static func withoutJumps(_ x: [Double], t: [Double], minJumpRate: Double, neighborRatio: Double) -> [Double] {
+        let n = x.count
+        guard n >= 3, t.count == n else { return x }
+        func fast(_ change: Double, _ i: Int) -> Bool { abs(change) >= minJumpRate * (t[i] - t[i - 1]) }
+        var y = x
+        for i in 1 ..< n - 1 {
+            let a = y[i - 1], b = x[i], c = x[i + 1]
+            if fast(b - a, i) && fast(c - b, i + 1) && (b - a) * (c - b) < 0 {
+                y[i] = max(min(a, b), min(max(a, b), c))
+            }
+        }
+        var rates = [Double](repeating: 0, count: n)   // rates[i]: from sample i - 1 to i
+        for i in 1 ..< n {
+            let dt = t[i] - t[i - 1]
+            rates[i] = dt > 0 ? (y[i] - y[i - 1]) / dt : 0
+        }
+        var out = y
+        for i in 1 ..< n {
+            var change = y[i] - y[i - 1]
+            if i < n - 1, abs(rates[i]) >= minJumpRate {
+                let limit = neighborRatio * abs(rates[i])
+                if abs(rates[i + 1]) <= limit && (i == 1 || abs(rates[i - 1]) <= limit) {
+                    let neighbor = i == 1 || abs(rates[i + 1]) < abs(rates[i - 1]) ? rates[i + 1] : rates[i - 1]
+                    change = neighbor * (t[i] - t[i - 1])
+                }
+            }
+            out[i] = out[i - 1] + change
+        }
+        return out
     }
 }
 

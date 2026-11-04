@@ -122,6 +122,53 @@ import Testing
         #expect(updates.allSatisfy { !$0.acceptedKeyframe })
     }
 
+    @Test func jitteryVisionOnAStillHeadDoesNotBlockThePoses() async {
+        // Vision jumps by 4 degrees every 6-14 frames per angle and has single-frame outliers while the head is held:
+        // the scan must take about as long as with exact readings. The motion gate used to read every jump as
+        // 20-25 deg/s and restart the hold (seeds 1-3: not finished in 900 frames, 540-570 x headMoving).
+        func run(_ jitter: VisionJitter?) async -> (ScanPhase?, keyframes: Int, frames: Int, moving: Int) {
+            var configuration = ScanConfiguration.testOffline
+            configuration.angleTolerance = 12   // the jumps must not push the pose out of tolerance instead
+            let (controller, tracker) = makeController(configuration)
+            var sim = ScanSimulation()
+            sim.user.jitter = jitter
+            await sim.run(controller, tracker: tracker, maxFrames: 900)
+            return (sim.updates.last?.phase, controller.finish().keyframes.count, sim.updates.count,
+                    sim.rejections.filter { $0 == .headMoving }.count)
+        }
+        let exact = await run(nil)
+        #expect(exact.0 == .finished && exact.keyframes == 15)
+        for seed: UInt64 in 1 ... 3 {
+            let jittery = await run(VisionJitter(seed: seed))
+            #expect(jittery.0 == .finished && jittery.keyframes == 15, "seed \(seed)")
+            #expect(Double(jittery.frames) < 1.2 * Double(exact.frames),
+                    "seed \(seed): \(jittery.frames) frames, exact readings \(exact.frames)")
+            // headMoving while arriving at each pose (turning at 60 deg/s) is expected; jitter adds little to it.
+            #expect(Double(jittery.moving) < 1.5 * Double(exact.moving) + 5,
+                    "seed \(seed): \(jittery.moving) x headMoving, exact readings \(exact.moving)")
+        }
+    }
+
+    @Test func rejectsHeadMotionThroughJitter() async {
+        // The 2.5 Hz shake of rejectsHeadMotion with Vision's jumps on top: still no keyframe.
+        let (controller, tracker) = makeController()
+        let factory = GuidanceFrameFactory()
+        var jitter = VisionJitter(seed: 7)
+        var updates: [ScanUpdate] = []
+        for i in 0 ..< 150 {
+            let t = Double(i) / 30
+            let e = jitter.next()
+            let yaw: Float = i < 20 ? 0 : 6 * Float(sin(2 * Double.pi * 2.5 * t))
+            let obs = HeadObservation(pose: HeadPose(yaw: yaw + (i < 20 ? 0 : e.x), pitch: i < 20 ? 0 : e.y, roll: 0,
+                                                     confidence: 0.9),
+                                      faceRect: factory.faceRect, landmarks: [], personMask: nil)
+            tracker.setScript { _ in obs }
+            updates.append(await controller.process(factory.frame(sequence: UInt64(i), timestampMs: 5000 + t * 1000)))
+        }
+        #expect(controller.keyframeCount == 0)
+        #expect(updates.contains { $0.rejection == .headMoving })
+    }
+
     @Test func rejectsCameraMotion() async {
         let (controller, tracker) = makeController()
         var sim = ScanSimulation()
