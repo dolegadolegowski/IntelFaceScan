@@ -4,6 +4,8 @@
 // machine). Both consumers keep only the newest frame: a slow analysis never delays the preview, and neither
 // builds a backlog. Results are published to the main actor, coalesced to the newest one; the frame tasks never
 // wait for the main actor, so stop() finishes even while the main queue cannot run (see AppModel termination).
+// Vision runs on the controller's dispatch queue, never on a thread of the Swift cooperative pool (see
+// ScanController.processingQueue), and stop() does not wait for an analysis in progress.
 
 import CameraKit
 import CoreGraphics
@@ -97,7 +99,7 @@ final class FramePipeline: @unchecked Sendable {
             for await frame in analysisFrames {
                 guard let self, !Task.isCancelled else { break }
                 let controller = self.lock.withLock { self.controller }
-                var update = await controller.process(frame)
+                guard var update = await Self.analysis(of: frame, by: controller) else { break }
                 // Masks are megabytes and the UI does not draw them.
                 update.observation?.personMask = nil
                 let stats = self.lock.withLock { () -> FrameStats in
@@ -111,6 +113,20 @@ final class FramePipeline: @unchecked Sendable {
             }
         }
         lock.withLock { tasks = [distribute, analyze] }
+    }
+
+    /// The controller's update for a frame (analyzed on the controller's queue, off the cooperative pool), or nil when
+    /// the task is cancelled first: stop() does not wait for a Vision call that is slow to return; that call ends on
+    /// its own and its update is dropped.
+    private static func analysis(of frame: CameraFrame, by controller: ScanController) async -> ScanUpdate? {
+        let pending = PendingUpdate()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if pending.install(continuation) { controller.process(frame) { pending.resume($0) } }
+            }
+        } onCancel: {
+            pending.resume(nil)
+        }
     }
 
     /// Hands the newest result to the main actor: at most one hop is pending, a newer result replaces an
@@ -145,10 +161,38 @@ final class FramePipeline: @unchecked Sendable {
         for task in running { task.cancel() }
     }
 
-    /// Stops both consumers and waits for them (never for the main actor).
+    /// Stops both consumers and waits for them (never for the main actor, nor for an analysis in progress).
     func stop() async {
         cancel()
         let running = lock.withLock { tasks }
         for task in running { await task.value }
+    }
+}
+
+/// A continuation resumed exactly once: by the analysis or by cancellation, whichever comes first.
+private final class PendingUpdate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<ScanUpdate?, Never>?
+    private var resumed = false
+
+    /// false when cancellation came first (the continuation is then resumed with nil here).
+    func install(_ continuation: CheckedContinuation<ScanUpdate?, Never>) -> Bool {
+        let cancelled = lock.withLock { () -> Bool in
+            if resumed { return true }
+            self.continuation = continuation
+            return false
+        }
+        if cancelled { continuation.resume(returning: nil) }
+        return !cancelled
+    }
+
+    func resume(_ update: ScanUpdate?) {
+        let waiting = lock.withLock { () -> CheckedContinuation<ScanUpdate?, Never>? in
+            guard !resumed else { return nil }
+            resumed = true
+            defer { continuation = nil }
+            return continuation
+        }
+        waiting?.resume(returning: update)
     }
 }

@@ -18,8 +18,9 @@ import Testing
 @Suite("App model lifecycle", .serialized)
 struct AppModelLifecycleTests {
     /// Frames reach the analysis; the pipeline idles while no screen shows the preview; closing shuts the source down.
-    @Test func syntheticPreview() async throws {
+    @Test(.sourceTestLimit) func syntheticPreview() async throws {
         let (model, log) = AppTest.makeModel()
+        defer { await AppTest.cleanUp(model, log) }
         try await AppTest.openAndWaitForFrames(model, .synthetic)
         #expect(model.isPipelineActive == true, "pipeline inactive on the preview")
         #expect(await AppTest.waitUntil(60) { model.tracking.faceRect != nil }, "no face found on the synthetic head")
@@ -39,16 +40,17 @@ struct AppModelLifecycleTests {
 
     /// A second source request while the previous source is still shutting down neither orphans a source nor
     /// connects before the previous one is gone.
-    @Test func switchWhileClosing() async throws {
+    @Test(.sourceTestLimit) func switchWhileClosing() async throws {
         let (model, log) = AppTest.makeModel(shutdownDelay: 1.0)
+        defer { await AppTest.cleanUp(model, log) }
         try await AppTest.openAndWaitForFrames(model, .synthetic)
         let switching = Task { await model.openSource(.synthetic) }
         await Task.yield()
         // An older model accepted this request too (isConnecting was false while the first one closed the source)
         // and both created a source.
         let third = Task { await model.openSource(.synthetic) }
-        await switching.value
-        await third.value
+        try #require(await AppTest.wait(for: switching, timeout: 60), "the switch did not end within 60 s")
+        try #require(await AppTest.wait(for: third, timeout: 60), "the third request did not end within 60 s")
         try #require(log.sources.count == 2, "\(log.sources.count) sources created, expected 2")
         let first = log.sources[0], second = log.sources[1]
         #expect(first.shutdownFinished != nil, "the first source was not shut down")
@@ -65,8 +67,9 @@ struct AppModelLifecycleTests {
 
     /// "Keep neck and shoulders" switched on after a scan that cut them off cannot bring them back (the keyframe
     /// masks end at the chin): the sidebar says so until the next scan.
-    @Test func shouldersSwitchedOnAfterScan() async throws {
-        let (model, _) = AppTest.makeModel()
+    @Test(.sourceTestLimit) func shouldersSwitchedOnAfterScan() async throws {
+        let (model, log) = AppTest.makeModel()
+        defer { await AppTest.cleanUp(model, log) }
         try await AppTest.openAndWaitForFrames(model, .synthetic)
         model.startScan()
         model.finishScan()
@@ -88,8 +91,9 @@ struct AppModelLifecycleTests {
     }
 
     /// No source can be opened while a scan runs (it would end the scan) or while a reconstruction runs.
-    @Test func noSwitchDuringScan() async throws {
+    @Test(.sourceTestLimit) func noSwitchDuringScan() async throws {
         let (model, log) = AppTest.makeModel()
+        defer { await AppTest.cleanUp(model, log) }
         try await AppTest.openAndWaitForFrames(model, .synthetic)
         #expect(model.canOpenSource)
         model.startScan()
@@ -104,8 +108,9 @@ struct AppModelLifecycleTests {
 
     /// Quitting while a closed source is still shutting down waits for it (an older needsShutdown was false here and
     /// the app exited at once); no source opens afterwards.
-    @Test func quitWhileClosing() async throws {
+    @Test(.sourceTestLimit) func quitWhileClosing() async throws {
         let (model, log) = AppTest.makeModel(shutdownDelay: 1.0)
+        defer { await AppTest.cleanUp(model, log) }
         try await AppTest.openAndWaitForFrames(model, .synthetic)
         model.closeSourceAction()
         #expect(model.needsShutdown, "a closing source does not hold the termination")
@@ -119,8 +124,9 @@ struct AppModelLifecycleTests {
 
     /// applicationShouldTerminate can be called from a main-queue block; AppKit then holds the main queue until it
     /// gets the reply. The shutdown must finish without the main actor: here the main thread is blocked for real.
-    @Test func quitWithMainQueueBlocked() async throws {
+    @Test(.sourceTestLimit) func quitWithMainQueueBlocked() async throws {
         let (model, log) = AppTest.makeModel()
+        defer { await AppTest.cleanUp(model, log) }
         let request: SourceRequest = AppTest.helperAvailable ? .live : .synthetic
         try await AppTest.openAndWaitForFrames(model, request)
         model.startScan()
@@ -148,9 +154,10 @@ struct AppModelLifecycleTests {
     }
 
     /// Closing the source finishes a running recording and reports it; Show in Finder points at the file.
-    @Test(.enabled(if: AppTest.helperAvailable, AppTest.helperSkipReason))
+    @Test(.enabled(if: AppTest.helperAvailable, AppTest.helperSkipReason), .sourceTestLimit)
     func fakeCameraRecordingOnClose() async throws {
         let (model, log) = AppTest.makeModel()
+        defer { await AppTest.cleanUp(model, log) }
         let dir = try AppTest.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = dir.appendingPathComponent("rec.db3")
@@ -170,9 +177,10 @@ struct AppModelLifecycleTests {
     }
 
     /// Quitting during a recording delivers the file before the reply.
-    @Test(.enabled(if: AppTest.helperAvailable, AppTest.helperSkipReason))
+    @Test(.enabled(if: AppTest.helperAvailable, AppTest.helperSkipReason), .sourceTestLimit)
     func fakeCameraQuitDuringRecording() async throws {
         let (model, log) = AppTest.makeModel()
+        defer { await AppTest.cleanUp(model, log) }
         let dir = try AppTest.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = dir.appendingPathComponent("quit.db3")
@@ -192,6 +200,7 @@ struct AppModelLifecycleTests {
           .timeLimit(.minutes(30)))
     func fullSyntheticScan() async throws {
         let model = AppModel(defaults: nil)
+        defer { await model.shutdownForTermination() }
         await model.openSource(.synthetic)
         try #require(await AppTest.waitUntil(30) { model.hasFrames }, "no frames")
         try #require(await AppTest.waitUntil(30) { model.tracking.faceRect != nil }, "no face")
@@ -223,6 +232,5 @@ struct AppModelLifecycleTests {
         }
         let size = hi - lo
         #expect(size.y > 120 && size.y < 400 && size.x > 100 && size.x < 300, "not a head in millimeters: \(size)")
-        await model.shutdownForTermination()
     }
 }

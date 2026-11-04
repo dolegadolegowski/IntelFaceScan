@@ -245,6 +245,13 @@ public final class ScanController: @unchecked Sendable {
     private let processingLock = NSLock()
     private var work = WorkState()
 
+    // Frames are analyzed here, never on a thread of the Swift cooperative pool. Vision's perform blocks its thread in
+    // -[VNControlledCapacityTasksQueue dispatchGroupWait:error:] until Vision's own work has run on another thread of
+    // that pool (it never returns while every pool thread is busy). On a pool thread one frame therefore takes a
+    // thread and needs a second free one: with the 3 threads of a 3-core machine (the CI runner), frames in flight
+    // and a busy task left Vision's work no thread, no frame was analyzed, and every task of the process stopped.
+    private let processingQueue = DispatchQueue(label: "IntelFaceScan.ScanController.process", qos: .userInitiated)
+
     // Guards `shared`, which skip/cancel/finish change from other threads (e.g. the main actor) while a frame is
     // being analyzed; process() commits its result only when the generation did not change meanwhile.
     private let stateLock = NSLock()
@@ -289,9 +296,20 @@ public final class ScanController: @unchecked Sendable {
         }
     }
 
-    /// Processes one frame; returns the state to show.
+    /// Processes one frame on the controller's dispatch queue (off the Swift cooperative pool, see processingQueue)
+    /// and hands the state to show to `completion`, on that queue.
+    public func process(_ frame: CameraFrame, completion: @escaping @Sendable (ScanUpdate) -> Void) {
+        processingQueue.async {
+            completion(self.processingLock.withLock { self.processLocked(frame) })
+        }
+    }
+
+    /// Processes one frame; returns the state to show. The frame is analyzed on the controller's dispatch queue,
+    /// not on the caller's thread (see processingQueue).
     public func process(_ frame: CameraFrame) async -> ScanUpdate {
-        processingLock.withLock { processLocked(frame) }
+        await withCheckedContinuation { continuation in
+            process(frame) { continuation.resume(returning: $0) }
+        }
     }
 
     /// Skips `pose` when it is still open (configured, neither complete nor skipped, the scan capturing) and optional

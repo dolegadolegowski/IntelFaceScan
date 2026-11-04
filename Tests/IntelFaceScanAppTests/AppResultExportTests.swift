@@ -62,8 +62,9 @@ struct AppResultExportTests {
     /// Saving reports the files and offers the OBJ in Finder; a later notice about something else (the opened
     /// dataset finished playing) no longer offers it. The old model kept the last saved file for every message.
     @MainActor
-    @Test func savedFileOnlyForItsOwnMessage() async throws {
-        let (model, _) = AppTest.makeModel()
+    @Test(.sourceTestLimit) func savedFileOnlyForItsOwnMessage() async throws {
+        let (model, log) = AppTest.makeModel()
+        defer { await AppTest.cleanUp(model, log) }
         let capture = Self.modelOnResultScreen(model)
         let dir = try AppTest.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }

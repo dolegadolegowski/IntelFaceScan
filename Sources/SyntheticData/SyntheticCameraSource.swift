@@ -39,6 +39,11 @@ public final class SyntheticCameraSource: CameraSource, @unchecked Sendable {
     private var isShutdown = false
     private var sequence: UInt64 = 0
     private let clockOrigin = ProcessInfo.processInfo.systemUptime
+    /// Frames are rendered here, off the Swift cooperative pool and below the priority of the face analysis. A debug
+    /// build renders 1280x800 slower than 30 fps, so the loop renders back to back: on a pool thread at
+    /// userInitiated, with its concurrentPerform bands, it took the threads that Vision's own work needs (see
+    /// ScanController.processingQueue), and on a 3-core machine no frame was analyzed any more.
+    private let renderQueue = DispatchQueue(label: "IntelFaceScan.SyntheticCameraSource.render", qos: .utility)
 
     /// Defaults for UI work: stronger shading than the reconstruction datasets. Apple Vision needs the shading cues:
     /// with lighting 0.25 it misses the face in the down and +-45 degree poses and person segmentation fails; at 0.6
@@ -220,19 +225,14 @@ public final class SyntheticCameraSource: CameraSource, @unchecked Sendable {
                 return (self.scene, self.fps, self.filters, self.sequence)
             }
             guard let scene else { return }
-            let now = ProcessInfo.processInfo.systemUptime
-            let animationTime = now - clockOrigin
-            let (pose, translation) = headPose(at: animationTime)
-            let timestamp = Date().timeIntervalSince1970 * 1000
-            var view = scene.render(cameraFromWorld: scene.cameraFromWorld(headPose: pose, translation: translation),
-                                    frameIndex: sequence, sequence: sequence, timestampMs: timestamp)
-            if filters.threshold.enabled {
-                SyntheticCameraSource.applyThreshold(&view.frame.alignedDepth, min: filters.threshold.minM,
-                                                     max: filters.threshold.maxM)
+            let frame = await withCheckedContinuation { continuation in
+                renderQueue.async {
+                    continuation.resume(returning: self.renderFrame(scene, filters: filters, sequence: sequence))
+                }
             }
             if Task.isCancelled { return }
             let continuations = lock.withLock { Array(frameContinuations.values) }
-            for c in continuations { c.yield(view.frame) }
+            for c in continuations { c.yield(frame) }
 
             // Fixed-rate schedule; when rendering falls behind, skip ahead instead of bursting.
             let period = 1.0 / Double(max(fps, 1))
@@ -245,6 +245,20 @@ public final class SyntheticCameraSource: CameraSource, @unchecked Sendable {
                 return
             }
         }
+    }
+
+    /// The frame at the current wall-clock time (renderQueue).
+    private func renderFrame(_ scene: SyntheticScene, filters: FilterConfiguration, sequence: UInt64) -> CameraFrame {
+        let animationTime = ProcessInfo.processInfo.systemUptime - clockOrigin
+        let (pose, translation) = headPose(at: animationTime)
+        let timestamp = Date().timeIntervalSince1970 * 1000
+        var view = scene.render(cameraFromWorld: scene.cameraFromWorld(headPose: pose, translation: translation),
+                                frameIndex: sequence, sequence: sequence, timestampMs: timestamp)
+        if filters.threshold.enabled {
+            SyntheticCameraSource.applyThreshold(&view.frame.alignedDepth, min: filters.threshold.minM,
+                                                 max: filters.threshold.maxM)
+        }
+        return view.frame
     }
 
     /// The helper's threshold filter: depth outside [min, max] meters becomes invalid.
