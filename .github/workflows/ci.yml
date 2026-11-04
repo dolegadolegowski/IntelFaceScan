@@ -57,7 +57,7 @@ jobs:
           swift --version
           cmake --version | head -n 1
           os="$(sw_vers -productVersion)"
-          echo "macOS $os ($(uname -m))"
+          echo "macOS $os ($(uname -m)), $(sysctl -n hw.ncpu) cores, $(($(sysctl -n hw.memsize) / 1073741824)) GB memory"
           if [ "$(printf '%s\n27.2\n' "$os" | sort -V | head -n 1)" != "27.2" ]; then
             echo "::warning::The runner image runs macOS $os; IntelFaceScan targets macOS 27.2+ (tests still run here)."
           fi
