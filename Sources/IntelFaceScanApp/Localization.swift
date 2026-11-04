@@ -282,6 +282,20 @@ enum S {
     static var reportMethod: String { tr("Method", "Metoda") }
     static var reportMesh: String { tr("Vertices / triangles", "Wierzchołki / trójkąty") }
     static var reportTimings: String { tr("Timings", "Czasy") }
+    /// Stage names of ReconstructionReport.durations.
+    static func timingName(_ key: String) -> String {
+        switch key {
+        case "segmentation": return stageName(.segmentation)
+        case "registration": return stageName(.registration)
+        case "registration check": return tr("Registration check", "Kontrola rejestracji")
+        case "bounds": return tr("Volume bounds", "Granice objętości")
+        case "fusion": return stageName(.fusion)
+        case "poisson": return tr("Poisson surface", "Powierzchnia Poissona")
+        case "cleanup": return stageName(.cleanup)
+        case "texturing": return stageName(.texturing)
+        default: return key
+        }
+    }
     static var reportNotes: String { tr("Notes", "Uwagi") }
     static var gpu: String { tr("GPU", "GPU") }
     static var cpu: String { tr("CPU", "CPU") }
