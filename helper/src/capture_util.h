@@ -72,6 +72,31 @@ std::optional< PixelRect > map_color_rect_to_depth( const rs2_intrinsics & color
                                                     const PixelRect & color_rect,
                                                     float distance_m );
 
+// Values of the options a configuration sets after the visual preset, plus the preset (empty = left alone). The
+// engine applies them in this order (docs/PROTOCOL.md): preset, depth units, disparity shift, emitter on / laser
+// power / emitter off, depth and color auto exposure.
+struct OptionValues
+{
+    std::optional< float > preset;
+    std::optional< float > depth_units;
+    std::optional< int > disparity_shift;
+    std::optional< float > emitter;
+    std::optional< float > laser_power;
+    std::optional< float > depth_auto_exposure;
+    std::optional< float > color_auto_exposure;
+
+    bool empty() const
+    {
+        return ! preset && ! depth_units && ! disparity_shift && ! emitter && ! laser_power && ! depth_auto_exposure
+            && ! color_auto_exposure;
+    }
+};
+
+// librealsense re-applies an active visual preset when the depth sensor opens. Given the options read before and
+// after the open, the ones to set back: those that changed (never the preset itself), and an emitter that was off
+// whenever the laser power is set back (setting the power switches the D4xx emitter on).
+OptionValues options_to_restore( const OptionValues & before, const OptionValues & now );
+
 // Detects a stream restart from its frame counter: the D4xx firmware restarts depth (counter back near 0) when the
 // RGB stream is toggled while depth streams.
 class FrameCounterMonitor

@@ -353,16 +353,7 @@ public:
     void shutdown() override;
 
 private:
-    struct OptionPlan
-    {
-        std::optional< float > preset;
-        std::optional< float > depth_units;
-        std::optional< int > disparity_shift;
-        std::optional< float > emitter;
-        std::optional< float > laser_power;
-        std::optional< float > depth_auto_exposure;
-        std::optional< float > color_auto_exposure;
-    };
+    using OptionPlan = OptionValues;
 
     const CaptureCallbacks & callbacks() const { return m_shared->callbacks; }
     void log( const char * level, const std::string & message ) const { emit_log( callbacks(), level, message ); }
@@ -387,7 +378,9 @@ private:
     OptionPlan plan_options_locked( const CaptureConfig & config ) const;
     void apply_options_locked( const OptionPlan & plan );
     void apply_configuration_locked( const CaptureConfig & config );
-    void reapply_after_preset_locked();
+    bool preset_active_locked() const;
+    OptionPlan read_preset_controlled_locked() const;
+    void restore_after_preset_locked( const OptionPlan & before );
     void apply_roi_locked();
     uint64_t finish_recording_locked();
 
@@ -861,12 +854,15 @@ void RealSenseEngine::start_session_locked( bool emit )
         if( m_playback )
             m_playback->pause();
 
+        std::optional< OptionPlan > before_open;
+        if( ! m_playback_mode && preset_active_locked() )
+            before_open = read_preset_controlled_locked();
         st.color_sensor.open( st.color_profile );
         session->color_open = true;
         st.depth_sensor.open( st.depth_profiles );
         session->depth_open = true;
-        if( ! m_playback_mode && m_configured )
-            reapply_after_preset_locked();
+        if( before_open )
+            restore_after_preset_locked( *before_open );
         if( st.motion_sensor )
         {
             st.motion_sensor.open( st.motion_profiles );
@@ -1130,22 +1126,47 @@ void RealSenseEngine::apply_configuration_locked( const CaptureConfig & config )
     apply_options_locked( plan_options_locked( config ) );
 }
 
-void RealSenseEngine::reapply_after_preset_locked()
+// librealsense re-applies the active visual preset whenever the depth sensor opens (advanced_mode_preset_option
+// registers an on-open hook; the preset stays active until it is set to Custom, which set_depth_table() does). The
+// "Default" preset rewrites the depth table (1 mm units, disparity shift 0), laser power, emitter and auto exposure,
+// and the sensor read its depth units just before the hook ran, so its frames would carry 0.1 mm while the camera
+// sends 1 mm. High Accuracy / High Density keep these values. So while a preset is active, the options the
+// configuration sets after the preset are read before the sensors open and whatever the hook changed is set back
+// (in the order of apply_options_locked) before they start; values the app set later with SET_OPTION survive.
+bool RealSenseEngine::preset_active_locked() const
 {
-    // librealsense re-applies the active visual preset whenever the depth sensor opens (advanced_mode_preset_option
-    // registers an on-open hook; the preset stays active until it is set to Custom, which set_depth_table() does).
-    // The "Default" preset rewrites the depth table (1 mm units, disparity shift 0), laser power, emitter and auto
-    // exposure, and the sensor read its depth units just before the hook ran, so its frames would carry 0.1 mm while
-    // the camera sends 1 mm. Everything the configuration sets after the preset is therefore set again here, between
-    // open and start (High Accuracy / High Density keep these values: setting them again changes nothing).
     rs2::sensor depth = find_sensor_locked( "depth" );
-    if( ! depth || ! depth.supports( RS2_OPTION_VISUAL_PRESET ) )
+    return depth && depth.supports( RS2_OPTION_VISUAL_PRESET )
+        && std::lround( depth.get_option( RS2_OPTION_VISUAL_PRESET ) ) != RS2_RS400_VISUAL_PRESET_CUSTOM;
+}
+
+RealSenseEngine::OptionPlan RealSenseEngine::read_preset_controlled_locked() const
+{
+    OptionPlan state;
+    rs2::sensor depth = find_sensor_locked( "depth" );
+    rs2::sensor color = find_sensor_locked( "color" );
+    auto read = []( const rs2::sensor & s, rs2_option option, std::optional< float > & out ) {
+        if( s && s.supports( option ) )
+            out = s.get_option( option );
+    };
+    read( depth, RS2_OPTION_DEPTH_UNITS, state.depth_units );
+    read( depth, RS2_OPTION_EMITTER_ENABLED, state.emitter );
+    read( depth, RS2_OPTION_LASER_POWER, state.laser_power );
+    read( depth, RS2_OPTION_ENABLE_AUTO_EXPOSURE, state.depth_auto_exposure );
+    read( color, RS2_OPTION_ENABLE_AUTO_EXPOSURE, state.color_auto_exposure );
+    rs400::advanced_mode adv( m_device );
+    if( adv && adv.is_enabled() )
+        state.disparity_shift = int( adv.get_depth_table().disparityShift );
+    return state;
+}
+
+void RealSenseEngine::restore_after_preset_locked( const OptionPlan & before )
+{
+    OptionPlan restore = options_to_restore( before, read_preset_controlled_locked() );
+    if( restore.empty() )
         return;
-    if( std::lround( depth.get_option( RS2_OPTION_VISUAL_PRESET ) ) == RS2_RS400_VISUAL_PRESET_CUSTOM )
-        return;
-    OptionPlan plan = plan_options_locked( m_config );
-    plan.preset.reset();
-    apply_options_locked( plan );
+    log( "debug", "The visual preset re-applied itself when the depth sensor opened; restoring the configuration" );
+    apply_options_locked( restore );
 }
 
 void RealSenseEngine::apply_roi_locked()

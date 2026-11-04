@@ -300,6 +300,28 @@ std::optional< PixelRect > map_color_rect_to_depth( const rs2_intrinsics & color
     return clamp_rect( mapped, depth.width, depth.height );
 }
 
+OptionValues options_to_restore( const OptionValues & before, const OptionValues & now )
+{
+    auto changed = []( const auto & a, const auto & b ) {
+        return a && b && std::fabs( double( *a ) - double( *b ) ) > 1e-9 + 1e-6 * std::fabs( double( *a ) );
+    };
+    OptionValues restore;
+    if( changed( before.depth_units, now.depth_units ) )
+        restore.depth_units = before.depth_units;
+    if( changed( before.disparity_shift, now.disparity_shift ) )
+        restore.disparity_shift = before.disparity_shift;
+    bool laser = changed( before.laser_power, now.laser_power );
+    if( laser )
+        restore.laser_power = before.laser_power;
+    if( changed( before.emitter, now.emitter ) || ( laser && before.emitter && *before.emitter == 0 ) )
+        restore.emitter = before.emitter;
+    if( changed( before.depth_auto_exposure, now.depth_auto_exposure ) )
+        restore.depth_auto_exposure = before.depth_auto_exposure;
+    if( changed( before.color_auto_exposure, now.color_auto_exposure ) )
+        restore.color_auto_exposure = before.color_auto_exposure;
+    return restore;
+}
+
 bool FrameCounterMonitor::update( unsigned long long frame_number )
 {
     bool restarted = m_last && frame_number < *m_last;

@@ -520,6 +520,54 @@ TEST_CASE( util_roi_minimum_size )
     CHECK( r.x == 500 && r.y == 220 && r.width == 300 && r.height == 380 );
 }
 
+TEST_CASE( util_options_to_restore_after_preset )
+{
+    // The face-scan configuration with the emitter off, before the depth sensor opened ...
+    OptionValues before;
+    before.preset = 1;
+    before.depth_units = 0.0001f;
+    before.disparity_shift = 50;
+    before.emitter = 0;
+    before.laser_power = 360;
+    before.depth_auto_exposure = 0;
+    before.color_auto_exposure = 1;
+    // ... and after librealsense re-applied the "Default" preset (1 mm, shift 0, laser on at 150, auto exposure).
+    OptionValues now = before;
+    now.depth_units = 0.001f;
+    now.disparity_shift = 0;
+    now.emitter = 1;
+    now.laser_power = 150;
+    now.depth_auto_exposure = 1;
+    OptionValues r = options_to_restore( before, now );
+    CHECK( ! r.preset );
+    CHECK( r.depth_units && near( *r.depth_units, 0.0001, 1e-9 ) );
+    CHECK( r.disparity_shift == 50 );
+    CHECK( r.laser_power == 360.f );
+    CHECK( r.emitter == 0.f );  // applied after the laser power, which switches the emitter on
+    CHECK( r.depth_auto_exposure == 0.f );
+    CHECK( ! r.color_auto_exposure );
+
+    // High Accuracy keeps these values: nothing to do (0.0001 read back as float is not "changed").
+    now = before;
+    now.depth_units = float( 0.0001 * ( 1 + 1e-8 ) );
+    CHECK( options_to_restore( before, now ).empty() );
+
+    // Only the laser power changed while the emitter stays off: the emitter is switched off again after it.
+    now = before;
+    now.laser_power = 150;
+    r = options_to_restore( before, now );
+    CHECK( r.laser_power == 360.f && r.emitter == 0.f && ! r.depth_units && ! r.disparity_shift );
+    // With the emitter on, only the laser power.
+    before.emitter = 1;
+    now = before;
+    now.laser_power = 150;
+    r = options_to_restore( before, now );
+    CHECK( r.laser_power == 360.f && ! r.emitter );
+    // Options a camera does not have are left alone.
+    OptionValues none;
+    CHECK( options_to_restore( none, now ).empty() );
+}
+
 TEST_CASE( util_frame_counter_monitor )
 {
     FrameCounterMonitor m;
