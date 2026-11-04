@@ -115,6 +115,11 @@ let package = Package(
             name: "ReconKitTests",
             dependencies: ["ReconKit", "ScanKit", "CameraKit", "SyntheticData", "FaceReconCore"],
             swiftSettings: [.swiftLanguageMode(.v5)]),
+        // The app's model, localization and 3D preview (@testable import of the executable target).
+        .testTarget(
+            name: "IntelFaceScanAppTests",
+            dependencies: ["IntelFaceScanApp", "CameraKit", "ScanKit", "ReconKit", "SyntheticData"],
+            swiftSettings: [.swiftLanguageMode(.v5)]),
     ],
     cLanguageStandard: .c11,
     cxxLanguageStandard: .cxx17

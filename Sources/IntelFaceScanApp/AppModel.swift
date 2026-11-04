@@ -140,7 +140,7 @@ final class AppModel {
     @ObservationIgnored private let log = Logger(subsystem: "IntelFaceScan", category: "App")
 
     /// - Parameters:
-    ///   - defaults: where the settings persist; nil keeps them in memory (developer checks).
+    ///   - defaults: where the settings persist; nil keeps them in memory (tests, snapshots).
     ///   - sourceFactory: makes the camera source for a request.
     init(defaults: UserDefaults? = .standard, sourceFactory: @escaping SourceFactory = AppModel.makeSource) {
         self.defaults = defaults
@@ -880,9 +880,9 @@ extension AppModel {
         self.datasetCapture = datasetCapture
     }
 
-    /// Developer checks: the number of detached sources whose shutdown is still running.
+    /// Tests: the number of detached sources whose shutdown is still running.
     var pendingSourceShutdowns: Int { closingTasks.count }
-    /// Developer checks: whether the frame pipeline currently uploads and analyzes frames.
+    /// Tests: whether the frame pipeline currently uploads and analyzes frames.
     var isPipelineActive: Bool? { pipeline?.isActive }
 }
 #endif
