@@ -17,7 +17,7 @@ frame 0 of the registration).
 | preparing | order keyframes front, up, down, left, right, diagonals (stable); drop frames with inconsistent image data | Swift |
 | segmentation | head masks per keyframe (below); at least 5 usable keyframes including a frontal one, otherwise `notEnoughKeyframes` / `core(stage: "validation")` | `SegmentationHeadMask.swift` |
 | registration | initial poses, `fr_register_frames` (clouds, pairwise ICP, loop closures) | `RegistrationInitialPoses.swift`, `fr_register_frames.cpp` |
-| globalOptimization | pose graph (reported by the core's progress), then a registration check that drops frames whose surface does not fit | `fr_pose_graph.cpp`, `RegistrationCheck` |
+| globalOptimization | pose graph (reported by the core's progress), then a registration check that drops frames whose surface does not fit (below) | `fr_pose_graph.cpp`, `RegistrationCheck` |
 | fusion | robust bounds of the registered clouds + margin, then TSDF integration on Metal (CPU fallback), or screened Poisson | `fr_tsdf.cpp`, `tsdf_metal.mm`, `fr_poisson.cpp` |
 | meshing | marching cubes | `marching_cubes.cpp` |
 | cleanup | crop below the chin unless `keepShoulders`, then `MeshProcessing.clean` | pipeline + mesh module |
@@ -78,10 +78,14 @@ Non-finite Vision angles count as 0. In the synthetic tests, every non-reference
 `fr_cloud_from_rgbd` builds each cloud in these steps:
 
 1. **Valid pixels**: depth in [min, max], and inside the mask (≥ 128).
-2. **Silhouettes against flying pixels.** A valid pixel is "bad" when a 4-neighbor has no data or lies on another
-   surface (|Δz| > max(5 mm, 2 · z/fx · tan 75°)); image-border pixels are bad too. The bad set is dilated by
-   `mask_erode_px` with a separable square filter. Stereo depth interpolates between foreground and background
-   along silhouettes, and those ramps disappear: there is a test with a 2-pixel ramp.
+2. **Silhouettes against flying pixels.** A valid pixel is "bad" when a 4-neighbor lies on another surface
+   (|Δz| > max(5 mm, 2 · z/fx · tan 75°)) or belongs to an empty region (no data or masked out) of more than 4
+   pixels; image-border pixels and those empty regions are bad too. The bad set is dilated by `mask_erode_px` with a
+   separable square filter. Stereo depth interpolates between foreground and background along silhouettes, and
+   those ramps disappear: there is a test with a 2-pixel ramp. Smaller empty regions are matching failures inside a
+   surface (speckle), not silhouettes. An earlier version eroded around them too, so every speckle erased a 5 × 5
+   block: the synthetic default of 1 % speckle cost 38 % of a head cloud, and with 8 % scattered holes 98 % of the
+   points were gone and the reconstruction failed (test with 8 % holes).
 3. **Normals**: PCA over the neighbors within `normal_radius_px` (default 3 px, all offsets) that lie on the same
    surface. The tolerance grows with the pixel distance. Each normal is oriented toward the camera.
 4. **Grazing samples** (angle between normal and ray > `max_view_angle_deg`) are dropped.
@@ -98,17 +102,26 @@ deterministic.
 Both variants run Gauss-Newton over a left perturbation T ← exp(ξ) T, with ξ = [ω, v] in the target frame:
 
 * geometric: r_G = (Tq − p)·n_p, J_G = [q′ × n_p ; n_p]
-* photometric (Park, Zhou, Koltun 2017): r_C = I_p + d_p·(Tq − p) − I_q − c, J_C = [q′ × d_p ; d_p]. Here d_p is
-  the target's tangent-plane intensity gradient, and c is the mean intensity offset, which absorbs auto-exposure
-  changes between views. The two terms are weighted λ and 1 − λ (λ = 0.968).
+* photometric (Park, Zhou, Koltun 2017): r_C = I_p + d_p·(Tq − p) − g·I_q, J_C = [q′ × d_p ; d_p]. Here d_p is
+  the target's tangent-plane intensity gradient, and g is the exposure gain between the views: the median ratio
+  (I_p + d_p·(Tq − p)) / I_q over the current correspondences, so auto exposure (which scales intensities) does
+  not bias the term. The two terms are weighted λ and 1 − λ (λ = 0.968), with intensities in [0, 1].
+
+On the colored level every iteration first finds the correspondences, then estimates g and the photometric kernel
+scale from them, then accumulates the normal equations.
 
 **Multi-scale.** The pyramid has `levels` levels with voxel · 2^l. Each level averages the *raw* points, so coarse
 positions are unbiased. The correspondence distance and the robust scale grow by 2^l per level. Correspondences
 come from nanoflann (k-d tree, radius-limited 1-NN).
 
-**Robust kernel.** The kernel is Tukey (default) or Huber on r_G. A 1e-9 · trace/6 ridge keeps directions the data
-does not constrain at zero update. Sliding on a plane is the textbook case: point-to-plane leaves the in-plane
-shift untouched, and colored ICP resolves it (test).
+**Robust kernels.** Each residual has its own: Tukey (default) or Huber on r_G with `robust_scale_m`, and Tukey on
+r_C with 4.685 · 1.4826 · MAD of the photometric residuals, clamped to [0.02, 0.25]. The photometric kernel matters:
+on texture edges (eyes, brows, lips, hairline, freckles) the linear intensity model fails, and those ~2 % of the
+correspondences have residuals 10–50× the color noise. Unweighted, they dominated the normal equations; see
+"Colored versus point-to-plane ICP". The upper clamp keeps the kernel wide while the views are still misaligned,
+so strong textures keep their capture range (the textured-plane test starts 3.6 mm off). A 1e-9 · trace/6 ridge
+keeps directions the data does not constrain at zero update. Sliding on a plane is the textbook case:
+point-to-plane leaves the in-plane shift untouched, and colored ICP resolves it (test).
 
 **Colored ICP uses the photometric term only at the finest level.** With the term at the coarse levels, texture
 created local minima: edges with 6° / 10 mm initial error were rejected. Geometric coarse levels plus photometric
@@ -152,6 +165,18 @@ removes them from fusion. Initial node poses are composed along the certain edge
 
 **Diagnostics.** Set `FR_DEBUG_REGISTRATION=1` to print every candidate edge (kind, initial angle, status,
 fitness, RMSE, acceptance) to stderr.
+
+**Registration check (`RegistrationCheck.verify`, Swift).** The registered poses are grouped (relative rotation
+below 12° to a group's first frame). Every frame's registered cloud (stride 2, 1.5 mm voxels) is evaluated against
+the most similar view (smallest relative rotation) of its own pose group and of every other pose group within 60°,
+with `fr_icp` at `max_iterations = 0` and a 3 mm correspondence distance. A pair fits when its fitness is at least
+0.25 and its RMSE at most max(2 × median, median + 0.7 mm) over all evaluated pairs. A frame passes when a chain of
+fitting pairs links it to frame 0, which always passes. An earlier version judged each frame by its single most
+similar view, which failed both ways: a pose group misregistered as a whole (a wrong bridge) fits itself, because
+its frames are each other's most similar views, and passed; a correct frame whose most similar view was the
+misregistered one was dropped (tests with a 3.6 mm offset of one frame and of a two-frame group). Comparing with a
+fixed number of most similar views is not enough either: with four keyframes per pose those are all siblings, and
+the left groups of the 40-keyframe benchmark were never linked to the reference (test with four views per pose).
 
 ## Pose graph (`fr_pose_graph_*`)
 
@@ -278,26 +303,30 @@ release build, and the reconstructions share the same registration.
 union). "Nose" is the mean error within 2 cm of the nose tip, the finest detail in the model. Boundary edges count
 holes and open borders.
 
-| method | setting | total (s) | surface stage (s) | vertices | mean error (mm) | p95 (mm) | nose (mm) | boundary edges |
-|---|---|---|---|---|---|---|---|---|
-| TSDF (Metal) | voxel 1.00 mm | 1.06 | 0.09 | 121722 | 0.184 | 0.329 | 0.103 | 11640 |
-| **TSDF (Metal)** | **voxel 0.75 mm** | **1.09** | **0.11** | **229962** | **0.186** | **0.331** | **0.090** | 16979 |
-| TSDF (Metal) | voxel 0.50 mm | 1.18 | 0.20 | 551078 | 0.202 | 0.341 | 0.091 | 29241 |
-| TSDF (CPU) | voxel 0.75 mm | 1.41 | 0.43 | 229962 | 0.186 | 0.331 | 0.090 | 16979 |
-| Poisson | depth 9 | 11.52 | 10.53 | 569837 | 0.344 | 0.641 | 0.178 | 4656 |
-| Poisson | depth 10 | 12.20 | 11.21 | 600060 | 0.409 | 1.122 | 0.330 | 4523 |
-| Poisson | depth 11 | 12.90 | 11.93 | 598736 | 0.410 | 1.127 | 0.339 | 4521 |
+| method | setting | surface stage (s) | vertices | mean error (mm) | p95 (mm) | nose (mm) |
+|---|---|---|---|---|---|---|
+| TSDF (Metal) | voxel 1.00 mm | 0.10 | 147476 | 0.214 | 0.360 | 0.076 |
+| **TSDF (Metal)** | **voxel 0.75 mm** | **0.11** | **269319** | **0.196** | **0.291** | **0.060** |
+| TSDF (Metal) | voxel 0.50 mm | 0.20 | 657268 | 0.213 | 0.285 | 0.068 |
+| TSDF (CPU) | voxel 0.75 mm | 0.40 | 269319 | 0.196 | 0.291 | 0.060 |
+| Poisson | depth 9 | 13.0 | 758803 | 0.325 | 0.591 | 0.155 |
+| Poisson | depth 10 | 12.4 | 854738 | 0.354 | 0.925 | 0.276 |
+| Poisson | depth 11 | 13.4 | 844951 | 0.360 | 0.943 | 0.275 |
+
+Measured after integration (`IFS_BENCH=1 scripts/test.sh -c release --filter PipelineBenchmark`), so the meshes are
+cleaned and textured; vertex counts include the copies along texture seams, which is also why boundary edges are no
+longer a useful hole count here. The pre-integration measurement (no cleanup) had the same ranking: TSDF 0.75 mm
+mean 0.186 / p95 0.331 mm, Poisson depth 9–11 0.344–0.410 / 0.64–1.13 mm.
 
 **Decision: TSDF is the default method; Poisson stays available as `.poisson`.**
 
-* **Accuracy.** TSDF is about 2× more accurate (mean 0.19 versus 0.34–0.41 mm, p95 0.33 versus 0.64–1.1 mm) and
-  keeps detail better: nose error 0.09 versus 0.18–0.34 mm. Poisson fits the raw noisy points with an implicit
+* **Accuracy.** TSDF is about 2× more accurate (mean 0.20 versus 0.33–0.36 mm, p95 0.29 versus 0.59–0.94 mm) and
+  keeps detail better: nose error 0.06 versus 0.16–0.28 mm. Poisson fits the raw noisy points with an implicit
   function, while the TSDF averages every observation along the viewing rays with noise-aware weights. Poisson
   depths 10–11 (cells about 0.3 mm over the padded cube) fit the noise and get worse than depth 9.
-* **Time.** TSDF is about 100× faster in the surface stage (0.1 s versus 11–12 s), and the whole pipeline runs in
-  about 1.1 s.
+* **Time.** TSDF is about 100× faster in the surface stage (0.1 s versus 12–13 s).
 * **Holes.** Poisson closes holes and gives a watertight surface before trimming. The TSDF leaves unobserved
-  regions open. In this scan almost all TSDF boundary edges are in such regions:
+  regions open. In this scan (pre-integration, before cleanup) almost all TSDF boundary edges were in such regions:
   * the back of the head, which the guided-scan poses (|yaw| ≤ 45°) never see: one loop of about 5600 vertices;
   * the neck cut and the underside of the jaw;
   * self-occluded creases under the brow ridge and beside the nose;
@@ -319,8 +348,8 @@ same sampling. Fusing many slightly different views recovers some sub-pixel deta
 about 1 mm are not resolved.
 
 **Fusion averaging.** Each surface point is seen by roughly 5–15 frames with useful weight. With independent noise
-the fused surface noise is σ / √N_eff ≈ 0.15–0.5 mm. It is less in practice, because the temporal filter and the
-static projector pattern correlate frames of one pose.
+the fused surface noise is σ / √N_eff ≈ 0.15–0.5 mm. The gain is smaller in practice, because the temporal filter
+and the static projector pattern correlate frames of one pose.
 
 **Voxel.** Marching cubes places the surface with sub-voxel accuracy by interpolation, but represents features of
 roughly 2 voxels and larger. A voxel of about half the raw noise (and close to the fused noise) keeps the D455's
@@ -329,29 +358,57 @@ max(4 mm, 3σ)):
 
 | depth noise at 0.6 m | voxel | mean error (mm) | p95 (mm) | nose (mm) | vertices |
 |---|---|---|---|---|---|
-| 0.5 mm | 1.00 mm | 0.143 | 0.242 | 0.083 | 118275 |
-| 0.5 mm | 0.75 mm | 0.140 | 0.240 | 0.072 | 221541 |
-| 0.5 mm | 0.50 mm | 0.151 | 0.246 | 0.067 | 525184 |
-| 0.9 mm | 1.00 mm | 0.184 | 0.329 | 0.103 | 121722 |
-| 0.9 mm | 0.75 mm | 0.186 | 0.331 | 0.090 | 229962 |
-| 0.9 mm | 0.50 mm | 0.202 | 0.341 | 0.091 | 551078 |
-| 1.5 mm | 1.00 mm | 0.266 | 0.512 | 0.164 | 130355 |
-| 1.5 mm | 0.75 mm | 0.275 | 0.523 | 0.155 | 247310 |
-| 1.5 mm | 0.50 mm | 0.298 | 0.556 | 0.155 | 599419 |
+| 0.5 mm | 1.00 mm | 0.188 | 0.289 | 0.074 | 142905 |
+| 0.5 mm | 0.75 mm | 0.170 | 0.246 | 0.069 | 256701 |
+| 0.5 mm | 0.50 mm | 0.171 | 0.231 | 0.059 | 602498 |
+| 0.9 mm | 1.00 mm | 0.214 | 0.360 | 0.076 | 147476 |
+| 0.9 mm | 0.75 mm | 0.196 | 0.291 | 0.060 | 269319 |
+| 0.9 mm | 0.50 mm | 0.213 | 0.285 | 0.068 | 657268 |
+| 1.5 mm | 1.00 mm | 0.279 | 0.468 | 0.075 | 164477 |
+| 1.5 mm | 0.75 mm | 0.274 | 0.433 | 0.072 | 308163 |
+| 1.5 mm | 0.50 mm | 0.290 | 0.462 | 0.080 | 778462 |
 
-The overall error is set by the noise. Smaller voxels sharpen detail (nose) only while the noise is low, and add
-noise everywhere else at 2.4× the vertices.
+(After integration, cleaned and textured meshes; `PipelineBenchmark.voxelSizeVersusNoise`.) The overall error is set
+by the noise. 0.75 mm is the best or within 1 % of the best at every noise level; 0.5 mm sharpens the nose only at
+the lowest noise and costs 2.4× the vertices. Before integration (no cleanup) 1.0 mm was slightly better at 1.5 mm
+noise (0.266 versus 0.275 mm); the cleanup's smoothing removed that difference.
 
 **Choice: 0.75 mm** (`ReconstructionOptions.voxelSizeMM` default).
 
-* Use 0.5 mm only when the measured single-frame noise is ≤ 0.5 mm, for example after strong temporal filtering
-  or at a closer working distance.
-* Use 1.0 mm for noise ≥ 1.3 mm.
+* 0.5 mm brings nothing measurable, even at 0.5 mm noise or at 0.47 m with correlated noise (below).
+* 1.0 mm is a reasonable choice to save memory and time; it costs 2–11 % accuracy.
 
 **Truncation.** Use 4 mm, which is ≥ 5 voxels and ≥ 3σ for σ ≤ 1.3 mm. Raise it to 3σ for noisier data; the
-pipeline enforces at least 2 voxels. The synthetic data has independent per-pixel noise, while real D455 noise is
-spatially correlated (spatial filter, projector pattern). The choice should be re-checked against real recordings
-once the capture module's measurements (`docs/CAMERA.md`) are in.
+pipeline enforces at least 2 voxels, also after coarsening a too-large volume.
+
+**Check against the D455 numbers with correlated noise.** The table above has independent per-pixel noise, while
+real D455 noise is spatially correlated (spatial filter, projector pattern). Textured `SyntheticData` head, full
+pipeline (point-to-plane), 10 keyframes at 1280×800. At the recommended 0.47 m with the theoretical white noise
+of `docs/CAMERA.md` (1.25 mm at 1 m: 0.28 mm at 0.47 m), and at 0.6 m with the renderer's default (2 mm at 1 m:
+0.72 mm), both with correlated noise (σ 1.4 mm at 1 m, correlation radius 4 px) and waviness (σ 0.8 mm at 1 m,
+24 px) on top (`PipelineRobustnessTests.tsdfParameterTable`, `IFS_RECON_STUDY=1`):
+
+| scan | voxel | truncation | surface mean / p95 |
+|---|---|---|---|
+| 0.47 m | 0.50 mm | 2.5 mm | 0.193 / 0.592 mm |
+| 0.47 m | 0.50 mm | 4.0 mm | 0.188 / 0.576 mm |
+| 0.47 m | 0.75 mm | 2.5 mm | 0.184 / 0.574 mm |
+| 0.47 m | **0.75 mm** | **4.0 mm** | **0.187 / 0.574 mm** |
+| 0.47 m | 0.75 mm | 6.0 mm | 0.187 / 0.573 mm |
+| 0.47 m | 1.00 mm | 4.0 mm | 0.187 / 0.577 mm |
+| 0.6 m | 0.50 mm | 2.5 mm | 0.393 / 1.075 mm |
+| 0.6 m | 0.50 mm | 4.0 mm | 0.355 / 0.950 mm |
+| 0.6 m | 0.75 mm | 2.5 mm | 0.366 / 1.027 mm |
+| 0.6 m | **0.75 mm** | **4.0 mm** | **0.334 / 0.899 mm** |
+| 0.6 m | 0.75 mm | 6.0 mm | 0.321 / 0.854 mm |
+| 0.6 m | 1.00 mm | 4.0 mm | 0.326 / 0.878 mm |
+
+With correlated noise the fusion parameters hardly matter: the error comes from the per-frame shape distortion
+(waviness) and the registration error it causes (0.19° mean at 0.47 m, 0.29° at 0.6 m, against 0.04° without it).
+At 0.47 m every setting is within 5 %; 0.5 mm voxels buy nothing for 2.4× the vertices. At 0.6 m a short 2.5 mm
+truncation costs 10 %, and 6 mm gains 4 %. **The defaults (0.75 mm, 4 mm) stay.** Do not shorten the truncation
+below 4 mm; with measured noise above ~1.3 mm at the working distance, raise it to 3σ. To be re-checked on real
+recordings once the capture module's measurements (`docs/CAMERA.md`) are in.
 
 **Memory.** A head volume with margins is about 0.27 × 0.33 × 0.30 m. That is about 60 M voxels (0.5 GB) at
 0.75 mm and about 200 M voxels (1.6 GB) at 0.5 mm.
@@ -360,84 +417,159 @@ once the capture module's measurements (`docs/CAMERA.md`) are in.
 
 **Whole-scan registration.** The test uses 11 rendered views of the synthetic head at 640×400: front ×3, up ×2,
 down ×2, left ×2, right ×2. Depth noise is 0.9 mm at 0.6 m, and the initial poses are perturbed by 4° about the
-head plus 6 mm. Every frame lands within **0.37 mm** of the truth (the worst displacement of head points), with
-rotation error ≤ 0.13°. Edge RMSE is 0.6 mm, which is the noise level.
+head plus 6 mm. With the default (colored) ICP parameters of `fr_registration_params_default`, every frame lands
+within **0.27 mm** of the truth (the worst displacement of head points), with rotation error ≤ 0.10°. Edge RMSE is
+0.6 mm, which is the noise level.
 
 **Capture range.** Same views, 3 random perturbations per row; time is per registration:
 
 | initial rotation error | initial translation error | colored ICP | worst misalignment (mm) | max rejected edges | time (s) |
 |---|---|---|---|---|---|
-| 2° | 3 mm | yes | 0.41 | 0 | 0.11 |
+| 2° | 3 mm | yes | 0.30 | 0 | 0.07 |
 | 2° | 3 mm | no | 0.72 | 0 | 0.06 |
-| 4° | 6 mm | yes | 0.42 | 0 | 0.12 |
+| 4° | 6 mm | yes | 0.30 | 0 | 0.07 |
 | 4° | 6 mm | no | 0.71 | 0 | 0.06 |
-| 6° | 10 mm | yes | 0.42 | 0 | 0.10 |
+| 6° | 10 mm | yes | 0.28 | 0 | 0.07 |
 | 6° | 10 mm | no | 0.68 | 0 | 0.06 |
-| 8° | 15 mm | yes | 0.54 | 5 | 0.11 |
+| 8° | 15 mm | yes | 0.42 | 5 | 0.09 |
 | 8° | 15 mm | no | 0.75 | 5 | 0.08 |
-| 10° | 20 mm | yes | 0.50 | 16 | 0.13 |
+| 10° | 20 mm | yes | 0.44 | 16 | 0.09 |
 | 10° | 20 mm | no | 0.84 | 16 | 0.09 |
 
-The perturbations are per frame, so relative errors between two frames are up to twice these values. Colored ICP
-is about 40 % more accurate on the smooth synthetic head, where geometry alone leaves sliding directions.
+(`IFS_BENCH=1 scripts/test.sh -c release --filter ReconCaptureRange`, with the robust photometric kernel; before it,
+colored ICP reached 0.41–0.54 mm.) The perturbations are per frame, so relative errors between two frames are up
+to twice these values. Colored ICP is about 50 % more accurate on this smooth test head, where geometry alone
+leaves sliding directions and the texture looks the same from every view; on the textured head with view-dependent
+shading it is not (next section).
 
 ### Colored versus point-to-plane ICP (default: point-to-plane)
 
 The capture-range table above uses this module's own test head, whose color is identical from every view. The
 textured head of `SyntheticData` (`ifscan synth`) also renders view-dependent shading from a light at the camera
 (`--lighting`), which is what a real head turning under fixed room lights looks like. Full pipeline (`ifscan
-reconstruct --icp colored|geometric`, Vision-free initial poses from the dataset, TSDF 0.75 mm, 1280×800, noise
-2 mm at 1 m), errors against the ground truth:
+reconstruct --icp colored|geometric`, initial poses from the dataset's simulated Vision poses and landmarks, TSDF
+0.75 mm, 1280×800, noise 2 mm at 1 m, `--triangles 60000`), errors against the ground truth. "Before" is the
+integrated version (f91b9c6), "after" has the photometric kernel and exposure gain (above) and the cloud fix for
+isolated holes ("Point clouds"), which also helps point-to-plane:
 
-| scan | lighting | ICP | rotation error mean / max | head misalignment mean / max | surface distance mean / p95 |
-|---|---|---|---|---|---|
-| 5 poses × 2 | 0.6 | colored | 2.68° / 8.38° | 6.8 / 19.3 mm | 1.58 / 4.47 mm |
-| 5 poses × 2 | 0.6 | point-to-plane | **0.06° / 0.12°** | **0.14 / 0.25 mm** | **0.13 / 0.39 mm** |
-| 9 poses × 2 | 0.6 | colored | 2.50° / 4.71° | 6.8 / 12.7 mm | 1.99 / 4.98 mm |
-| 9 poses × 2 | 0.6 | point-to-plane | **0.08° / 0.15°** | **0.19 / 0.35 mm** | **0.09 / 0.25 mm** |
-| 5 poses × 2 | 0.25 | colored | 0.73° / 1.29° | 2.2 / 3.8 mm | 0.51 / 1.69 mm |
-| 5 poses × 2 | 0.25 | point-to-plane | **0.06° / 0.12°** | **0.14 / 0.25 mm** | **0.13 / 0.39 mm** |
-| 9 poses × 2 | 0 (flat) | colored | 0.38° / 0.81° | 1.3 / 2.8 mm | 0.27 / 0.61 mm |
-| 9 poses × 2 | 0 (flat) | point-to-plane | **0.08° / 0.15°** | **0.19 / 0.35 mm** | **0.09 / 0.25 mm** |
+| scan | lighting | ICP | version | rotation error mean / max | head misalignment mean / max | surface mean / p95 |
+|---|---|---|---|---|---|---|
+| 5 poses × 2 | 0.6 | colored | before | 2.68° / 8.38° | 6.8 / 19.3 mm | 1.59 / 4.47 mm |
+| 5 poses × 2 | 0.6 | colored | after | 1.86° / 3.60° | 4.7 / 8.5 mm | 1.25 / 3.70 mm |
+| 5 poses × 2 | 0.6 | point-to-plane | before | 0.06° / 0.12° | 0.14 / 0.25 mm | 0.13 / 0.39 mm |
+| 5 poses × 2 | 0.6 | point-to-plane | after | **0.035° / 0.066°** | **0.09 / 0.16 mm** | **0.13 / 0.38 mm** |
+| 5 poses × 2 | 0.25 | colored | after | 0.56° / 1.28° | 1.6 / 3.7 mm | 0.40 / 1.30 mm |
+| 5 poses × 2 | 0.25 | point-to-plane | after | **0.035° / 0.066°** | **0.09 / 0.16 mm** | **0.13 / 0.38 mm** |
+| 5 poses × 2 | 0 (flat) | colored | after | 0.068° / 0.110° | 0.17 / 0.33 mm | 0.13 / 0.40 mm |
+| 5 poses × 2 | 0 (flat) | point-to-plane | after | **0.035° / 0.066°** | **0.09 / 0.16 mm** | **0.13 / 0.38 mm** |
+| 9 poses × 2 | 0 (flat) | colored | before | 0.38° / 0.81° | 1.3 / 2.8 mm | 0.27 / 0.61 mm |
+| 9 poses × 2 | 0 (flat) | colored | after | 0.049° / 0.084° | 0.14 / 0.25 mm | 0.08 / 0.22 mm |
+| 9 poses × 2 | 0 (flat) | point-to-plane | before | 0.08° / 0.15° | 0.19 / 0.35 mm | 0.09 / 0.25 mm |
+| 9 poses × 2 | 0 (flat) | point-to-plane | after | **0.047° / 0.083°** | **0.13 / 0.22 mm** | **0.08 / 0.23 mm** |
 
-The photometric term pulls frames toward wherever the shading looks alike, and its error grows with the shading
-strength. Even with flat albedo it is worse here: the procedural skin texture has much finer detail than this
-module's test head. A real D455 adds two more reasons: color and aligned depth disagree by up to about a pixel
-(factory calibration), and auto exposure changes per view. A head is not a sliding-prone surface (nose, eye
-sockets, ears), so point-to-plane is well constrained. `ReconstructionOptions.useColoredICP` therefore defaults to
-`false`; colored ICP stays available (`--icp colored`) for scans of smooth, strongly textured surfaces. To be
-re-checked on real recordings.
+**Why colored ICP was worse: a defect and an inherent limit.** Measured pair by pair (`ifscan synth` views, ICP
+started at the true relative pose, so any movement is bias):
 
-**40-keyframe scan.** In the 1280×800 benchmark scan, the worst frame is 0.75 mm off (the left group) and the
-median is about 0.25 mm.
+* **Defect: no robust weighting of the photometric residual.** With flat lighting and noise-free depth, colored
+  ICP drifted 0.26° (mean over 8 pairs) away from the truth, point-to-plane 0.008°. At the true pose the median
+  |r_C| is 0.005–0.007, the color noise (1.5 of 255 levels). But 1.4–2.7 % of the correspondences have |r_C| > 0.1:
+  texture edges (eyes, brows, lips, hairline, freckles), where the intensity gradient is ~5× the typical one (26–53
+  versus 9–12 per meter) and the linear model I_p + d_p·δ fails over the ~0.5 mm offset δ to the nearest target
+  point. With the quadratic cost they dominated the normal equations: one Gauss-Newton step from the truth moved
+  0.08–0.62° with them and 0.03–0.17° without them. With the Tukey kernel the drift is 0.038° (noise-free) and
+  0.053° versus 0.046° for point-to-plane on noisy flat-lit pairs (11 pairs). The additive offset c could not absorb
+  auto exposure: with ±15 % gain per view the drift was 0.17° with c and is 0.052° with the gain g.
+* **Inherent: view-dependent shading.** With lighting 0.6, half of the correspondences of a front/left pair have
+  |r_C| > 0.1 at the true pose: the same skin point is brighter facing the light. Brightness constancy, the model of
+  colored ICP, does not hold; the term aligns the shading, which moves with the light rather than with the head.
+  The kernel cannot separate this from texture. Locally normalized log intensity (an experiment, not adopted)
+  brought lighting-0.6 pairs from 2.0° to 0.21°, but made flat-lit pairs worse (0.18°).
+* **Checked and not the cause:** pixel-center convention (the renderer, `fr_cloud_from_rgbd` and the TSDF projection
+  all use integer pixel centers, (x − cx) / fx, and color and depth come from the same pixel), the tangent-plane
+  projection of d_p, and the gradient neighborhood (normal radius 1, 2, 3 or 5 pixels: 0.024–0.050° with the
+  kernel).
+
+**Decision unchanged: point-to-plane is the default.** Even fixed, colored ICP only matches point-to-plane with
+perfectly flat lighting and loses to it under any shading. A head is not a sliding-prone surface (nose, eye
+sockets, ears), so point-to-plane is well constrained. A real D455 adds more reasons: specular skin highlights move
+with the view, and color and aligned depth disagree by up to about a pixel (factory calibration).
+`ReconstructionOptions.useColoredICP` stays `false`; colored ICP remains
+available (`--icp colored`) for smooth, strongly textured surfaces under diffuse light. To be re-checked on real
+recordings.
+
+**40-keyframe scan.** In the 1280×800 benchmark scan, the worst frame is 0.87 mm off (a down-left frame) and the
+median is about 0.36 mm; all 40 keyframes pass the registration check.
+
+## Robustness to real-data imperfections
+
+The synthetic renderer has independent depth noise, depth wherever the surface is visible, exact intensities and
+the scan poses in order. `PipelineRobustnessTests` adds what real D455 scans have, one at a time and all together
+(textured `SyntheticData` head, 5 poses × 2 at 1280×800 and 0.6 m, lighting 0.25, full pipeline; `IFS_RECON_STUDY=1`
+prints the table, the default run checks the combined scenario):
+
+| scenario | ICP | rotation error mean / max | head misalignment max | surface mean / p95 |
+|---|---|---|---|---|
+| clean | point-to-plane | 0.04° / 0.07° | 0.16 mm | 0.12 / 0.38 mm |
+| clean | colored | 0.56° / 1.28° | 3.74 mm | 0.40 / 1.30 mm |
+| correlated noise 0.5 mm + waviness 0.3 mm (at 0.6 m) | point-to-plane | 0.29° / 0.52° | 1.30 mm | 0.33 / 0.90 mm |
+| correlated noise 0.5 mm + waviness 0.3 mm (at 0.6 m) | colored | 0.73° / 1.48° | 3.81 mm | 0.54 / 1.65 mm |
+| no depth on 80 % of dark pixels (hair, brows, pupils) | point-to-plane | 0.04° / 0.07° | 0.18 mm | 0.14 / 0.42 mm |
+| no depth on 80 % of dark pixels (hair, brows, pupils) | colored | 0.65° / 1.67° | 4.03 mm | 0.39 / 1.63 mm |
+| silhouettes eroded by 6 px | point-to-plane | 0.05° / 0.11° | 0.28 mm | 0.14 / 0.43 mm |
+| silhouettes eroded by 6 px | colored | 0.66° / 1.34° | 2.96 mm | 0.33 / 1.24 mm |
+| Vision error 4° per angle (σ) | point-to-plane | 0.04° / 0.07° | 0.16 mm | 0.12 / 0.38 mm |
+| Vision error 4° per angle (σ) | colored | 0.57° / 1.37° | 4.07 mm | 0.47 / 1.64 mm |
+| exposure ±20 % per keyframe | point-to-plane | 0.04° / 0.07° | 0.16 mm | 0.12 / 0.38 mm |
+| exposure ±20 % per keyframe | colored | 0.54° / 1.15° | 3.29 mm | 0.33 / 1.04 mm |
+| frontal keyframes last in the capture | point-to-plane | 0.04° / 0.07° | 0.16 mm | 0.13 / 0.38 mm |
+| frontal keyframes last in the capture | colored | 0.56° / 1.28° | 3.74 mm | 0.40 / 1.29 mm |
+| 8 % scattered depth holes | point-to-plane | 0.04° / 0.06° | 0.18 mm | 0.14 / 0.41 mm |
+| 8 % scattered depth holes | colored | 0.56° / 1.24° | 3.58 mm | 0.39 / 1.27 mm |
+| all combined (Vision 3°, 5 % holes) | point-to-plane | 0.40° / 0.87° | 2.57 mm | 0.36 / 0.97 mm |
+| all combined (Vision 3°, 5 % holes) | colored | 1.05° / 1.95° | 4.78 mm | 0.71 / 2.40 mm |
+
+* Correlated noise and low-frequency waviness are the one imperfection that costs accuracy, and it is inherent:
+  each frame's surface is slightly deformed, so no rigid registration fits all views exactly.
+* Scattered depth holes failed the whole reconstruction before the cloud fix ("Point clouds"): with 8 % holes no
+  keyframe but the reference passed the registration check (`notEnoughKeyframes(1)`).
+* Vision errors up to σ = 4° per angle do not matter: landmark Kabsch fits replace the Vision rotation (all 9
+  non-reference frames of the combined scenario) and ICP converges from there.
+* The capture order does not matter: the pipeline sorts by scan pose, and the reference stays the first frontal
+  keyframe.
+* Missing on purpose: specular highlights, rolling shutter and motion blur during the hold, and a depth bias that
+  depends on the surface material (skin subsurface scattering). Real recordings are the only check for those.
 
 ## Timings
 
 Measured on an Apple M3 Ultra (28 CPU cores, 96 GB) in a release build: the full pipeline on 40 keyframes at
-1280×800 with 0.75 mm voxels on Metal. The task's reference machine is an M4 Pro; this one is somewhat faster on
-GPU and CPU throughput.
+1280×800 with 0.75 mm voxels on Metal (`PipelineBenchmark.fortyKeyframesAt1280x800`, after integration). The task's
+reference machine is an M4 Pro; this one is somewhat faster on GPU and CPU throughput.
 
 | stage | seconds |
 |---|---|
-| segmentation (40 frames, concurrent) | 0.014 |
-| registration (clouds, 173 ICP edges, pose graph) | 0.69 |
-| registration check | 0.15 |
-| bounds | 0.11 |
-| fusion (TSDF, Metal; CPU path 0.43 s) | 0.15 |
-| marching cubes (included in fusion) | – |
-| crop | 0.005 |
-| **total** | **1.14** |
+| segmentation (40 frames, concurrent) | 0.03 |
+| registration (clouds, 172 ICP edges, pose graph) | 0.8–1.5 |
+| registration check (pairs across pose groups) | 0.59 |
+| bounds | 0.24–0.38 |
+| fusion (TSDF, Metal; CPU path 0.4 s) and marching cubes | 0.17 |
+| cleanup (crop + `MeshProcessing.clean`) | 0.25 |
+| texturing (mesh module, full-resolution mesh) | 10.5 |
+| **total** | **13.5** |
 
-This is far inside the 60 s target. Cleanup, texturing and export (mesh module) come on top; they were
-placeholders in this branch. The debug-build unit tests run the 13-keyframe 640×400 pipeline in 1–3 s.
+This is inside the 60 s target; texturing dominates. The registration check was 0.15 s when it compared each frame
+with one view only; it now evaluates about 6 pairs per frame. The debug-build unit tests run the 13-keyframe
+640×400 pipeline in 1–3 s plus texturing.
 
 ## Known limits
 
 * **The back of the head is not observed** by the guided-scan poses (|yaw| ≤ 45°), so the TSDF mesh is open there.
   A closed model needs back or over-the-shoulder views from the scan module, or large-hole filling.
 * **Frames that cannot be registered** keep their initial pose inside `fr_register_frames`. The C API has no
-  per-frame status, so the pipeline re-scores every frame against its most similar neighbor
-  (`fr_icp` with `max_iterations = 0`) and leaves failing frames out of fusion.
+  per-frame status, so the pipeline re-scores the registered clouds (`RegistrationCheck`, below) and leaves failing
+  frames out of fusion.
+* **Registration check blind spot.** An error that rotates a frame about the head center mostly slides the
+  near-spherical skull along itself; only the face features show it, and the surface check does not see a few
+  degrees of it. The pose graph and the edge rejection are the defense there.
 * **Export orientation.** Yaw and pitch come from the mean of all keyframes' Vision head poses carried into the
   world (outliers more than 10° off ignored). Roll comes from the reference eye line. A systematic Vision yaw bias
   for a person would tilt the export frame by that bias. A symmetry-plane fit on the mesh would remove it.
