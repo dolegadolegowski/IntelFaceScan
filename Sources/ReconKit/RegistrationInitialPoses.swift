@@ -28,7 +28,7 @@ enum InitialPoseEstimator {
 
     /// Apple Vision measures the head pose relative to the line of sight through the face, not the optical axis: a
     /// face seen at angle a right of (below) the image center reads about gain * a more yaw (less pitch). Medians of
-    /// the slopes measured with Vision on the rendered synthetic head (yaw 0.66-1.5, pitch 0.2-1.5 over 7 head poses
+    /// the slopes measured with Vision on the rendered synthetic head (yaw 0.25-1.45, pitch 0.14-1.31 over 7 head poses
     /// and lateral offsets up to 12 cm at 0.6 m; docs/RECONSTRUCTION.md, "Initial poses").
     static let lineOfSightGain = SIMD2<Float>(0.75, 0.67)
 

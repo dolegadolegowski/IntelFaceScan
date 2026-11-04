@@ -68,7 +68,7 @@ public enum SyntheticScan {
         /// Line-of-sight effect of the simulated Vision head pose: Apple Vision measures the face relative to the line
         /// of sight, so a face seen at angle a right of (below) the optical axis reads gain * a more yaw (less pitch).
         /// Measured with Vision on the rendered head (docs/RECONSTRUCTION.md, "Initial poses"): yaw 0.75, pitch
-        /// 0.67, the medians of slopes from 0.2 to 1.5. (0, 0) = Vision without this effect.
+        /// 0.67, the medians of slopes from 0.14 to 1.45. (0, 0) = Vision without this effect.
         public var visionLineOfSightGain = SIMD2<Float>(0.75, 0.67)
 
         public init() {}

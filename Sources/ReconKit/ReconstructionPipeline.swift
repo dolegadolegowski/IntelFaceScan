@@ -20,19 +20,15 @@ public final class ReconstructionPipeline: Sendable {
     public let options: ReconstructionOptions
     /// Lens undistortion of the keyframes (off only to measure what ignoring the distortion costs).
     let undistortLens: Bool
-    /// Overrides whether the aligned depth is distorted like the color image (LensDistortion.alignedDepthFollowsDistortion).
-    let depthFollowsDistortion: Bool?
 
     public init(options: ReconstructionOptions = ReconstructionOptions()) {
         self.options = options
         undistortLens = true
-        depthFollowsDistortion = nil
     }
 
-    init(options: ReconstructionOptions, undistortLens: Bool, depthFollowsDistortion: Bool? = nil) {
+    init(options: ReconstructionOptions, undistortLens: Bool) {
         self.options = options
         self.undistortLens = undistortLens
-        self.depthFollowsDistortion = depthFollowsDistortion
     }
 
     public func run(_ capture: ScanCapture,
@@ -40,13 +36,12 @@ public final class ReconstructionPipeline: Sendable {
         if Task.isCancelled { throw ReconstructionError.cancelled }
         let cancellation = CancellationFlag()
         let options = self.options
-        let undistortLens = self.undistortLens, depthFollowsDistortion = self.depthFollowsDistortion
+        let undistortLens = self.undistortLens
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ReconstructionResult, Error>) in
                 DispatchQueue.global(qos: .userInitiated).async {
                     let run = PipelineRun(options: options, progress: progress, cancellation: cancellation)
                     run.undistortLens = undistortLens
-                    run.depthFollowsDistortion = depthFollowsDistortion
                     do {
                         continuation.resume(returning: try run.execute(capture))
                     } catch {
@@ -86,7 +81,6 @@ final class PipelineRun: @unchecked Sendable {
     let cancellation: CancellationFlag
     private(set) var report = ReconstructionReport()
     var undistortLens = true
-    var depthFollowsDistortion: Bool?
 
     /// Lowest observation weight of a voxel that may become surface (1 = one frontal view at 0.6 m).
     static let minSurfaceWeight: Float = 0.25
@@ -148,7 +142,7 @@ final class PipelineRun: @unchecked Sendable {
         var keyframes = captured
         if undistortLens {
             let start = DispatchTime.now().uptimeNanoseconds
-            let undistorted = KeyframeUndistortion.undistort(captured, indices: valid, depthFollowsDistortion: depthFollowsDistortion)
+            let undistorted = KeyframeUndistortion.undistort(captured, indices: valid)
             keyframes = undistorted.keyframes
             if !undistorted.removed.isEmpty {
                 report.durations["undistortion"] = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
