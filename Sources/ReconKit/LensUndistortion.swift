@@ -78,7 +78,9 @@ public struct LensDistortion: Sendable, Hashable {
     /// Brown-Conrady only and project every other model as an ideal pinhole, although the aligned frame reports the
     /// color intrinsics with their coefficients. Measured with the helper's SDK build: a depth pixel at (1200, 400)
     /// lands on color pixel (1200, 400) with the D455 inverse Brown-Conrady coefficients, on (1193, 399) with the
-    /// same coefficients as modified Brown-Conrady (rs2_project_point_to_pixel: 1193.66, 399.72).
+    /// same coefficients as modified Brown-Conrady (rs2_project_point_to_pixel: 1193.66, 399.72). Our SDK patch
+    /// (patches/0001) falls back to the generic align when the depth image's pixel count is not a multiple of 8;
+    /// every D455 depth mode is.
     public var alignedDepthFollowsDistortion: Bool {
         model == .modifiedBrownConrady && !isIdentity
     }
