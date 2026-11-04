@@ -119,7 +119,7 @@ $IFSCAN synth -o /tmp/hard.ifsdataset --poses all --noise 3 --seed 7 --gt-mesh /
 $IFSCAN info /tmp/head.ifsdataset                       # device, configuration, per-frame pose and quality
 $IFSCAN reconstruct /tmp/head.ifsdataset -o /tmp/head.obj --ply /tmp/head.ply --report /tmp/report.json
 $IFSCAN reconstruct ~/IntelFaceScanData/recordings/anna-0001.db3 -o /tmp/anna.obj --save-dataset /tmp/anna.ifsdataset
-$IFSCAN reconstruct synthetic-camera -o /tmp/live.obj    # the app's live flow without the UI (~2-3 min)
+$IFSCAN reconstruct synthetic-camera -o /tmp/live.obj    # the app's live flow without the UI (~4.5 min; release ~2.5)
 $IFSCAN eval /tmp/head.obj --gt /tmp/head.ifsdataset/ground_truth.obj --report /tmp/report.json --symmetric
 ```
 
@@ -198,8 +198,8 @@ one-command build; the SDK comes from the cache) → bundle smoke test (signatur
 no absolute build paths under `$HOME` in any shipped file, no linker debug map in the bundled Swift executables and
 their dSYMs in `build/dSYMs`, the bundled `ifscan` running `synth` and reading a generated `.db3` through the
 bundled helper) → upload the zipped app. The smoke tests and `scripts/build.sh` also run when a test failed (the job
-still fails). A run takes about 10–11 minutes with the SDK cache and about 14 without (the SDK build takes ~4 minutes
-on the runner); `scripts/test.sh` takes ~5 of them, the runner being several times slower than an M3 Ultra.
+still fails). A run takes about 10–11 minutes with the SDK cache and about 14–16 without (the SDK build takes ~4
+minutes on the runner); `scripts/test.sh` takes ~5 of them, the runner being several times slower than an M3 Ultra.
 Timing-sensitive tests are less reliable there: the tests of a target share Swift's cooperative thread pool, which
 the synchronous reconstructions of other tests can fill. In November 2026 the image still reports macOS 27.0.1; the
 job and `scripts/build.sh` warn that the app needs 27.2 to run (building only needs the 27.2 SDK).
