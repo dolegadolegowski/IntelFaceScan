@@ -123,6 +123,44 @@ struct MeshOperationTests {
         }
     }
 
+    /// The neck cut is planar and stays so: smoothing moves boundary vertices only along the boundary and never below
+    /// the cut, also where the boundary leaves the plane (the cut joining the open back of a head scan). Before: the
+    /// bilateral vertex update pulled cut vertices 0.24 mm out of the plane, and Taubin's inflating steps made the
+    /// boundary overshoot below it near the junction, under the chin plane that bounds the export frame's head box.
+    @Test(arguments: [false, true])
+    func smoothingKeepsAPlanarCutInItsPlane(openBack: Bool) throws {
+        var mesh = MeshFactory.icosphere(level: 5)
+        try MeshFactory.addNormalNoise(&mesh, sigma: 0.0004, seed: 11)
+        let cutY: Float = -0.05
+        try mesh.withCoreMesh { try check(fr_mesh_crop_plane($0, [0, cutY, 0], [0, 1, 0])) }
+        if openBack {
+            // An opening at the back (+Z) from the cut up to the equator, joined to the cut into one boundary loop.
+            mesh.indices = stride(from: 0, to: mesh.indices.count, by: 3).flatMap { t -> [UInt32] in
+                let c = (mesh.positions[Int(mesh.indices[t])] + mesh.positions[Int(mesh.indices[t + 1])] + mesh.positions[Int(mesh.indices[t + 2])]) / 3
+                return c.z > 0.04 && c.y < 0 && abs(c.x) < 0.04 ? [] : Array(mesh.indices[t ..< t + 3])
+            }
+            try mesh.withCoreMesh { try check(fr_mesh_clean($0, 0)) }
+        }
+        let loops = MeshMeasure.boundaryLoops(mesh)
+        #expect(loops.count == 1)
+        let cut = Set(loops.flatMap { $0 }.filter { abs(mesh.positions[Int($0)].y - cutY) < 1e-6 })
+        #expect(cut.count > 50)
+        for bilateral: Int32 in [0, 2] {
+            var params = fr_smooth_params()
+            fr_smooth_params_default(&params)
+            params.bilateral_sigma_spatial_m = 0
+            params.bilateral_iterations = bilateral
+            var smoothed = mesh
+            try smoothed.withCoreMesh { try check(fr_mesh_smooth($0, &params)) }
+            let offPlane = cut.map { smoothed.positions[Int($0)].y - cutY }.filter { $0 < 0 }.map { -$0 }.max() ?? 0
+            let below = smoothed.positions.map { cutY - $0.y }.max() ?? 0
+            print("planar cut (open back: \(openBack)), \(bilateral) bilateral iterations: cut vertices below the plane by "
+                + "\(offPlane * 1000) mm, lowest vertex \(below * 1000) mm below it")
+            #expect(below < 1e-6)
+            if !openBack { #expect(cut.allSatisfy { abs(smoothed.positions[Int($0)].y - cutY) < 1e-6 }) }
+        }
+    }
+
     /// Distance of cube vertices to the true surface, split into face interiors and crease (edge) vertices.
     private func cubeErrors(_ mesh: ReconMesh, original: [SIMD3<Float>], half: Float, h: Float) -> (face: Float, crease: Float) {
         var face: [Float] = [], crease: [Float] = []
@@ -279,6 +317,44 @@ struct MeshOperationTests {
         #expect(filled >= 1)
         // No unreferenced vertices from patches that were discarded.
         #expect(mesh.vertexCount - Set(mesh.indices).count == unreferenced)
+    }
+
+    /// Holes whose border collapsed onto one point. Smoothing a scan once contracted a small hole until its three
+    /// vertices coincided; refining that patch split degenerate triangles forever (their centroid a rounding error
+    /// from the corners, the target edge length zero): 30 GB within a minute in a pipeline test. Also runs of nearly
+    /// coincident vertices in a larger border. Patches must stay proportionate to the hole.
+    @Test func holesWithCollapsedBordersFillWithBoundedPatches() throws {
+        var mesh = MeshFactory.icosphere(level: 4)
+        let center = simd_normalize(SIMD3<Float>(0.3, 0.5, 0.8)) * 0.1
+        let tiny = simd_normalize(SIMD3<Float>(-0.6, 0.4, -0.5)) * 0.1
+        var tinyTriangle: [UInt32] = []
+        mesh.indices = stride(from: 0, to: mesh.indices.count, by: 3).flatMap { t -> [UInt32] in
+            let tri = Array(mesh.indices[t ..< t + 3])
+            let c = tri.reduce(SIMD3<Float>.zero) { $0 + mesh.positions[Int($1)] } / 3
+            if tinyTriangle.isEmpty && simd_distance(c, tiny) < 0.004 { tinyTriangle = tri; return [] }
+            return c.y < -0.06 || simd_distance(c, center) < 0.015 ? [] : tri
+        }
+        try mesh.withCoreMesh { try check(fr_mesh_clean($0, 0)) }
+        let loops = MeshMeasure.boundaryLoops(mesh)
+        let hole = try #require(loops.filter { $0.count > 3 }.min { $0.count < $1.count })
+        let three = try #require(loops.first { $0.count == 3 })
+        #expect(loops.count == 3 && hole.count >= 12)
+        // The three-vertex hole collapses onto one point (exactly), the larger one has two runs of three nearly
+        // coincident vertices (1e-9 m apart).
+        let point = mesh.positions[Int(three[0])]
+        for v in three { mesh.positions[Int(v)] = point }
+        for start in [0, hole.count / 2] {
+            let anchor = mesh.positions[Int(hole[start + 1])]
+            for k in 0 ..< 3 { mesh.positions[Int(hole[start + k])] = anchor + SIMD3(Float(k) * 1e-9, 0, 0) }
+        }
+        let before = mesh.vertexCount
+        var filled: UInt32 = 0
+        let seconds = try measure { try mesh.withCoreMesh { try check(fr_mesh_fill_holes($0, 200, &filled)) } }
+        print("collapsed hole borders: filled \(filled), \(mesh.vertexCount - before) new vertices in \(seconds) s")
+        #expect(filled == 1)  // the zero-length loop bounds nothing
+        #expect(mesh.vertexCount - before < 20 * hole.count)
+        #expect(mesh.positions.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite })
+        #expect(seconds < 5)
     }
 
     /// Pieces attached to the surface only at a vertex are separate components (connectivity through edges).

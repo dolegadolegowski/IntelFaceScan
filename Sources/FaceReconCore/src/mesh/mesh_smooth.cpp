@@ -175,6 +175,16 @@ void bilateral_filter( fr_mesh * mesh, const uint32_t * idx, const csr & vf, int
     std::vector< vec3 > filtered( t );
     std::vector< float > next( size_t( n ) * 3 );
     const float inv_2ss = 1.f / ( 2.f * sigma_s * sigma_s ), inv_2sr = 1.f / ( 2.f * sigma_r * sigma_r );
+    // Boundary vertices stay where they are: with faces on one side only, the update pulls them out of an open cut
+    // (0.25 mm off a planar neck cut after two iterations). Taubin smooths them along the boundary afterwards.
+    std::vector< uint8_t > on_boundary( n, 0 );
+    {
+        const csr out = outgoing_edges( n, idx, t );
+        for( uint32_t a = 0; a < n; ++a )
+            for( uint32_t k = out.begin( a ); k < out.end( a ); ++k )
+                if( ! has_edge( out, out.data[k], a ) )
+                    on_boundary[a] = on_boundary[out.data[k]] = 1;
+    }
 
     for( int it = 0; it < iterations; ++it )
     {
@@ -204,6 +214,11 @@ void bilateral_filter( fr_mesh * mesh, const uint32_t * idx, const csr & vf, int
                 for( size_t v = begin; v < end; ++v )
                 {
                     const vec3 x = vec3::load( p + v * 3 );
+                    if( on_boundary[v] )
+                    {
+                        x.store( &next[v * 3] );
+                        continue;
+                    }
                     vec3 delta;
                     const uint32_t count = vf.size( uint32_t( v ) );
                     for( uint32_t i = vf.begin( uint32_t( v ) ); i < vf.end( uint32_t( v ) ); ++i )
@@ -228,8 +243,14 @@ void taubin_smooth( fr_mesh * mesh, const uint32_t * idx, int iterations, float 
     const csr nb = vertex_neighbors( n, idx, t );
     const csr out = outgoing_edges( n, idx, t );
 
-    // Boundary vertices are smoothed along the boundary only (a 1D Laplacian), so open cuts neither shrink nor get
-    // pulled inward; vertices where several boundaries meet stay fixed.
+    // Boundary vertices are smoothed along the boundary only (a 1D Laplacian), so open cuts are not pulled inward;
+    // vertices where several boundaries meet stay fixed. Only the shrinking (lambda) steps move them: a step is then
+    // a convex combination of boundary neighbors, which never leaves the plane of a planar cut. With the inflating
+    // (mu) steps the boundary overshot where it leaves the cut plane (the neck cut joining the open back of a head
+    // scan): up to 0.24 mm below the plane. Only long boundaries (cuts, large openings) are smoothed, where the 1D
+    // shrinkage is negligible (below 0.25% of the loop radius per step from 48 edges on, 2e-5 mm per step on a 50 mm
+    // radius cut with 0.5 mm edges) and only smooths zigzags; the borders of small holes, which hole filling closes
+    // anyway, stay as they are instead of contracting.
     constexpr uint32_t none = ~0u;
     std::vector< uint32_t > boundary_count( n, 0 ), boundary_nb( size_t( n ) * 2, none );
     auto add_boundary = [&]( uint32_t a, uint32_t b ) {
@@ -247,6 +268,36 @@ void taubin_smooth( fr_mesh * mesh, const uint32_t * idx, int iterations, float 
                 add_boundary( b, a );
             }
         }
+    // Smoothed boundary vertices: on a loop (or a chain between junction vertices) of at least min_boundary vertices.
+    constexpr uint32_t min_boundary = 48;
+    std::vector< uint8_t > smooth_boundary( n, 0 );
+    {
+        std::vector< uint8_t > visited( n, 0 );
+        std::vector< uint32_t > chain;
+        for( uint32_t v = 0; v < n; ++v )
+        {
+            if( boundary_count[v] != 2 || visited[v] )
+                continue;
+            chain.assign( 1, v );
+            visited[v] = 1;
+            for( int side = 0; side < 2; ++side )
+            {
+                uint32_t prev = v, cur = boundary_nb[size_t( v ) * 2 + side];
+                while( cur != none && boundary_count[cur] == 2 && ! visited[cur] )
+                {
+                    visited[cur] = 1;
+                    chain.push_back( cur );
+                    const uint32_t a = boundary_nb[size_t( cur ) * 2], b = boundary_nb[size_t( cur ) * 2 + 1];
+                    const uint32_t next = a != prev ? a : b;
+                    prev = cur;
+                    cur = next;
+                }
+            }
+            if( chain.size() >= min_boundary )
+                for( uint32_t c : chain )
+                    smooth_boundary[c] = 1;
+        }
+    }
 
     std::vector< float > weight( nb.data.size(), 1.f );
     if( feature_weights )
@@ -282,7 +333,7 @@ void taubin_smooth( fr_mesh * mesh, const uint32_t * idx, int iterations, float 
                         wsum += weight[i];
                     }
                 }
-                else if( bc == 2 )
+                else if( bc == 2 && factor > 0 && smooth_boundary[v] )
                 {
                     avg = vec3::load( p + size_t( boundary_nb[v * 2] ) * 3 ) + vec3::load( p + size_t( boundary_nb[v * 2 + 1] ) * 3 );
                     wsum = 2;

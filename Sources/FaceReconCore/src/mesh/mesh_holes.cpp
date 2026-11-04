@@ -222,13 +222,21 @@ public:
     {
         const uint32_t n = uint32_t( loop.v.size() );
         const uint32_t first_new = b_.vertex_count();
+        // A loop of coincident vertices bounds no area: nothing to fill. (Refining its patch split degenerate
+        // triangles forever: their centroid is a rounding error away from the corners, the target length zero; tens of
+        // GB within a minute when smoothing had contracted a small hole to a point.)
+        if( ! ( loop.length > 1e-9 * std::max( 1.0, double( length( b_.position( loop.v[0] ) ) ) ) ) )
+            return false;
         sigma_.clear();
+        // Local edge length at each loop vertex, at least half the loop's mean edge length, so that runs of
+        // (nearly) coincident loop vertices do not make the refinement's target length vanish.
+        const float sigma_floor = float( 0.5 * loop.length / n );
         for( uint32_t i = 0; i < n; ++i )
         {
             const vec3 p = b_.position( loop.v[i] );
             const float prev = length( p - b_.position( loop.v[( i + n - 1 ) % n] ) );
             const float next = length( p - b_.position( loop.v[( i + 1 ) % n] ) );
-            sigma_[loop.v[i]] = 0.5f * ( prev + next );
+            sigma_[loop.v[i]] = std::max( 0.5f * ( prev + next ), sigma_floor );
         }
 
         std::vector< tri3 > patch;
@@ -257,7 +265,7 @@ public:
                 patch.push_back( { loop.v[( i + 1 ) % n], loop.v[i], c } );
         }
 
-        refine( patch );
+        refine( patch, size_t( 4 ) * n * n + 1024 );
         fair( patch, first_new );
         if( ! keeps_manifold( patch, first_new ) )
         {
@@ -355,19 +363,21 @@ private:
 
     // Liepa's refinement: split triangles whose centroid is far from its corners relative to the local edge length
     // (sigma), then flip edges to the Delaunay configuration, until no triangle splits.
-    void refine( std::vector< tri3 > & patch )
+    // max_triangles bounds the patch whatever the input (a round hole with n boundary edges refines to about n^2 / 5
+    // triangles).
+    void refine( std::vector< tri3 > & patch, size_t max_triangles )
     {
         constexpr float alpha = 1.41421356f;
         for( int pass = 0; pass < 32; ++pass )
         {
             bool split = false;
             const size_t count = patch.size();
-            for( size_t i = 0; i < count; ++i )
+            for( size_t i = 0; i < count && patch.size() + 2 <= max_triangles; ++i )
             {
                 const tri3 t = patch[i];
                 const vec3 c = ( b_.position( t[0] ) + b_.position( t[1] ) + b_.position( t[2] ) ) * ( 1.f / 3.f );
                 const float sc = ( sigma_[t[0]] + sigma_[t[1]] + sigma_[t[2]] ) / 3.f;
-                bool ok = true;
+                bool ok = sc > 0;
                 for( uint32_t v : t )
                 {
                     const float d = alpha * length( c - b_.position( v ) );
