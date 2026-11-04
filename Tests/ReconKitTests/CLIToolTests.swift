@@ -152,6 +152,91 @@ private let smallSynth = ["--width", "320", "--height", "200", "--frames-per-pos
     #expect(unknown.status == 65)
 }
 
+@Test func cliReconstructRefusesUnwritableOutputsBeforeWorking() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let dataset = root.appendingPathComponent("s.ifsdataset")
+    #expect(await ifscan(["synth", "-o", dataset.path] + smallSynth).status == 0)
+    let file = root.appendingPathComponent("file")
+    try "x".write(to: file, atomically: true, encoding: .utf8)
+    // Every case fails before the dataset is even read (no "Read N keyframes" progress line): a reconstruction
+    // takes minutes on real data and its result must not be lost at the export.
+    func expectRefused(_ arguments: [String], status: Int32, _ message: String) async {
+        let run = await ifscan(["reconstruct", dataset.path] + arguments)
+        #expect(run.status == status, "\(arguments): \(run.err)")
+        #expect(run.err.contains(message), "\(arguments): \(run.err)")
+        #expect(!run.err.contains("Read "), "\(arguments): \(run.err)")
+    }
+    await expectRefused(["-o", file.appendingPathComponent("head.obj").path], status: 73, "output")
+    await expectRefused(["-o", root.appendingPathComponent("h.obj").path, "--ply", file.appendingPathComponent("h.ply").path],
+                        status: 73, "--ply")
+    await expectRefused(["-o", root.appendingPathComponent("h.obj").path, "--report", root.path + "/"], status: 73, "is a folder")
+    await expectRefused(["-o", root.appendingPathComponent("h.obj").path, "--save-dataset", root.path], status: 73,
+                        "not a dataset or an empty folder")
+    // Saving the keyframes over the input dataset would delete its ground truth.
+    await expectRefused(["-o", root.appendingPathComponent("h.obj").path, "--save-dataset", dataset.path + "/."], status: 64,
+                        "must not be the input dataset")
+    #expect(FileManager.default.fileExists(atPath: dataset.appendingPathComponent(SyntheticGroundTruth.fileName).path))
+
+    let missing = await ifscan(["eval", root.appendingPathComponent("none.obj").path, "--gt", file.path])
+    #expect(missing.status == 66 && missing.err.contains("none.obj"))
+}
+
+/// A dataset that does not start with a frontal keyframe: the reconstruction's world is the camera frame of its first
+/// frontal keyframe, the ground truth's that of keyframe 0. The evaluation must bring both into one frame.
+@Test func cliGroundTruthEvaluationAlignsTheWorldFrames() async throws {
+    var options = SyntheticScan.Options()
+    options.width = 160
+    options.height = 100
+    options.meshResolution = 24
+    options.framesPerPose = 1
+    options.poses = [.left, .front, .right]
+    let scan = SyntheticScan.make(options)
+    let truth = SyntheticGroundTruth(result: scan, options: options)
+    // A perfect reconstruction as the pipeline returns it: world = camera frame of keyframe 1 (front).
+    let worldFromGroundTruth = scan.groundTruthPoses[1].inverse
+    var mesh = scan.groundTruthMesh
+    mesh.positions = mesh.positions.map { p in
+        let q = worldFromGroundTruth * SIMD4(p, 1)
+        return SIMD3(q.x, q.y, q.z)
+    }
+    let exportTransform = simd_float4x4(simd_quatf(angle: .pi, axis: [1, 0, 0]))
+    let result = ReconstructionResult(mesh: mesh, texture: nil, cameraPoses: scan.groundTruthPoses.map { worldFromGroundTruth * $0 },
+                                      exportTransform: exportTransform, report: ReconstructionReport())
+    let evaluation = GroundTruthEvaluation.evaluate(result: result, groundTruth: truth, keyframeIDs: [0, 1, 2],
+                                                    mesh: scan.groundTruthMesh, samples: 20_000)
+    #expect(evaluation.maxRotationDeg < 0.01 && evaluation.maxHeadMisalignmentMm < 0.01)
+    let surface = try #require(evaluation.surfaceToGroundTruth)
+    #expect(surface.meanMm < 0.01, "surface mean \(surface.meanMm) mm")
+    #expect(evaluation.groundTruthFromWorld?.count == 16)
+
+    // ifscan eval --report maps the exported mesh (export frame, millimeters) into the ground truth's world frame.
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    var exported = mesh
+    exported.positions = mesh.positions.map { p in
+        let q = exportTransform * SIMD4(p, 1)
+        return SIMD3(q.x, q.y, q.z)
+    }
+    let exportedURL = root.appendingPathComponent("head.obj"), gtURL = root.appendingPathComponent("gt.obj")
+    try WavefrontOBJ.write(exported, to: exportedURL, scale: 1000)
+    try WavefrontOBJ.write(scan.groundTruthMesh, to: gtURL, scale: 1000)
+    let encoder = JSONEncoder()
+    encoder.keyEncodingStrategy = .convertToSnakeCase
+    let groundTruthJSON = try JSONSerialization.jsonObject(with: encoder.encode(evaluation))
+    let m = exportTransform
+    let report: [String: Any] = [
+        "export_transform": [m.columns.0, m.columns.1, m.columns.2, m.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] },
+        "export_scale": 1000, "ground_truth": groundTruthJSON]
+    let reportURL = root.appendingPathComponent("report.json")
+    try JSONSerialization.data(withJSONObject: report).write(to: reportURL)
+    let run = await ifscan(["e" + "val", exportedURL.path, "--gt", gtURL.path, "--samples", "20000", "--json", "--report", reportURL.path])
+    #expect(run.status == 0, "\(run.err)")
+    let json = try #require(try JSONSerialization.jsonObject(with: Data(run.out.utf8)) as? [String: Any])
+    let mean = try #require((json["mesh_to_ground_truth"] as? [String: Any])?["mean_mm"] as? Double)
+    #expect(mean < 0.01, "mean \(mean) mm")
+}
+
 @Test(.enabled(if: !CoreAvailability.reconstruction, "the reconstruction core is integrated"))
 func cliNamesPlaceholderStagesWhenReconstructing() async throws {
     let root = try temporaryDirectory()

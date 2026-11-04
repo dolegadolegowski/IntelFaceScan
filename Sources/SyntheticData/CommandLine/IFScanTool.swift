@@ -152,9 +152,53 @@ public enum IFScanTool {
         }
     }
 
+    /// Fails before any work when an output cannot be written: the guided scan and the reconstruction take minutes and
+    /// their result would be lost at the end. Creates missing parent folders (the export would create them too).
+    static func checkWritableOutputs(_ c: ReconstructCommand, input: URL, kind: InputKind) throws {
+        let fm = FileManager.default
+        func parentFolder(of path: String, _ what: String) throws -> URL {
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            let parent = url.deletingLastPathComponent()
+            do {
+                try fm.createDirectory(at: parent, withIntermediateDirectories: true)
+            } catch {
+                throw Failure(code: .cannotCreate, message: "\(what) \(url.path): cannot create its folder: \(error.localizedDescription)")
+            }
+            guard fm.isWritableFile(atPath: parent.path) else {
+                throw Failure(code: .cannotCreate, message: "\(what) \(url.path): the folder \(parent.path) is not writable")
+            }
+            return url
+        }
+        for (path, what) in [(c.output, "output"), (c.ply, "--ply"), (c.report, "--report")] {
+            guard let path else { continue }
+            let url = try parentFolder(of: path, what)
+            var isDirectory: ObjCBool = false
+            if fm.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                throw Failure(code: .cannotCreate, message: "\(what) \(url.path) is a folder")
+            }
+        }
+        if let path = c.saveDataset {
+            let url = try parentFolder(of: path, "--save-dataset")
+            if kind == .dataset, url.resolvingSymlinksInPath().path == input.standardizedFileURL.resolvingSymlinksInPath().path {
+                // ScanDataset.write would replace the input folder, dropping files it does not know (ground truth).
+                throw Failure(code: .usage, message: "--save-dataset must not be the input dataset")
+            }
+            // ScanDataset.write only replaces an existing dataset or an empty folder.
+            var isDirectory: ObjCBool = false
+            if fm.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+                let contents = (try? fm.contentsOfDirectory(atPath: url.path)) ?? []
+                guard isDirectory.boolValue, contents.isEmpty || contents.contains(ScanDataset.manifestFileName) else {
+                    throw Failure(code: .cannotCreate,
+                                  message: "--save-dataset \(url.path) exists and is not a dataset or an empty folder")
+                }
+            }
+        }
+    }
+
     static func reconstruct(_ c: ReconstructCommand, _ io: IFScanOutput) async throws {
         let input = URL(fileURLWithPath: c.input)
         let kind = try inputKind(input)
+        try checkWritableOutputs(c, input: input, kind: kind)
         let begin = Date()
         var timings: [String: Double] = [:]
         var notes: [String] = []
@@ -258,7 +302,10 @@ public enum IFScanTool {
             written = try MeshExport.writeOBJ(result, to: output)
             if let ply = c.ply { written.append(try MeshExport.writePLY(result, to: URL(fileURLWithPath: ply))) }
         } catch {
-            throw pipelineFailure(error, stage: "export")
+            var failure = pipelineFailure(error, stage: "export")
+            // A file that cannot be written is EX_CANTCREAT (73), like every other output of the tool.
+            if error is CocoaError || isCoreStatus(error, FR_ERR_IO) { failure.code = .cannotCreate }
+            throw failure
         }
         timings["export"] = Date().timeIntervalSince(exportStart)
 
@@ -307,10 +354,14 @@ public enum IFScanTool {
         for note in notes { io.err("note: \(note)") }
     }
 
+    static func isCoreStatus(_ error: Error, _ status: fr_status) -> Bool {
+        if case ReconstructionError.core(_, let code, _) = error { return code == Int32(bitPattern: status.rawValue) }
+        return false
+    }
+
     static func pipelineFailure(_ error: Error, stage: String) -> Failure {
         var failure = Failure(code: .software, message: "\(stage) failed: \(error.localizedDescription)")
-        let notImplemented = Int32(bitPattern: FR_ERR_NOT_IMPLEMENTED.rawValue)
-        if case ReconstructionError.core(_, let status, _) = error, status == notImplemented {
+        if isCoreStatus(error, FR_ERR_NOT_IMPLEMENTED) {
             failure.code = .unavailable
             failure.notes.append(stage == "export" ? "MeshExport / fr_export_obj is still a placeholder in this build"
                                                    : "a FaceReconCore stage is still a placeholder in this build")
@@ -357,6 +408,9 @@ public enum IFScanTool {
     // MARK: - eval
 
     static func evaluate(_ c: EvalCommand, _ io: IFScanOutput) throws {
+        for path in [c.mesh, c.groundTruth] + (c.report.map { [$0] } ?? []) where !FileManager.default.fileExists(atPath: path) {
+            throw Failure(code: .noInput, message: "\(URL(fileURLWithPath: path).path): no such file")
+        }
         var mesh: ReconMesh, truth: ReconMesh
         do {
             mesh = try WavefrontOBJ.read(URL(fileURLWithPath: c.mesh))
