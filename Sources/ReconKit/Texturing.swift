@@ -9,7 +9,8 @@ import ScanKit
 import simd
 
 public enum Texturing {
-    /// Unwraps UVs (splitting seam vertices) and bakes a texture from the keyframes at their poses.
+    /// Unwraps UVs (splitting seam vertices) and bakes a texture from the keyframes at their poses (synthesized surface:
+    /// interpolated from the measured colors around it, never projected from the keyframes).
     public static func unwrapAndBake(_ mesh: inout ReconMesh, keyframes: [Keyframe], poses: [simd_float4x4],
                                      options: ReconstructionOptions) throws -> TextureImage? {
         guard mesh.triangleCount > 0 else { return nil }
@@ -33,11 +34,17 @@ public enum Texturing {
         let core = try mesh.makeCoreMesh()
         defer { fr_mesh_free(core) }
         var texture: UnsafeMutablePointer<fr_texture>?
+        // Synthesized surface (seam copies included, withCoreMesh carried the flags) takes interpolated colors.
+        let synthesized = mesh.synthesizedBytes
         try frames.withFrames { framePointer, count in
             try packed.withUnsafeBufferPointer { posePointer in
                 try weights.withUnsafeBufferPointer { weightPointer in
-                    try checkCore(fr_bake_texture(core, framePointer, posePointer.baseAddress, weightPointer.baseAddress,
-                                                  count, &params, &texture, nil, nil), "texturing")
+                    try synthesized.withUnsafeBufferPointer { flags in
+                        params.synthesized = synthesized.isEmpty ? nil : flags.baseAddress
+                        defer { params.synthesized = nil }
+                        try checkCore(fr_bake_texture(core, framePointer, posePointer.baseAddress, weightPointer.baseAddress,
+                                                      count, &params, &texture, nil, nil), "texturing")
+                    }
                 }
             }
         }
@@ -49,7 +56,7 @@ public enum Texturing {
         return TextureImage(core: baked)
     }
 
-    /// Per-vertex colors from the keyframes.
+    /// Per-vertex colors from the keyframes (synthesized vertices: interpolated from the measured colors around them).
     public static func colorizeVertices(_ mesh: inout ReconMesh, keyframes: [Keyframe], poses: [simd_float4x4],
                                         options: ReconstructionOptions) throws {
         guard mesh.triangleCount > 0 else { return }
@@ -59,12 +66,17 @@ public enum Texturing {
         let frames = RGBDFrameSet(keyframes: keyframes)
         let weights = frameWeights(for: keyframes)
         let packed = packPoses(poses)
+        let synthesized = mesh.synthesizedBytes
         try mesh.withCoreMesh { m in
             try frames.withFrames { framePointer, count in
                 try packed.withUnsafeBufferPointer { posePointer in
                     try weights.withUnsafeBufferPointer { weightPointer in
-                        try checkCore(fr_colorize_vertices(m, framePointer, posePointer.baseAddress, weightPointer.baseAddress,
-                                                           count, &params), "vertex colors")
+                        try synthesized.withUnsafeBufferPointer { flags in
+                            params.synthesized = synthesized.isEmpty ? nil : flags.baseAddress
+                            defer { params.synthesized = nil }
+                            try checkCore(fr_colorize_vertices(m, framePointer, posePointer.baseAddress,
+                                                               weightPointer.baseAddress, count, &params), "vertex colors")
+                        }
                     }
                 }
             }
