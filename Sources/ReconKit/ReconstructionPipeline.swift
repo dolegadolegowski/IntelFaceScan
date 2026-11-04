@@ -1,6 +1,7 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
 // ScanCapture -> registered, fused, cleaned, textured mesh. Stages (docs/RECONSTRUCTION.md):
+//   preparing      scan order, lens undistortion of every keyframe (the core works with an ideal pinhole)
 //   segmentation   per-keyframe head masks (depth band, face component, chin cut)
 //   registration   initial poses from Vision + landmarks, pairwise ICP, loop closures, pose graph (FaceReconCore)
 //   fusion         TSDF on the GPU (or screened Poisson), marching cubes
@@ -17,9 +18,21 @@ import simd
 
 public final class ReconstructionPipeline: Sendable {
     public let options: ReconstructionOptions
+    /// Lens undistortion of the keyframes (off only to measure what ignoring the distortion costs).
+    let undistortLens: Bool
+    /// Overrides whether the aligned depth is distorted like the color image (LensDistortion.alignedDepthFollowsDistortion).
+    let depthFollowsDistortion: Bool?
 
     public init(options: ReconstructionOptions = ReconstructionOptions()) {
         self.options = options
+        undistortLens = true
+        depthFollowsDistortion = nil
+    }
+
+    init(options: ReconstructionOptions, undistortLens: Bool, depthFollowsDistortion: Bool? = nil) {
+        self.options = options
+        self.undistortLens = undistortLens
+        self.depthFollowsDistortion = depthFollowsDistortion
     }
 
     public func run(_ capture: ScanCapture,
@@ -27,10 +40,13 @@ public final class ReconstructionPipeline: Sendable {
         if Task.isCancelled { throw ReconstructionError.cancelled }
         let cancellation = CancellationFlag()
         let options = self.options
+        let undistortLens = self.undistortLens, depthFollowsDistortion = self.depthFollowsDistortion
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ReconstructionResult, Error>) in
                 DispatchQueue.global(qos: .userInitiated).async {
                     let run = PipelineRun(options: options, progress: progress, cancellation: cancellation)
+                    run.undistortLens = undistortLens
+                    run.depthFollowsDistortion = depthFollowsDistortion
                     do {
                         continuation.resume(returning: try run.execute(capture))
                     } catch {
@@ -69,6 +85,8 @@ final class PipelineRun: @unchecked Sendable {
     let progress: @Sendable (ReconstructionProgress) -> Void
     let cancellation: CancellationFlag
     private(set) var report = ReconstructionReport()
+    var undistortLens = true
+    var depthFollowsDistortion: Bool?
 
     /// Lowest observation weight of a voxel that may become surface (1 = one frontal view at 0.6 m).
     static let minSurfaceWeight: Float = 0.25
@@ -112,17 +130,33 @@ final class PipelineRun: @unchecked Sendable {
 
     func execute(_ capture: ScanCapture) throws -> ReconstructionResult {
         let total = DispatchTime.now().uptimeNanoseconds
-        let keyframes = capture.keyframes
-        report.keyframes = keyframes.count
+        let captured = capture.keyframes
+        report.keyframes = captured.count
         report.method = options.method
-        emit(.preparing, 0, "\(keyframes.count) keyframes")
+        emit(.preparing, 0, "\(captured.count) keyframes")
 
         // Scan order (front first, stable within a pose), structurally valid frames only.
         let rank = Dictionary(uniqueKeysWithValues: ScanPose.allCases.enumerated().map { ($0.element, $0.offset) })
-        let ordered = keyframes.indices.sorted { (rank[keyframes[$0].scanPose] ?? 99, $0) < (rank[keyframes[$1].scanPose] ?? 99, $1) }
-        let valid = ordered.filter { Self.isStructurallyValid(keyframes[$0]) }
-        if valid.count < keyframes.count {
-            report.notes.append("\(keyframes.count - valid.count) keyframes with inconsistent image data skipped")
+        let ordered = captured.indices.sorted { (rank[captured[$0].scanPose] ?? 99, $0) < (rank[captured[$1].scanPose] ?? 99, $1) }
+        let valid = ordered.filter { Self.isStructurallyValid(captured[$0]) }
+        if valid.count < captured.count {
+            report.notes.append("\(captured.count - valid.count) keyframes with inconsistent image data skipped")
+        }
+        try checkCancelled()
+
+        // Lens distortion: every later stage (core clouds, TSDF, texture projection, landmarks) assumes a pinhole.
+        var keyframes = captured
+        if undistortLens {
+            let undistorted = timed("undistortion") {
+                KeyframeUndistortion.undistort(captured, indices: valid, depthFollowsDistortion: depthFollowsDistortion)
+            }
+            keyframes = undistorted.keyframes
+            if !undistorted.removed.isEmpty {
+                report.notes.append("lens distortion removed: \(undistorted.removed.map(\.rawValue).joined(separator: ", "))")
+            }
+            if !undistorted.unknownModels.isEmpty {
+                report.notes.append("unknown lens distortion model \(undistorted.unknownModels.joined(separator: ", ")): treated as a pinhole")
+            }
         }
         try checkCancelled()
 

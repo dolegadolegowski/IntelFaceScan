@@ -37,6 +37,9 @@ struct ScanImperfections: Sendable {
     /// Face distance and white depth noise (sigma at 1 m) of the renderer (SyntheticScan defaults 0.6 m, 2 mm).
     var distanceM: Float = 0.6
     var depthNoiseAt1m: Float = 0.002
+    /// Color lens distortion (SyntheticScan.Options.lensDistortion) and head position off the optical axis.
+    var lensDistortion: LensDistortion?
+    var headOffsetM: SIMD2<Float> = .zero
 
     static let realistic: ScanImperfections = {
         var p = ScanImperfections()
@@ -186,6 +189,8 @@ enum RobustnessStudy {
         options.dropoutRate = p.speckleRate
         options.distanceM = p.distanceM
         options.depthNoiseAt1m = p.depthNoiseAt1m
+        options.lensDistortion = p.lensDistortion
+        options.headOffsetM = p.headOffsetM
         var result = SyntheticScan.make(options)
         var keyframes = result.capture.keyframes.enumerated().map { perturb($0.element, p, seed: seed &* 1000 &+ UInt64($0.offset)) }
         var truth = result.groundTruthPoses
@@ -206,13 +211,14 @@ enum RobustnessStudy {
         return options
     }
 
-    static func run(_ p: ScanImperfections, coloredICP: Bool = false, seed: UInt64 = 1,
+    /// - Parameter undistortLens: false skips the pipeline's lens undistortion (to measure what ignoring it costs).
+    static func run(_ p: ScanImperfections, coloredICP: Bool = false, seed: UInt64 = 1, undistortLens: Bool = true,
                     configure: (inout ReconstructionOptions) -> Void = { _ in }) async throws -> RobustnessOutcome {
         let scan = scan(p, seed: seed)
         var options = options
         options.useColoredICP = coloredICP
         configure(&options)
-        let result = try await ReconstructionPipeline(options: options).run(scan.capture)
+        let result = try await ReconstructionPipeline(options: options, undistortLens: undistortLens).run(scan.capture)
         // Used keyframes, in capture order (ReconstructionResult.cameraPoses); excluded ones are named in the notes.
         let excluded = Set(result.report.notes.filter { $0.hasPrefix("keyframes excluded") }
             .flatMap { $0.split(separator: "#").dropFirst().compactMap { Int($0.prefix { $0.isNumber }) } })
