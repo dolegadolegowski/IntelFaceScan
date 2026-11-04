@@ -177,6 +177,9 @@ private let smallSynth = ["--width", "320", "--height", "200", "--frames-per-pos
     await expectRefused(["-o", root.appendingPathComponent("h.obj").path, "--save-dataset", dataset.path + "/."], status: 64,
                         "must not be the input dataset")
     #expect(FileManager.default.fileExists(atPath: dataset.appendingPathComponent(SyntheticGroundTruth.fileName).path))
+    // A dataset has no guided scan to trace.
+    await expectRefused(["-o", root.appendingPathComponent("h.obj").path, "--trace", root.appendingPathComponent("t.csv").path],
+                        status: 64, "--trace needs a recording")
 
     let missing = await ifscan(["eval", root.appendingPathComponent("none.obj").path, "--gt", file.path])
     #expect(missing.status == 66 && missing.err.contains("none.obj"))
@@ -317,4 +320,44 @@ func cliNamesPlaceholderStagesWhenReconstructing() async throws {
     let back = try WavefrontOBJ.read(url)
     for (a, b) in zip(original.positions, back.positions) { #expect(simd_length(a * 1000 - b) < 1e-3) }
     #expect(back.colors == original.colors && back.indices == original.indices)
+}
+
+/// `--trace`: one CSV row per processed frame, with the columns the header names.
+@Test func scanTraceWritesOneRowPerFrame() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = root.appendingPathComponent("trace.csv")
+    let writer = try ScanTraceWriter(url: url)
+    var update = ScanUpdate()
+    update.sequence = 7
+    update.timestampMs = 2000
+    update.phase = .capturing(.right)
+    update.instructionKind = .holdStill(.right)
+    update.rejection = .headMoving
+    update.turnHint = .back
+    update.smoothedPose = HeadPose(yaw: -74.2, pitch: 15.1, roll: 0.5)
+    update.distanceM = 0.664
+    update.distanceRangeM = 0.56 ... 0.71
+    writer.add(update)
+    update.sequence = 8
+    update.timestampMs = 2033.3
+    update.rejection = nil
+    update.acceptedKeyframe = true
+    update.completedPose = .right
+    writer.add(update)
+    writer.close()
+    let lines = try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map(String.init)
+    #expect(lines.count == 3)
+    let header = lines[0].split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+    #expect(header == ScanTraceWriter.header.split(separator: ",").map(String.init))
+    func field(_ line: String, _ name: String) -> String {
+        let values = line.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        #expect(values.count == header.count, "\(line)")
+        return values[header.firstIndex(of: name) ?? 0]
+    }
+    #expect(field(lines[1], "pose") == "right" && field(lines[1], "rejection") == "headMoving")
+    #expect(field(lines[1], "turn_hint") == "back")
+    #expect(field(lines[1], "smoothed_yaw") == "-74.20" && field(lines[1], "range_max_m") == "0.71")
+    #expect(field(lines[1], "t_s") == "0.000" && field(lines[2], "t_s") == "0.033")
+    #expect(field(lines[2], "accepted") == "1" && field(lines[2], "instruction") == "holdStill")
 }

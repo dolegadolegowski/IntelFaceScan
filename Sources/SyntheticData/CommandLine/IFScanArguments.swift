@@ -10,7 +10,7 @@
 //   ifscan reconstruct <input.ifsdataset | recording.db3 | recording.bag | synthetic-camera> -o head.obj
 //                [--ply head.ply] [--voxel-mm 0.75] [--method tsdf|poisson] [--keep-shoulders] [--open-back] [--icp colored|geometric]
 //                [--save-dataset out.ifsdataset] [--triangles N] [--texture-size 4096] [--helper <IntelFaceScanHelper>]
-//                [--report report.json] [--time-limit 600] [--quiet]
+//                [--report report.json] [--trace trace.csv] [--time-limit 600] [--quiet]
 //   ifscan eval <mesh.obj> --gt <gt.obj> [--samples 200000] [--report report.json] [--symmetric] [--json]
 //   ifscan info <file> [--json] [--helper <IntelFaceScanHelper>]
 
@@ -70,6 +70,8 @@ public struct ReconstructCommand: Equatable, Sendable {
     public var saveDataset: String?
     public var helper: String?
     public var report: String?
+    /// Recordings and synthetic-camera: one CSV row per frame of the guided scan (ScanTraceWriter).
+    public var trace: String?
     public var quiet = false
     /// synthetic-camera input: seconds the guided scan may take before it is stopped (it would wait forever for a
     /// pose Vision never detects); the keyframes accepted until then are reconstructed.
@@ -162,6 +164,8 @@ public enum IFScanArguments {
                                          ifscan, build/helper/, the app bundle)
               --report <file.json>       Write a JSON report (stages, timings, export transform, ground-truth
                                          errors for synthetic datasets)
+              --trace <file.csv>         Recordings and synthetic-camera: write one CSV row per frame of the
+                                         guided scan (head pose, distance, quality gates, rejection)
               --time-limit <s>           synthetic-camera: stop the guided scan after this many seconds and
                                          reconstruct what it accepted (default 600)
               -q, --quiet                No progress output
@@ -269,7 +273,7 @@ public enum IFScanArguments {
                      Spec(name: "triangles", short: nil, takesValue: true), Spec(name: "texture-size", short: nil, takesValue: true),
                      Spec(name: "save-dataset", short: nil, takesValue: true), Spec(name: "helper", short: nil, takesValue: true),
                      Spec(name: "report", short: nil, takesValue: true), Spec(name: "quiet", short: "q", takesValue: false),
-                     Spec(name: "time-limit", short: nil, takesValue: true)]
+                     Spec(name: "time-limit", short: nil, takesValue: true), Spec(name: "trace", short: nil, takesValue: true)]
         guard let p = try parse(arguments, specs, command: "reconstruct") else { return .help("reconstruct") }
         guard p.positionals.count == 1 else {
             throw ArgumentError(p.positionals.isEmpty ? "reconstruct: missing input (dataset folder or .db3/.bag recording)"
@@ -301,6 +305,8 @@ public enum IFScanArguments {
         c.saveDataset = p.values["save-dataset"]
         c.helper = p.values["helper"]
         c.report = p.values["report"]
+        c.trace = p.values["trace"]
+        if let trace = c.trace, !trace.lowercased().hasSuffix(".csv") { throw ArgumentError("--trace must name a .csv file") }
         c.quiet = p.flags.contains("quiet")
         c.timeLimitSeconds = Double(try number(p, "time-limit", Float(c.timeLimitSeconds), in: 5 ... 86_400))
         return .reconstruct(c)

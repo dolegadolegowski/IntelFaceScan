@@ -183,7 +183,10 @@ public enum IFScanTool {
             }
             return url
         }
-        for (path, what) in [(c.output, "output"), (c.ply, "--ply"), (c.report, "--report")] {
+        if c.trace != nil && kind == .dataset {
+            throw Failure(code: .usage, message: "--trace needs a recording or synthetic-camera: a dataset has no guided scan to trace")
+        }
+        for (path, what) in [(c.output, "output"), (c.ply, "--ply"), (c.report, "--report"), (c.trace, "--trace")] {
             guard let path else { continue }
             let url = try parentFolder(of: path, what)
             var isDirectory: ObjCBool = false
@@ -217,6 +220,16 @@ public enum IFScanTool {
         var timings: [String: Double] = [:]
         var notes: [String] = []
         let log: @Sendable (String) -> Void = { message in if !c.quiet { io.err(message) } }
+        var traceWriter: ScanTraceWriter?
+        if let path = c.trace {
+            do {
+                traceWriter = try ScanTraceWriter(url: URL(fileURLWithPath: path))
+            } catch {
+                throw Failure(code: .cannotCreate, message: "--trace \(path): \(error.localizedDescription)")
+            }
+        }
+        defer { traceWriter?.close() }
+        let trace: (@Sendable (ScanUpdate) -> Void)? = traceWriter.map { writer in { writer.add($0) } }
 
         var capture: ScanCapture
         switch kind {
@@ -234,7 +247,8 @@ public enum IFScanTool {
             configuration.keepShoulders = c.keepShoulders
             let scan: RecordingScan.Result
             do {
-                scan = try await RecordingScan.run(recording: input, helper: helper, configuration: configuration, log: log)
+                scan = try await RecordingScan.run(recording: input, helper: helper, configuration: configuration,
+                                                   trace: trace, log: log)
             } catch {
                 var failure = Failure(code: .unavailable, message: "playback failed: \(error.localizedDescription)")
                 if let cameraError = error as? CameraError, case .unsupported = cameraError {
@@ -277,7 +291,8 @@ public enum IFScanTool {
             let scan: RecordingScan.Result
             do {
                 scan = try await RecordingScan.run(source: source, label: syntheticCameraInput,
-                                                   adoptRecordedProfiles: false, configuration: configuration, log: log)
+                                                   adoptRecordedProfiles: false, configuration: configuration,
+                                                   trace: trace, log: log)
                 watchdog.cancel()
             } catch {
                 watchdog.cancel()
@@ -629,7 +644,8 @@ public enum IFScanTool {
         do {
             let device = try await source.connect()
             await source.shutdown()
-            io.out("Device: \(device.name), serial \(device.serial), firmware \(device.firmware), depth scale \(device.depthScale) m")
+            io.out("Device: \(device.name), serial \(device.serial), firmware \(device.firmware), depth scale \(device.depthScale) m"
+                   + (device.baselineMm.map { ", baseline \(String(format: "%.2f", $0)) mm" } ?? ""))
             for p in device.profiles {
                 io.out("  \(p.stream) \(p.index): \(p.format) \(p.width)x\(p.height) @ \(p.fps) fps")
             }

@@ -22,14 +22,18 @@ public enum RecordingScan {
     }
 
     public static func run(recording: URL, helper: URL, configuration: ScanConfiguration,
+                           trace: (@Sendable (ScanUpdate) -> Void)? = nil,
                            log: @escaping @Sendable (String) -> Void) async throws -> Result {
         try await run(source: PlaybackCameraSource(file: recording, helperURL: helper, realTime: false),
-                      label: recording.lastPathComponent, adoptRecordedProfiles: true, configuration: configuration, log: log)
+                      label: recording.lastPathComponent, adoptRecordedProfiles: true, configuration: configuration,
+                      trace: trace, log: log)
     }
 
     /// Runs the guided scan over any camera source until every pose is captured or the source ends (playback
-    /// finished, helper exited, disconnected). `adoptRecordedProfiles` keeps the source's own stream profiles.
+    /// finished, helper exited, disconnected). `adoptRecordedProfiles` keeps the source's own stream profiles;
+    /// `trace` gets the controller's update for every frame.
     public static func run(source: CameraSource, label: String, adoptRecordedProfiles: Bool, configuration: ScanConfiguration,
+                           trace: (@Sendable (ScanUpdate) -> Void)? = nil,
                            log: @escaping @Sendable (String) -> Void) async throws -> Result {
         let device: DeviceInfo
         do {
@@ -72,6 +76,7 @@ public enum RecordingScan {
                     monitor.begin()
                     let update = await controller.process(frame)
                     monitor.end()
+                    trace?(update)
                     if case .capturing(let pose) = update.phase, !update.acceptedKeyframe {
                         let reason: String?
                         if let rejection = update.rejection {

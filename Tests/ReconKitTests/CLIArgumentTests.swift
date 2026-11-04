@@ -62,6 +62,9 @@ private func parseError(_ line: String) -> String? {
     limited.timeLimitSeconds = 120
     #expect(try parse("reconstruct synthetic-camera -o h.obj --time-limit 120") == .reconstruct(limited))
     #expect(ReconstructCommand(input: "a", output: "b.obj").timeLimitSeconds == 600)
+    var traced = ReconstructCommand(input: "rec.db3", output: "h.obj")
+    traced.trace = "scan.CSV"
+    #expect(try parse("reconstruct rec.db3 -o h.obj --trace scan.CSV") == .reconstruct(traced))
     // --icp: point-to-plane (geometric) unless colored is asked for
     #expect(ReconstructCommand(input: "a", output: "b.obj").coloredICP == false)
     var colored = ReconstructCommand(input: "a.ifsdataset", output: "h.obj")
@@ -130,6 +133,7 @@ private func parseError(_ line: String) -> String? {
     ("reconstruct a.ifsdataset -o head.obj --triangles 10", "not an integer in 1000...50000000"),
     ("reconstruct a.ifsdataset -o head.obj --texture-size 100000", "not an integer in 256...16384"),
     ("reconstruct synthetic-camera -o head.obj --time-limit 1", "not a number in 5.0...86400.0"),
+    ("reconstruct rec.db3 -o head.obj --trace trace.txt", "--trace must name a .csv file"),
     ("eval head.obj", "missing --gt"),
     ("eval --gt gt.obj", "missing <mesh.obj>"),
     ("eval head.obj --gt gt.obj --samples 0", "not an integer"),
