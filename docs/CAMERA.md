@@ -172,7 +172,9 @@ helper enables it on the first `configure`: the camera restarts (3–8 s) and ke
   around the device (it records the raw sensor frames: depth, IR, RGB, IMU, metadata, options);
   `stop_recording()` restarts without it after the recorder's destruction has flushed and closed the file (one
   file, no sqlite side files), emits `recording_finished` with the file size, and never throws once the file is
-  complete. The streams cannot change while recording (a file whose profiles change does not play back).
+  complete. A recording that the camera ended (the first command after an unplug finishes it) makes the next
+  `stop_recording()` succeed once without doing anything more, so the helper still delivers the file. The streams
+  cannot change while recording (a file whose profiles change does not play back).
 * Size: 1280×720 Z16 + 1280×800 RGB8 is 4.9 MB per frame, **147 MB/s (8.8 GB per minute)** uncompressed (D455
   default: librealsense does not compress D455 recordings). Measured with synthetic frames on an M3 Ultra:
   uncompressed `.db3` writes at 133 fps (4× real time); zstd compression writes at 156 fps, but its ratio on real
