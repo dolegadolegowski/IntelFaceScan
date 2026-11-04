@@ -157,6 +157,40 @@ struct AppLocalizationTests {
         #expect(pl("") == "")
     }
 
+    /// The notes ReconstructionPipeline writes into the report (shown under the result's report): Polish for every
+    /// one of them; English passes through, and a note the app does not know stays in English instead of vanishing.
+    @Test("Reconstruction report notes")
+    func reportNotes() {
+        let written = [
+            "3 keyframes with inconsistent image data skipped",
+            "1 keyframes without usable head depth skipped",
+            "initial poses: 14 landmark fits, 0 Vision rotation + landmark translation, 0 Vision rotation + head centroid",
+            "keyframes excluded after registration (surface does not fit): 7, 12",
+            String(format: "volume too large for %.2f mm voxels; using %.2f mm", 0.5, 0.62),
+            "no depth at the chin: neck not cropped",
+            "Metal unavailable: fused on the CPU",
+            "chin crop: triangle-level fallback (fr_mesh_crop_plane not implemented)",
+            "mesh cleanup failed: invalid argument",
+            "vertex colors failed: no views",
+            "texture failed: no views",
+        ]
+        for note in written {
+            let both = AppTest.inBothLanguages { S.reportNote(note) }
+            #expect(both.en == note)
+            #expect(both.pl != note, "\"\(note)\" is not translated")
+            #expect(!both.pl.isEmpty)
+        }
+        let pl = { (n: String) in AppLanguage.$override.withValue(.polish) { S.reportNote(n) } }
+        #expect(pl("1 keyframes without usable head depth skipped") == "pominięto 1 klatkę bez użytecznej głębi głowy")
+        #expect(pl("3 keyframes with inconsistent image data skipped") == "pominięto 3 klatki z niespójnymi danymi obrazu")
+        #expect(pl("12 keyframes with inconsistent image data skipped") == "pominięto 12 klatek z niespójnymi danymi obrazu")
+        #expect(pl("keyframes excluded after registration (surface does not fit): 7, 12")
+                == "klatki wykluczone po rejestracji (powierzchnia nie pasuje): 7, 12")
+        #expect(pl("volume too large for 0.50 mm voxels; using 0.62 mm") == "objętość za duża dla wokseli 0.50 mm; użyto 0.62 mm")
+        #expect(pl("texture failed: no views") == "błąd kroku „tekstura”: no views")
+        #expect(pl("a note added later") == "a note added later", "an unknown note must still show")
+    }
+
     @Test("The override is scoped to the task")
     func overrideScope() async {
         let outside = AppLanguage.current

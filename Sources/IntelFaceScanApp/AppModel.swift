@@ -637,7 +637,8 @@ final class AppModel {
         case .success(let files):
             showStatus(S.saved(files.map(\.lastPathComponent).joined(separator: ", ")), reveal: files.first)
         case .failure(let error):
-            present(S.saveFailed, error)
+            // MeshExport's own errors (an empty mesh, a bad texture) in the UI language too.
+            present(S.saveFailed, message: S.reconstructionError(error))
         }
     }
 

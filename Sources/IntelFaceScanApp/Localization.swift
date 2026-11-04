@@ -384,6 +384,51 @@ enum S {
         }
     }
     static var reportNotes: String { tr("Notes", "Uwagi") }
+    /// A note of ReconstructionReport.notes (English from ReconstructionPipeline) in the UI language. The Polish UI
+    /// translates the notes the pipeline writes today; an unknown note stays in English rather than disappearing
+    /// (unlike a progress detail, it is the only place its information shows). Error details stay as they are.
+    static func reportNote(_ note: String) -> String {
+        guard AppLanguage.current == .polish else { return note }
+        return polishReportNote(note) ?? note
+    }
+
+    static func polishReportNote(_ note: String) -> String? {
+        let fixed: [String: String] = [
+            "no depth at the chin: neck not cropped": "brak głębi przy brodzie: szyja nie została przycięta",
+            "Metal unavailable: fused on the CPU": "Metal niedostępny: fuzja na CPU",
+        ]
+        if let text = fixed[note] { return text }
+        // Extended syntax (multi-line literal): whitespace is ignored, "\ " is a space.
+        let initialPoses = #/
+            initial\ poses:\ (\d+)\ landmark\ fits,\ (\d+)\ Vision\ rotation\ \+\ landmark\ translation,
+            \ (-?\d+)\ Vision\ rotation\ \+\ head\ centroid
+            /#
+        if let m = note.wholeMatch(of: initialPoses) {
+            return "pozy początkowe: \(m.1) z dopasowania punktów twarzy, \(m.2) z obrotu Vision i przesunięcia z punktów "
+                + "twarzy, \(m.3) z obrotu Vision i środka głowy"
+        }
+        if let m = note.wholeMatch(of: #/keyframes excluded after registration \(surface does not fit\): (.+)/#) {
+            return "klatki wykluczone po rejestracji (powierzchnia nie pasuje): \(m.1)"
+        }
+        if let m = note.wholeMatch(of: #/(\d+) keyframes with inconsistent image data skipped/#), let n = Int(m.1) {
+            return "pominięto \(n) \(polishPlural(n, "klatkę", "klatki", "klatek")) z niespójnymi danymi obrazu"
+        }
+        if let m = note.wholeMatch(of: #/(\d+) keyframes without usable head depth skipped/#), let n = Int(m.1) {
+            return "pominięto \(n) \(polishPlural(n, "klatkę", "klatki", "klatek")) bez użytecznej głębi głowy"
+        }
+        if let m = note.wholeMatch(of: #/volume too large for ([\d.]+) mm voxels; using ([\d.]+) mm/#) {
+            return "objętość za duża dla wokseli \(m.1) mm; użyto \(m.2) mm"
+        }
+        if let m = note.wholeMatch(of: #/chin crop: triangle-level fallback \((.*)\)/#) {
+            return "przycięcie pod brodą: zastępczo całymi trójkątami (\(m.1))"
+        }
+        if let m = note.wholeMatch(of: #/(mesh cleanup|vertex colors|texture) failed: (.*)/#) {
+            let step = ["mesh cleanup": "czyszczenie siatki", "vertex colors": "kolory wierzchołków",
+                        "texture": "tekstura"][String(m.1)] ?? String(m.1)
+            return "błąd kroku „\(step)”: \(m.2)"
+        }
+        return nil
+    }
     static var gpu: String { tr("GPU", "GPU") }
     static var cpu: String { tr("CPU", "CPU") }
 
@@ -400,7 +445,7 @@ enum S {
     static func reconstructionError(_ error: Error) -> String {
         switch error as? ReconstructionError {
         case .notEnoughKeyframes(let n)?:
-            return tr("Not enough usable frames (\(n)). Scan again with the face well lit and in the recommended distance.",
+            return tr("Not enough usable frames (\(n)). Scan again with the face well lit and at the recommended distance.",
                       "Za mało użytecznych klatek (\(n)). Zeskanuj ponownie z dobrze oświetloną twarzą w zalecanej odległości.")
         case .core(let stage, _, let message)?:
             return tr("Stage “\(stage)” failed: \(message)", "Etap „\(stage)” nie powiódł się: \(message)")

@@ -129,6 +129,26 @@ struct AppResultExportTests {
         #expect(FileManager.default.fileExists(atPath: written.appendingPathComponent("manifest.json").path))
     }
 
+    /// MeshExport's own refusal (an empty mesh) reads in the UI language like the reconstruction's errors.
+    @MainActor
+    @Test func exportErrorInPolish() async throws {
+        let (model, _) = AppTest.makeModel()
+        let (capture, _) = Self.fixture()
+        let empty = ReconstructionResult(mesh: ReconMesh(), texture: nil, cameraPoses: [],
+                                         exportTransform: matrix_identity_float4x4, report: ReconstructionReport())
+        model.applyFixture(screen: .result, sourceKind: nil, device: nil, tracking: TrackingState(), scanUpdate: nil,
+                           scanConfiguration: ScanConfiguration(), capture: capture, progress: nil, result: empty,
+                           stats: FrameStats())
+        let dir = try AppTest.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await AppLanguage.$override.withValue(.polish) {
+            await model.exportOBJ(to: dir.appendingPathComponent("head.obj"))
+        }
+        let alert = try #require(model.alert, "an empty mesh was exported")
+        #expect(alert.title == "Nie można zapisać")
+        #expect(alert.message.hasPrefix("Etap „export” nie powiódł się:"), "\(alert.message)")
+    }
+
     /// Two errors in a row are both shown: the second is appended to the alert on screen.
     @MainActor
     @Test func alertsAccumulate() {

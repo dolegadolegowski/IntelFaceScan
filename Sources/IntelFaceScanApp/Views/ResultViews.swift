@@ -162,7 +162,7 @@ struct ReportView: View {
                 Divider()
                 Text(S.reportNotes).font(.caption.weight(.semibold))
                 ForEach(Array(report.notes.enumerated()), id: \.offset) { _, note in
-                    Text("• " + note).font(.caption).foregroundStyle(.secondary)
+                    Text("• " + S.reportNote(note)).font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
