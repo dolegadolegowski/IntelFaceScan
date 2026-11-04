@@ -300,7 +300,8 @@ fr_status marching_cubes( const VolumeGeometry & g, const half_t * tw, const uin
                             normals[3 * id + k] = grad[k];
                         if( colors )
                             for( int k = 0; k < 3; ++k )
-                                vertex_colors[3 * id + k] = uint8_t( std::lround( ( 1.f - t ) * colors[4 * i + k] + t * colors[4 * j + k] ) );
+                                vertex_colors[3 * id + k]
+                                    = uint8_t( std::lround( ( 1.f - t ) * colors[4 * i + k] + t * colors[4 * j + k] ) );
                     }
                 }
         };

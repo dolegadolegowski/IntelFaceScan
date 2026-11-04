@@ -25,7 +25,8 @@ CloudIndex::CloudIndex( const fr_cloud & cloud )
         return;
     // Multi-threaded construction only pays off for large merged clouds.
     const unsigned threads = _adaptor.count > 300000 ? 0u : 1u;
-    _tree = std::make_unique< KdTree >( 3, _adaptor, nanoflann::KDTreeSingleIndexAdaptorParams( 16, nanoflann::KDTreeSingleIndexAdaptorFlags::None, threads ) );
+    const nanoflann::KDTreeSingleIndexAdaptorParams params( 16, nanoflann::KDTreeSingleIndexAdaptorFlags::None, threads );
+    _tree = std::make_unique< KdTree >( 3, _adaptor, params );
 }
 
 bool CloudIndex::nearest( const float query[3], float max_dist2, uint32_t & index, float & dist2 ) const

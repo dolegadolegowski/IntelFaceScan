@@ -249,7 +249,8 @@ fr_status integrate( Volume * volume, const IntegrationConstants & c, const Prep
         [encoder setBuffer:weight offset:0 atIndex:3];
         [encoder setBuffer:rgb offset:0 atIndex:4];
         [encoder setBytes:&c length:sizeof( c ) atIndex:5];
-        const NSUInteger width = 32, height = std::max< NSUInteger >( 1, std::min< NSUInteger >( 8, shared.integrate.maxTotalThreadsPerThreadgroup / 32 ) );
+        const NSUInteger width = 32;
+        const NSUInteger height = std::max< NSUInteger >( 1, std::min< NSUInteger >( 8, shared.integrate.maxTotalThreadsPerThreadgroup / width ) );
         [encoder dispatchThreads:MTLSizeMake( NSUInteger( c.nx ), NSUInteger( c.ny ), NSUInteger( c.nz ) )
             threadsPerThreadgroup:MTLSizeMake( width, height, 1 )];
         [encoder endEncoding];

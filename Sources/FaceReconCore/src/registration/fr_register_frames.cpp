@@ -327,8 +327,9 @@ fr_status fr_register_frames( const fr_rgbd_frame * frames, uint32_t count, cons
 
         if( std::getenv( "FR_DEBUG_REGISTRATION" ) )
             for( const auto & c : edges )
-                std::fprintf( stderr, "edge %u->%u kind %d angle %.1f status %d fit %.3f rmse %.3f mm accepted %d\n", c.source, c.target,
-                              int( c.kind ), rad2deg( c.angle ), int( c.status ), c.result.fitness, c.result.inlier_rmse * 1000, int( c.accepted ) );
+                std::fprintf( stderr, "edge %u->%u kind %d angle %.1f status %d fit %.3f rmse %.3f mm accepted %d\n",
+                              c.source, c.target, int( c.kind ), rad2deg( c.angle ), int( c.status ), c.result.fitness,
+                              c.result.inlier_rmse * 1000, int( c.accepted ) );
         // Certain spanning structure: odometry, plus per group the bridge that fits best after ICP (a pre-chosen
         // bridge may have slid into a wrong minimum that still passes the thresholds), repaired with the best
         // accepted alternatives where a group or frame stays disconnected.

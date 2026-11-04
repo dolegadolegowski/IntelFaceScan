@@ -254,6 +254,9 @@ wrapper works as follows:
   output is triangles with per-vertex density, already counter-clockwise from outside.
 * **Density trimming.** The `density_trim_quantile` lowest-density vertices are removed with their triangles.
   These are where Poisson closes every hole with a smooth, invented membrane. Normals are area-weighted.
+* **Sanitized build.** `SANITIZED_PR` is defined: the default build reads shared node indices through volatile
+  references (double-checked locking), which ThreadSanitizer reports as races; the sanitized variant uses atomics
+  at no measurable cost.
 * **Threading.** PoissonRecon keeps global thread-pool state, so calls are serialized. Its `ASYNC` thread pool
   races on a static futures vector when `ParallelFor` nests inside the `ParallelSections` of the level-set
   extraction: "Failed to close loop" exceptions, reproduced outside the app. The solver therefore runs
@@ -281,14 +284,14 @@ holes and open borders.
 | **TSDF (Metal)** | **voxel 0.75 mm** | **1.09** | **0.11** | **229962** | **0.186** | **0.331** | **0.090** | 16979 |
 | TSDF (Metal) | voxel 0.50 mm | 1.18 | 0.20 | 551078 | 0.202 | 0.341 | 0.091 | 29241 |
 | TSDF (CPU) | voxel 0.75 mm | 1.41 | 0.43 | 229962 | 0.186 | 0.331 | 0.090 | 16979 |
-| Poisson | depth 9 | 11.58 | 10.60 | 562413 | 0.341 | 0.628 | 0.179 | 4972 |
-| Poisson | depth 10 | 12.21 | 11.26 | 594441 | 0.406 | 1.116 | 0.318 | 4806 |
-| Poisson | depth 11 | 12.91 | 11.92 | 589441 | 0.403 | 1.095 | 0.334 | 4803 |
+| Poisson | depth 9 | 11.52 | 10.53 | 569837 | 0.344 | 0.641 | 0.178 | 4656 |
+| Poisson | depth 10 | 12.20 | 11.21 | 600060 | 0.409 | 1.122 | 0.330 | 4523 |
+| Poisson | depth 11 | 12.90 | 11.93 | 598736 | 0.410 | 1.127 | 0.339 | 4521 |
 
 **Decision: TSDF is the default method; Poisson stays available as `.poisson`.**
 
-* **Accuracy.** TSDF is about 2× more accurate (mean 0.19 versus 0.34–0.41 mm, p95 0.33 versus 0.63–1.1 mm) and
-  keeps detail better: nose error 0.09 versus 0.18–0.33 mm. Poisson fits the raw noisy points with an implicit
+* **Accuracy.** TSDF is about 2× more accurate (mean 0.19 versus 0.34–0.41 mm, p95 0.33 versus 0.64–1.1 mm) and
+  keeps detail better: nose error 0.09 versus 0.18–0.34 mm. Poisson fits the raw noisy points with an implicit
   function, while the TSDF averages every observation along the viewing rays with noise-aware weights. Poisson
   depths 10–11 (cells about 0.3 mm over the padded cube) fit the noise and get worse than depth 9.
 * **Time.** TSDF is about 100× faster in the surface stage (0.1 s versus 11–12 s), and the whole pipeline runs in

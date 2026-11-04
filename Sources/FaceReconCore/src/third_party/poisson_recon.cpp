@@ -4,6 +4,9 @@
 
 #include "poisson_recon.h"
 
+// The default build reads shared node indices through volatile references (double-checked locking); the
+// sanitized variant uses proper atomics, which ThreadSanitizer accepts and costs little.
+#define SANITIZED_PR
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Weverything"
 #include "Reconstructors.h"
@@ -162,7 +165,8 @@ void solve_and_extract( const fr::poisson::Input & input, const fr::poisson::Opt
     {
         ColoredStream stream( input );
         using Solver = Poisson::Solver< Real, kDim, FEMSigs, Rgb< Real > >;
-        std::unique_ptr< Reconstructor::Implicit< Real, kDim, FEMSigs, Rgb< Real > > > implicit( Solver::Solve( stream, sp, Rgb< Real >() ) );
+        using Implicit = Reconstructor::Implicit< Real, kDim, FEMSigs, Rgb< Real > >;
+        std::unique_ptr< Implicit > implicit( Solver::Solve( stream, sp, Rgb< Real >() ) );
         if( ! implicit )
             throw std::runtime_error( "Poisson solver failed" );
         ThreadPool::ParallelizationType = ThreadPool::ParallelType::NONE;
