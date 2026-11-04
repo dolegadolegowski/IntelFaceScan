@@ -91,7 +91,7 @@ struct ResultView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     Text(S.result).font(.title2.weight(.semibold))
                     Picker(S.displayMode, selection: $model.displayMode) {
-                        ForEach(ModelDisplayMode.allCases) { Text(S.displayModeName($0.rawValue)).tag($0) }
+                        ForEach(ModelDisplayMode.allCases) { Text($0.title).tag($0) }
                     }
                     VStack(alignment: .leading, spacing: 8) {
                         Button { Task { await model.saveOBJ() } } label: {

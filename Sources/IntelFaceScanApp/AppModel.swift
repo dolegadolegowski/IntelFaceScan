@@ -349,7 +349,7 @@ final class AppModel {
             present(S.cameraError, message: message)
         case .helperExited(let status):
             guard !isQuitting else { return }
-            present(S.helperExited, message: "exit status \(status)")
+            present(S.helperExited, message: S.exitStatus(status))
             detachSource()
         }
     }
@@ -523,7 +523,9 @@ final class AppModel {
                 self.screen = .result
             } catch {
                 guard let self, id == self.reconstructionID else { return }
-                if !Self.isCancellation(error) { self.present(S.reconstructionFailed, error) }
+                if !Self.isCancellation(error) {
+                    self.present(S.reconstructionFailed, message: S.reconstructionError(error))
+                }
                 self.screen = .scanComplete
             }
         }
