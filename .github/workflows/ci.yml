@@ -110,12 +110,16 @@ jobs:
         run: ctest --test-dir build/helper --output-on-failure
 
       - name: Build the Swift package
+        id: swift-build
         run: swift build
 
       - name: Run the tests
         run: scripts/test.sh
 
+      # The smoke tests and the app build do not depend on the test results: they also run when a test failed (the job
+      # still fails), so one run reports both. They need everything up to the Swift build.
       - name: Smoke-test ifscan on a synthetic scan
+        if: ${{ !cancelled() && steps.swift-build.outcome == 'success' }}
         run: |
           set -euo pipefail
           ifscan="$(swift build --show-bin-path)/ifscan"
@@ -126,9 +130,12 @@ jobs:
       # The documented one-command build (docs/ARCHITECTURE.md, "Build"): its tool checks, the SDK (restored above),
       # the helper, the release Swift build and the app bundle.
       - name: Build the app with scripts/build.sh
+        id: app
+        if: ${{ !cancelled() && steps.swift-build.outcome == 'success' }}
         run: scripts/build.sh
 
       - name: Smoke-test the app bundle (bundled helper, librealsense and ifscan)
+        if: ${{ !cancelled() && steps.app.outcome == 'success' }}
         run: |
           set -euo pipefail
           app="$PWD/build/IntelFaceScan.app"
