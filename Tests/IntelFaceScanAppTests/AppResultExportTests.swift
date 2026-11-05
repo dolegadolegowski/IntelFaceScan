@@ -118,10 +118,16 @@ struct AppResultExportTests {
 
         // The session export writes a dataset folder (the extension is added) and offers it in Finder.
         let chosen = dir.appendingPathComponent("my scan")
+        // The write waits at the gate until the flags are checked: one Task.yield() did not always let the export start
+        // on the 3-core CI runner (CI run 41937143470), and polling missed this small write, done in milliseconds.
+        let (gate, open) = AsyncStream<Void>.makeStream()
+        model.writeGate = { for await _ in gate { break } }
+        defer { model.writeGate = nil }
         let export = Task { await model.exportSession(to: chosen) }
-        await Task.yield()
-        #expect(model.isWriting, "the save buttons do not wait for the running write")
+        #expect(await AppTest.waitUntil(10) { model.isWriting }, "the save buttons do not wait for the running write")
         #expect(model.needsShutdown, "quitting would not wait for the running write")
+        open.yield()
+        open.finish()
         await export.value
         #expect(!model.isWriting)
         #expect(model.alert == nil, "session export failed: \(model.alert?.message ?? "")")

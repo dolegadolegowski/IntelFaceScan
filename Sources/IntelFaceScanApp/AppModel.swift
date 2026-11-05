@@ -651,10 +651,17 @@ final class AppModel {
         return folder.appendingPathComponent("\(name) \(UUID().uuidString)").appendingPathExtension(ext)
     }
 
+    /// Tests: awaited before every file write's body, so a test can look at a write while it runs.
+    @ObservationIgnored var writeGate: (@Sendable () async -> Void)?
+
     /// Runs a file write off the main actor and reports the outcome. Quitting waits for running writes.
     private func write(_ action: String, _ body: @escaping @Sendable () throws -> [URL]) async {
         guard !isQuitting else { return }
-        let work = Task.detached(priority: .userInitiated) { () -> Result<[URL], Error> in Result { try body() } }
+        let gate = writeGate
+        let work = Task.detached(priority: .userInitiated) { () -> Result<[URL], Error> in
+            await gate?()
+            return Result { try body() }
+        }
         nextTaskID += 1
         let id = nextTaskID
         writeTasks[id] = Task.detached { _ = await work.value }
