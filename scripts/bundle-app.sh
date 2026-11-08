@@ -7,10 +7,9 @@
 # IntelFaceScan.app/Contents/
 #   MacOS/IntelFaceScan                 the app (SwiftPM product)
 #   MacOS/ifscan                        command line tool
-#   Helpers/IntelFaceScanHelper         camera helper (runs as the user), rpath @executable_path/../Frameworks
+#   Helpers/IntelFaceScanHelper         camera helper (root for the live camera), rpath @executable_path/../Frameworks
 #   Helpers/rs-macos-release            recovery: hands a camera left captured by a crashed helper back to macOS
 #   Frameworks/librealsense2.X.Y.dylib  install name @rpath/librealsense2.X.Y.dylib
-#   Resources/allow-camera-access.sh    allows this build's helper in the camera access service (run with sudo)
 #   Resources/AppIcon.icns              rendered by tools/release/make-app-icon.swift
 #   Resources/NOTICE.txt, Licenses/     our license and NOTICE, and the licenses of the bundled third-party code
 # Every Mach-O is signed ad hoc, inside out (Apple Silicon runs nothing unsigned). Release bundles ship the two Swift
@@ -102,8 +101,6 @@ otool -l "$APP/Contents/Frameworks/$LIBNAME" | awk '/cmd LC_RPATH/ { getline; ge
 done
 
 cp "$WORK/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
-cp "$ROOT/scripts/allow-camera-access.sh" "$APP/Contents/Resources/allow-camera-access.sh"
-chmod 755 "$APP/Contents/Resources/allow-camera-access.sh"
 
 # Licenses of everything in the bundle. librealsense's NOTICE.md covers the code its build fetches and links into the
 # dylib (libusb under LGPL-2.1, nlohmann/json, Fast-CDR, rosbag2, sqlite, LZ4, yaml-cpp).

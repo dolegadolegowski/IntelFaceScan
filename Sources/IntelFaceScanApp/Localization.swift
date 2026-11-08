@@ -39,8 +39,8 @@ enum S {
     static var sources: String { tr("Source", "Źródło") }
     static var liveCamera: String { tr("Live camera", "Kamera na żywo") }
     static var liveCameraHint: String {
-        tr("Intel RealSense D455 over USB-C, through the camera access service of RealSense Viewer.",
-           "Intel RealSense D455 przez USB-C, przez usługę dostępu do kamery z RealSense Viewera.")
+        tr("Intel RealSense D455 over USB-C. macOS asks for the administrator password to take over the camera.",
+           "Intel RealSense D455 przez USB-C. macOS poprosi o hasło administratora, aby przejąć kamerę.")
     }
     static var openRecording: String { tr("Open recording…", "Otwórz nagranie…") }
     static var openRecordingHint: String { tr("Play a .db3 or .bag recording.", "Odtwórz nagranie .db3 lub .bag.") }
@@ -51,7 +51,7 @@ enum S {
     static var closeSource: String { tr("Close source", "Zamknij źródło") }
     static var connecting: String { tr("Connecting…", "Łączenie…") }
     static var waitingForPassword: String {
-        tr("Connecting to the camera…", "Łączenie z kamerą…")
+        tr("Waiting for the administrator password…", "Oczekiwanie na hasło administratora…")
     }
     static var welcomeTitle: String { tr("3D head scan", "Skan 3D głowy") }
     static var welcomeSubtitle: String {

@@ -23,13 +23,12 @@ IntelFaceScan $VERSION for Apple Silicon Macs (macOS 27.2 or newer)
 
 Drag IntelFaceScan to Applications. The app is signed ad hoc: the first time, open it with right click > Open.
 
-The live camera (Intel RealSense D455 over USB-C) uses the camera access service of RealSense Viewer (a root
-LaunchDaemon that owns the USB device): no administrator password per session. Set it up once:
-  1. Install camera access from RealSense Viewer.
-  2. Run  sudo /Applications/IntelFaceScan.app/Contents/Resources/allow-camera-access.sh
-When the session ends the service hands the camera back to macOS.
+The live camera (Intel RealSense D455 over USB-C) needs administrator rights: macOS only lets root take the camera
+over from its USB video driver. IntelFaceScan asks for the password once per camera session and runs only its small
+camera helper with these rights; when the session ends the camera is handed back to macOS.
 
-If the camera no longer works as a webcam after the app was killed, re-plug it.
+If the app was ever killed while the camera was in use and the camera no longer works as a webcam, re-plug it, or run
+    sudo /Applications/IntelFaceScan.app/Contents/Helpers/rs-macos-release
 TXT
 xattr -cr "$STAGE" 2>/dev/null || true
 

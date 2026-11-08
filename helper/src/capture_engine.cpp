@@ -13,7 +13,6 @@
 // only ProcessingControl, ImuState, the Session flags and the DeviceWatch, each with its own synchronization.
 
 #include "capture_engine.h"
-#include "broker_service.h"
 #include "capture_config.h"
 #include "capture_processing.h"
 #include "capture_testing.h"
@@ -31,7 +30,6 @@
 #include <condition_variable>
 #include <map>
 #include <mutex>
-#include <unistd.h>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -428,11 +426,6 @@ void RealSenseEngine::check_open_locked() const
 void RealSenseEngine::open_live()
 {
     std::lock_guard< std::mutex > lock( m_mutex );
-    // Without root the camera can only be reached through the camera access service of the RealSense tools.
-    const bool unprivileged = ::geteuid() != 0;
-    if( unprivileged && ! camera_access_service_registered() )
-        throw std::runtime_error( "The camera access service is not installed. Install it once from RealSense Viewer "
-                                  "(it asks for the administrator password a single time), then connect again." );
     m_ctx = std::make_unique< rs2::context >();
     rs2::device_list list = m_ctx->query_devices();
 
@@ -477,18 +470,9 @@ void RealSenseEngine::open_live()
             throw std::runtime_error( "The RealSense camera is in firmware recovery mode. Update its firmware with "
                                       "rs-fw-update (or the RealSense Viewer) and reconnect it." );
         if( ! open_error.empty() )
-            throw std::runtime_error(
-                "A RealSense camera is connected but could not be opened: " + open_error
-                + ( unprivileged ? std::string( " The camera access service probably does not accept this build of "
-                                                "IntelFaceScan: run 'sudo scripts/allow-camera-access.sh' (docs/HELPER.md)." )
-                                 : std::string() ) );
-        throw std::runtime_error(
-            "No Intel RealSense camera found. Connect the D455 directly to a USB 3 port of the Mac with a USB-C "
-            "cable and try again."
-            + ( unprivileged ? std::string( " If it is connected, the camera access service may not accept this "
-                                            "build of IntelFaceScan: run 'sudo scripts/allow-camera-access.sh' "
-                                            "(docs/HELPER.md)." )
-                             : std::string() ) );
+            throw std::runtime_error( "A RealSense camera is connected but could not be opened: " + open_error );
+        throw std::runtime_error( "No Intel RealSense camera found. Connect the D455 directly to a USB 3 port of the "
+                                  "Mac with a USB-C cable and try again." );
     }
 
     open_device_locked( chosen );

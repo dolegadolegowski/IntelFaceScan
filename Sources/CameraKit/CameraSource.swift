@@ -6,7 +6,7 @@ import CoreGraphics
 import Foundation
 
 public enum CameraSourceKind: Sendable, Equatable {
-    /// RealSense camera through the camera helper (leased from the camera access service, no password).
+    /// RealSense camera through the privileged helper (asks for the administrator password).
     case live
     /// A .db3/.bag recording played through the helper running unprivileged (no password).
     case playback(URL)
@@ -24,7 +24,7 @@ public enum CameraSourceKind: Sendable, Equatable {
 public protocol CameraSource: AnyObject, Sendable {
     var kind: CameraSourceKind { get }
 
-    /// Starts the helper and returns the device description.
+    /// Starts the helper (live: administrator prompt) and returns the device description.
     func connect() async throws -> DeviceInfo
     /// Applies a configuration; while streaming this may restart the streams.
     func configure(_ configuration: CaptureConfiguration) async throws

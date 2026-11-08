@@ -2,10 +2,10 @@
 //
 // IntelFaceScanHelper - the camera helper process (docs/HELPER.md, docs/PROTOCOL.md).
 //
-//   IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid>                         live camera (user)
+//   IntelFaceScanHelper --socket <path> --uid <uid> --gid <gid> --parent-pid <pid>            live camera (root)
 //   IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> --playback <file> [--no-real-time]
 //   IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> --fake [--fake-row-padding <bytes>]
-//   IntelFaceScanHelper --probe ...                                                            measurements (live: root only without the camera access service)
+//   IntelFaceScanHelper --probe ...                                                            measurements (root)
 //   IntelFaceScanHelper --release [-w]                                                         hand cameras back
 
 #include "capture_engine.h"
@@ -59,7 +59,7 @@ struct Options
 void usage( FILE * out )
 {
     std::fprintf( out,
-                  "usage: IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid>\n"
+                  "usage: IntelFaceScanHelper --socket <path> --uid <uid> --gid <gid> --parent-pid <pid>\n"
                   "       IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> --playback <file> "
                   "[--no-real-time]\n"
                   "       IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> --fake "
@@ -208,10 +208,19 @@ bool parse_args( int argc, char ** argv, Options & o, std::string & error )
     return true;
 }
 
-// No mode needs root: the live camera goes through the camera access service of the RealSense tools (a root
-// LaunchDaemon that owns the USB device; docs/HELPER.md), everything else reads files or makes frames up.
+// Root runs the camera; anything that only reads files or makes frames up never needs it.
 int check_privileges( const Options & o )
 {
+    if( o.mode == ifs::HelperMode::live )
+    {
+        if( ::geteuid() != 0 )
+        {
+            std::fprintf( stderr, "IntelFaceScanHelper: the live camera needs root (IntelFaceScan asks for the "
+                                  "administrator password)\n" );
+            return kExitNoPermission;
+        }
+        return 0;
+    }
     if( ::geteuid() == 0 || ::getuid() == 0 )
     {
         std::fprintf( stderr, "IntelFaceScanHelper: refusing to run %s mode as root\n", ifs::mode_name( o.mode ) );
@@ -323,7 +332,7 @@ int run_session( const Options & o )
     ifs::HelperService service( connection, o.mode, std::move( factory ), o.real_time );
 
     // From here on every way out, an exception included (e.g. bad_alloc while framing a reply), goes through the
-    // shutdown sequence: a helper that skipped it would leave the camera leased until the service notices the dead connection.
+    // shutdown sequence: a root helper that skipped it would leave the camera captured until it is re-plugged.
     std::string reason;
     int status = 0;
     try
@@ -362,8 +371,25 @@ int run_session( const Options & o )
         status = kExitSoftware;
     }
     connection.drop_pending_framesets();
-    // The camera access service takes the camera back when the last connection of this process is gone (and hands it
-    // to macOS after a short grace period): nothing to release here.
+    if( o.mode == ifs::HelperMode::live )
+    {
+        // After shutdown_engine(): the librealsense context is gone, nothing uses the device any more. Every
+        // RealSense device without a macOS driver is released, not only the one captured here: librealsense does not
+        // report its capture, and no other sign of it is reliable (docs/HELPER.md, session end).
+        ifs::UsbReleaseResult r;
+        try
+        {
+            r = ifs::release_realsense_devices( kReleaseWaitMs,
+                                                [&log]( const std::string & line ) { log( "info", line ); } );
+        }
+        catch( ... )
+        {
+            r.failed = 1;
+        }
+        if( r.failed )
+            log( "warning", "the camera could not be handed back to macOS; re-plug it or run "
+                            "'sudo IntelFaceScanHelper --release'" );
+    }
     try
     {
         if( ! connection.broken() )

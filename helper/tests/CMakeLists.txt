@@ -36,7 +36,7 @@ set(IFS_HELPER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 
 # The capture module exactly as the helper compiles it (capture_engine.cpp, capture_*.cpp, probe.cpp).
 file(GLOB IFS_CAPTURE_SOURCES CONFIGURE_DEPENDS "${IFS_HELPER_SRC}/capture_*.cpp")
-add_library(ifs_capture STATIC ${IFS_CAPTURE_SOURCES} "${IFS_HELPER_SRC}/probe.cpp" "${IFS_HELPER_SRC}/broker_service.cpp")
+add_library(ifs_capture STATIC ${IFS_CAPTURE_SOURCES} "${IFS_HELPER_SRC}/probe.cpp")
 target_include_directories(ifs_capture PUBLIC "${IFS_HELPER_SRC}" "${IFS_SDK_DIR}/include")
 target_compile_options(ifs_capture PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(ifs_capture PUBLIC realsense2::realsense2)

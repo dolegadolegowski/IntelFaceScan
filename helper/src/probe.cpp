@@ -1,6 +1,6 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
-// Camera measurement tool: `IntelFaceScanHelper --probe ...` (live camera: through the camera access service, or sudo without it). Enumerates the device
+// Camera measurement tool: `IntelFaceScanHelper --probe ...` (live camera: run with sudo). Enumerates the device
 // and measures depth quality on a flat target (a wall) for candidate configurations, through the same
 // CaptureEngine and filters the app uses. Results print as markdown tables plus JSON for docs/CAMERA.md.
 
@@ -97,7 +97,7 @@ struct Options
 void usage( std::FILE * out )
 {
     std::fprintf( out,
-                  "usage: IntelFaceScanHelper --probe [options]      (live camera: needs the camera access service or sudo; Ctrl-C stops cleanly)\n"
+                  "usage: IntelFaceScanHelper --probe [options]      (live camera: sudo; Ctrl-C stops cleanly)\n"
                   "  Point the camera at a flat, textured wall, perpendicular, and keep both still.\n"
                   "  --json             print only the JSON report\n"
                   "  --frames N         frames per measurement (default 30)\n"

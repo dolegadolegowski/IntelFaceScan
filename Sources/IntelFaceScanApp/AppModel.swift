@@ -255,7 +255,7 @@ final class AppModel {
             startPipeline(newSource)
             screen = .preview
             if case .dataset(let url) = request { loadDatasetCapture(url, generation: generation) }
-            // Settings changed while connecting (connecting can take a while) were not applied yet.
+            // Settings changed while connecting (the password prompt can take minutes) were not applied yet.
             applyCameraSettings(settings, comparedTo: applied)
         } catch {
             guard generation == sourceGeneration else { return }

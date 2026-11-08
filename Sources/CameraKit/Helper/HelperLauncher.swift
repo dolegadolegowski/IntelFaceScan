@@ -1,11 +1,11 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
-// Starting the helper. Every mode runs the helper directly as the user (`launchAsUser`); the live camera is leased from
-// the camera access service (docs/HELPER.md). The administrator-prompt launch (`do shell script ... with administrator
-// privileges`) that earlier versions used for the live camera remains only for the recovery tool
-// `LiveCameraSource.releaseCameraToSystem()`.
+// Starting the helper. The live camera needs root: the helper runs through
+// `do shell script ... with administrator privileges` (the standard macOS password prompt, as the
+// realsense-viewer-macos launcher does), which blocks until the helper exits, so it runs on its own queue.
+// Playback and the fake camera run the helper directly as the user.
 //
-// That script runs in-process (NSAppleScript) only in an AppKit application (NSApp exists, as in IntelFaceScan.app):
+// The script runs in-process (NSAppleScript) only in an AppKit application (NSApp exists, as in IntelFaceScan.app):
 // there the prompt belongs to the app. Without one - a command line tool, the test runner - an in-process
 // "do shell script" can wait forever for an Apple event that nobody dispatches, so the same script goes through
 // /usr/bin/osascript instead (the prompt then names osascript).
@@ -30,8 +30,8 @@ final class HelperProcessHandle: @unchecked Sendable {
         condition.withLock { self.process = process }
     }
 
-    /// The helper's own pid when the app started it directly (every session). nil for the administrator-prompt launch,
-    /// which runs the tool through a root shell whose pid the app never learns.
+    /// The helper's own pid when the app started it directly (playback, fake). nil for the privileged helper: the
+    /// administrator launch runs it through a root shell whose pid the app never learns.
     var processIdentifier: pid_t? {
         condition.withLock {
             guard let process, process.processIdentifier > 0 else { return nil }

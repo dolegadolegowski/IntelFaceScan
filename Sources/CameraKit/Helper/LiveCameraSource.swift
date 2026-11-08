@@ -1,8 +1,14 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
-// The live RealSense camera through the camera helper (docs/HELPER.md). The helper runs as the user and leases the
-// USB device from the camera access service of the RealSense tools (no administrator password); shutdown() makes
-// the helper stop the streams and exit, and the service hands the camera back to macOS (it works as a webcam again).
+// The live RealSense camera through the privileged helper (docs/HELPER.md). connect() shows the macOS administrator
+// prompt once per helper; shutdown() makes the helper stop the streams, hand the camera back to macOS (it works as a
+// webcam again) and exit.
+//
+// The prompt comes from AppleScript's "do shell script ... with administrator privileges". In an AppKit application
+// (IntelFaceScan.app) it runs in-process and the prompt is the app's; elsewhere (a command line tool) it runs through
+// /usr/bin/osascript, because an in-process "do shell script" can hang without an AppKit event loop
+// (HelperLauncher). An AppKit application whose main run loop is not running (NSApplication created, never run) is
+// not supported.
 
 import CoreGraphics
 import Foundation
@@ -17,7 +23,8 @@ public final class LiveCameraSource: CameraSource, @unchecked Sendable {
         session = HelperCameraSession(mode: .live, helperURL: helperURL)
     }
 
-    /// Starts the helper and returns the device. When the helper runs but no camera is connected the error comes from the helper, and a later
+    /// Starts the helper (administrator prompt; CameraError.authorizationCancelled when the user cancels it) and
+    /// returns the device. When the helper runs but no camera is connected the error comes from the helper, and a later
     /// connect() asks again without a new prompt.
     public func connect() async throws -> DeviceInfo { try await session.connect() }
     public func configure(_ configuration: CaptureConfiguration) async throws { try await session.configure(configuration) }

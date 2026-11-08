@@ -49,7 +49,7 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
   `build/helper/tests/capture-tests bench`).
 * The SDK bookkeeping of the build scripts (moving between versions of `patches/`, the SDK's input stamp):
   `scripts/test-build-scripts.sh`, against a stand-in librealsense in a temporary folder (no network, ~10 s).
-* Do not run anything with `sudo` for tests; the live camera needs the camera access service (docs/HELPER.md), not root.
+* Do not run anything with `sudo` for tests; only the live camera needs administrator rights.
 
 | Target / file | What it checks |
 |---|---|
@@ -223,7 +223,7 @@ How to record a session that the offline scan can use:
      the app opened, so the recording belongs to you.
    * **RealSense Viewer** from [realsense-viewer-macos](https://github.com/dolegadolegowski/realsense-viewer-macos)
      (same patched librealsense): enable the streams above, press *Record* (`.db3` by default in 2.58, or `.bag`).
-     It uses the camera access service (no password per session) and hands the camera back to macOS when it quits.
+     It asks for the administrator password to capture the camera, and hands it back to macOS when it quits.
    * **rs-record** (built by `scripts/build-sdk.sh` into `build/sdk/install/bin`): needs root on macOS for USB
      capture; the default stream profiles differ from the app's, so prefer the app or the viewer.
 5. Check it: `ifscan info rec.db3` (streams), then `ifscan reconstruct rec.db3 -o /tmp/rec.obj --save-dataset

@@ -12,25 +12,24 @@ IntelFaceScan does a 3D scan of a human head with an Intel RealSense D455 (USB�
 │   CameraKit ── AF_UNIX socket (docs/PROTOCOL.md) ──┐   graph, TSDF, MC, UV,    │
 └────────────────────────────────────────────────────┼───  texture, OBJ/PLY) ────┘
                                                      │
-┌────────── Contents/Helpers/IntelFaceScanHelper (user, live camera) ─────────────┐
+┌────────── Contents/Helpers/IntelFaceScanHelper (root, live camera) ─────────────┐
 │ IPC + security (main) ─ CaptureEngine (librealsense 2.58.4 + macOS patches)    │
 │ streams, presets, filters, align, IMU, recording/playback, USB capture/release │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-* **Only the helper links librealsense.** macOS attaches UVCAssistant/HID drivers to the camera and only root may
-  capture the USB device. The patched librealsense (patches/0004, from realsense-viewer-macos) talks over XPC to the
-  root LaunchDaemon `realsense-usbd` that RealSense Viewer installs, so the helper runs as the user and no
-  administrator prompt appears. The daemon admits only allowlisted cdhashes (`scripts/allow-camera-access.sh`).
+* **Only the helper links librealsense.** macOS attaches UVCAssistant/HID drivers to the camera; libusb has to
+  capture the USB device, which only root may do. The helper is started with the standard administrator
+  prompt (`do shell script … with administrator privileges`, like the realsense-viewer-macos launcher).
 * **The app never runs as root.** All UI, Vision, reconstruction and file I/O happen in the app as the user.
 * **Playback** of `.db3`/`.bag` recordings uses the same helper binary started directly as the user (no USB,
   no password), so the post-processing chain is identical for live and recorded data.
-* The camera is leased from the service for the lifetime of the helper and handed back to macOS by the service (after a
-  grace period) when the helper's connection ends – on `QUIT`, socket EOF, parent exit, or
+* The camera is captured once per helper lifetime (patched librealsense) and handed back to macOS (USB
+  re-enumeration, as `rs-macos-release`) when the helper exits – on `QUIT`, socket EOF, parent exit, or
   SIGINT/SIGTERM/SIGHUP. Never `kill -9` the helper during a camera command (can hang the firmware until
   re-plugged).
 
-### Security rules for the helper
+### Security rules for the root helper
 
 1. Accept commands only from the app: socket in a `0700` directory owned by the user, peer uid and pid checked,
    strict message validation (sizes, JSON object, known fields), unknown messages are errors.
