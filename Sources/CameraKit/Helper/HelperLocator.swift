@@ -32,7 +32,7 @@ enum HelperLocation {
 
     /// build/helper/IntelFaceScanHelper in `folder` or one of its 7 parents. The search can climb out of the
     /// repository into folders other users can write to (/Users/Shared, /private/tmp, a group-writable checkout), and
-    /// the live camera runs what it finds as root after the password prompt: a candidate is only taken when nobody but
+    /// the helper runs what it finds with the service's trust in its cdhash: a candidate is only taken when nobody but
     /// root and this user can replace it (see `problem(_:)`).
     static func searchBuildFolders(from folder: URL, uid: uid_t = getuid()) -> URL? {
         var dir = folder

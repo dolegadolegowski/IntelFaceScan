@@ -237,7 +237,7 @@ final class HelperCameraSession: @unchecked Sendable {
     let helperURL: URL
     let frames = Broadcaster<CameraFrame>()
     let events = Broadcaster<CameraEvent>()
-    /// How long to wait for the helper to connect: the live camera waits for the user to type the password.
+    /// How long to wait for the helper to connect: the live helper connects after it reached the camera access service.
     var connectTimeout: TimeInterval
     /// Tests: starts the helper in place of HelperLauncher (helper, arguments), e.g. a process that never connects.
     var launchOverride: ((URL, [String]) throws -> HelperProcessHandle)?
@@ -257,7 +257,7 @@ final class HelperCameraSession: @unchecked Sendable {
     init(mode: Mode, helperURL: URL) {
         self.mode = mode
         self.helperURL = helperURL
-        connectTimeout = mode == .live ? 600 : 20
+        connectTimeout = 20
         losslessFrames = Self.startsLossless(mode)
     }
 
@@ -315,7 +315,6 @@ final class HelperCameraSession: @unchecked Sendable {
 
     private func arguments(socket: String, helper: URL) -> [String] {
         var args = ["--socket", socket, "--uid", String(getuid())]
-        if mode == .live { args += ["--gid", String(getgid())] }
         args += ["--parent-pid", String(getpid())]
         switch mode {
         case .live:
@@ -341,9 +340,8 @@ final class HelperCameraSession: @unchecked Sendable {
             if let launchOverride {
                 process = try launchOverride(helper, args)
             } else {
-                process = mode == .live
-                    ? HelperLauncher.launchPrivileged(helper: helper, arguments: args)
-                    : try HelperLauncher.launchAsUser(helper: helper, arguments: args)
+                // Every mode runs as the user; the live camera goes through the camera access service (docs/HELPER.md).
+                process = try HelperLauncher.launchAsUser(helper: helper, arguments: args)
             }
         } catch {
             server.close()
@@ -372,8 +370,7 @@ final class HelperCameraSession: @unchecked Sendable {
                 }
             }
             do {
-                // The pid is known for a helper started directly (playback, fake), not for the privileged one.
-                _ = try HelperSocketServer.verifyPeer(fd: fd, expectedUID: mode == .live ? 0 : getuid(),
+                _ = try HelperSocketServer.verifyPeer(fd: fd, expectedUID: getuid(),
                                                       helperPath: helper.path, expectedPID: process.processIdentifier)
             } catch {
                 Darwin.close(fd)
@@ -416,7 +413,7 @@ final class HelperCameraSession: @unchecked Sendable {
             throw Task.isCancelled ? CancellationError() : error
         }
         // From here the helper stays up even when the device query fails (e.g. no camera plugged in yet): the next
-        // connect() asks again without another password prompt.
+        // connect() asks again without starting another helper.
         guard let connection = session.connection else { throw CameraError.notConnected }
         do {
             return try await queryDevice(connection)
@@ -714,25 +711,24 @@ final class HelperCameraSession: @unchecked Sendable {
             connection.close()
         }
         if session.connection == nil && !session.process.hasExited {
-            // Never connected, e.g. the administrator prompt is still showing (the handle of a live helper only ends
-            // when the in-process AppleScript returns, after the prompt). Nothing to wait for: the socket is removed
-            // below, so a helper started after all cannot connect and exits, and it also exits with the app.
-            if mode == .live {
-                logger.info("the camera helper never connected; not waiting for it")
-            } else {
-                session.process.terminate()
-                if !session.process.waitForExit(timeout: 3) {
+            // Never connected: nothing to wait for; the socket is removed below and the helper also exits with the app.
+            session.process.terminate()
+            if !session.process.waitForExit(timeout: 3) {
+                if mode == .live {
+                    // Never SIGKILL a helper that may be talking to the camera (the D455 firmware can hang); it still
+                    // exits by itself on the closed socket or the app's exit.
+                    logger.error("the camera helper did not exit in time")
+                } else {
                     session.process.kill()
                     session.process.waitForExit(timeout: 2)
                 }
             }
         } else if !session.process.waitForExit(timeout: remaining()) {
-            if mode == .live {
-                // Root cannot be signalled from here; it exits by itself once it notices the closed socket.
-                logger.error("the camera helper did not exit in time")
-            } else {
-                session.process.terminate()
-                if !session.process.waitForExit(timeout: 3) {
+            session.process.terminate()
+            if !session.process.waitForExit(timeout: 3) {
+                if mode == .live {
+                    logger.error("the camera helper did not exit in time")
+                } else {
                     session.process.kill()
                     session.process.waitForExit(timeout: 2)
                 }
@@ -743,7 +739,7 @@ final class HelperCameraSession: @unchecked Sendable {
 
     // MARK: Helpers
 
-    /// Runs blocking work on its own thread (accept() can wait minutes for the password prompt).
+    /// Runs blocking work on its own thread (accept() waits for the helper).
     static func blocking<T>(_ work: @escaping () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
             let thread = Thread {

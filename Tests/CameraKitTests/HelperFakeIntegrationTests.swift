@@ -283,8 +283,9 @@ struct HelperFakeIntegrationTests {
     @Test func helperChecksPrivilegesAndArguments() throws {
         var (status, message) = try runHelper(["--socket", "/x/y", "--uid", "0", "--parent-pid", String(getpid()), "--fake"])
         #expect(status == 77 && message.contains("--uid"), "\(message)")
-        (status, message) = try runHelper(["--socket", "/x/y", "--uid", String(getuid()), "--parent-pid", String(getpid())])
-        #expect(status == 77 && message.contains("root"), "\(message)")
+        // The live camera runs as the user as well (the camera access service owns the USB device): a foreign --uid is refused.
+        (status, message) = try runHelper(["--socket", "/x/y", "--uid", "0", "--parent-pid", String(getpid())])
+        #expect(status == 77 && message.contains("--uid"), "\(message)")
         (status, message) = try runHelper(["--fake", "--playback", "/x"])
         #expect(status == 64, "\(message)")
         (status, message) = try runHelper(["--socket", "/x/y", "--uid", "abc", "--parent-pid", "5", "--fake"])

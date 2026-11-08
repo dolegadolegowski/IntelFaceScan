@@ -1,6 +1,6 @@
 # Helper ⇄ app protocol
 
-The camera helper (`IntelFaceScanHelper`, C++, root for the live camera) and the app (`CameraKit`, Swift) talk over
+The camera helper (`IntelFaceScanHelper`, C++, runs as the user) and the app (`CameraKit`, Swift) talk over
 a local `AF_UNIX`/`SOCK_STREAM` socket. Binary framing is defined in
 [`Sources/IFSProtocol/include/ifs_protocol.h`](../Sources/IFSProtocol/include/ifs_protocol.h):
 
@@ -24,8 +24,8 @@ ifs_wire_header (24 bytes, little endian) | JSON (json_bytes, UTF-8) | payload (
 1. The app creates a private directory (`0700`) in its per-user temporary directory, binds `camera.sock` in it
    and listens (backlog 1).
 2. The app starts the helper:
-   * live: `do shell script "'<helper>' --socket '<path>' --uid <uid> --gid <gid> --parent-pid <pid>" with
-     administrator privileges` (standard macOS password prompt),
+   * live: directly as the user, `<helper> --socket <path> --uid <uid> --parent-pid <pid>` (the USB device is leased
+     from the camera access service, see HELPER.md),
    * playback: directly as the user: `<helper> --socket <path> --uid <uid> --parent-pid <pid> --playback <file>
      [--no-real-time]`,
    * fake (development and tests, no camera, no librealsense calls): directly as the user, `--fake` instead of
@@ -46,9 +46,9 @@ ifs_wire_header (24 bytes, little endian) | JSON (json_bytes, UTF-8) | payload (
    * `CONFIGURE` and `SET_FILTERS`: every key is required except `laser_power` (`null` or absent = maximum);
      `align_to_color` must be `true`; `send_ir` requires `enable_ir`.
 5. End: the app sends `QUIT` (or closes the socket, or exits: the helper watches the socket and `parent-pid`).
-   The helper stops the streams, destroys the librealsense context, re-enumerates the USB device so macOS
-   re-attaches its drivers (same as `rs-macos-release`), sends `BYE` if the socket is still open, and exits.
-   SIGINT/SIGTERM/SIGHUP do the same. The app never needs to (and as a user cannot) kill the root helper.
+   The helper stops the streams, destroys the librealsense context (which ends its lease; the camera access
+   service hands the camera back to macOS), sends `BYE` if the socket is still open, and exits. SIGINT/SIGTERM/SIGHUP
+   do the same. Never SIGKILL a helper that is talking to the camera.
 
 ## Messages
 

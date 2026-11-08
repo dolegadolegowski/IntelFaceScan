@@ -1,6 +1,6 @@
 # License: Apache 2.0. See LICENSE file in root directory.
 #
-# IntelFaceScanHelper - the privileged camera helper (links the patched librealsense from scripts/build-sdk.sh).
+# IntelFaceScanHelper - the camera helper (links the patched librealsense from scripts/build-sdk.sh).
 #   cmake -S helper -B build/helper -DIFS_SDK_DIR=build/sdk/install && cmake --build build/helper
 cmake_minimum_required(VERSION 3.20)
 project(IntelFaceScanHelper LANGUAGES C CXX)
@@ -34,7 +34,7 @@ target_include_directories(IntelFaceScanHelper PRIVATE
 target_include_directories(IntelFaceScanHelper SYSTEM PRIVATE "${IFS_SDK_DIR}/include")
 target_sources(IntelFaceScanHelper PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../Sources/IFSProtocol/ifs_protocol.c")
 target_compile_options(IntelFaceScanHelper PRIVATE -Wall -Wextra -Wno-unused-parameter
-    # The live helper runs as root: keep the cheap memory-safety checks on in every build.
+    # The helper talks to the camera service and to the app: keep the cheap memory-safety checks on in every build.
     -fstack-protector-strong
     # No absolute build paths (with the user name) in the binary.
     "-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/..=.")

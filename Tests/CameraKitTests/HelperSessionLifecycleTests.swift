@@ -130,7 +130,7 @@ private final class LaunchRecord: @unchecked Sendable {
     func cleanUp() {
         for handle in [handle, impostor].compactMap({ $0 }) where !handle.hasExited {
             handle.terminate()
-            handle.waitForExit(timeout: 3)
+            if !handle.waitForExit(timeout: 3) { handle.kill() }
         }
     }
 }
@@ -143,14 +143,13 @@ struct HelperSessionLaunchTests {
         return condition()
     }
 
-    @Test func closingWhileTheLivePromptShowsDoesNotWait() async throws {
-        // The live helper's handle ends only when the in-process AppleScript returns, i.e. after the administrator
-        // prompt. A stand-in that never connects and never exits plays the prompt that is still showing (no real
-        // prompt in tests). Closing the source used to wait ~15 s for it; the socket is removed instead, so a helper
-        // started after all could not connect and would exit by itself (or with the app). Timed on a thread of its own:
-        // the shutdown needs no thread of the Swift cooperative pool, which the blocking tests of this target running
-        // alongside can hold for seconds on a 3-core runner (awaiting shutdown(timeout:) measured 14 s there in CI run
-        // 41873434467, while the shutdown still awaited the connect task).
+    @Test func closingBeforeTheLiveHelperConnectsDoesNotWait() async throws {
+        // A stand-in that never connects and never exits plays a live helper that is still starting (waiting for the
+        // camera access service). Closing the source must not wait for it: the socket is removed, so a helper that
+        // starts after all cannot connect and exits, and the stand-in is asked to end with SIGTERM (never SIGKILL: a
+        // live helper may be talking to the camera). Timed on a thread of its own: the shutdown needs no thread of the
+        // Swift cooperative pool, which the blocking tests of this target running alongside can hold for seconds on a
+        // 3-core runner (awaiting shutdown(timeout:) measured 14 s there in CI run 41873434467).
         let sleep = URL(fileURLWithPath: "/bin/sleep")
         let session = HelperCameraSession(mode: .live, helperURL: sleep)
         let launched = LaunchRecord()
@@ -176,8 +175,34 @@ struct HelperSessionLaunchTests {
         } catch {}
         let directory = try #require(launched.socketDirectory)
         #expect(!FileManager.default.fileExists(atPath: directory), "\(directory) was left behind")
-        // The root helper cannot be signalled by the app: the stand-in was left alone.
-        #expect(launched.handle?.hasExited == false)
+        #expect(launched.handle?.waitForExit(timeout: 5) == true, "the helper that never connected was left running")
+    }
+
+    @Test func aLiveHelperThatIgnoresSigtermIsNeverKilled() async throws {
+        // A live helper may be in the middle of a camera command: after SIGTERM the app leaves it alone (SIGKILL can
+        // hang the D455 firmware); a playback or fake helper would be killed.
+        let shell = URL(fileURLWithPath: "/bin/sh")
+        let session = HelperCameraSession(mode: .live, helperURL: shell)
+        let launched = LaunchRecord()
+        defer { launched.cleanUp() }
+        session.launchOverride = { _, args in
+            let handle = try HelperLauncher.launchAsUser(helper: shell, arguments: ["-c", "trap '' TERM; sleep 30"])
+            launched.record(handle, arguments: args)
+            return handle
+        }
+        let attempt = Task { try await session.connect() }
+        #expect(await eventually { launched.handle != nil })
+        try await Task.sleep(for: .milliseconds(300))   // let the shell install its trap
+        let elapsed: Double = await withCheckedContinuation { continuation in
+            Thread {
+                let t0 = Date()
+                session.shutdownBlocking(timeout: 20)
+                continuation.resume(returning: Date().timeIntervalSince(t0))
+            }.start()
+        }
+        #expect(elapsed < 10, "closing waited \(elapsed) s")
+        _ = try? await attempt.value
+        #expect(launched.handle?.hasExited == false, "a live helper was killed")
     }
 
     @Test(.enabled(if: TestHelper.available, TestHelper.skipReason))

@@ -73,16 +73,19 @@ notarized): on another Mac, open it the first time with right-click → **Open**
 
 ## Permissions and the camera
 
-- **Administrator password.** macOS attaches its own drivers to the camera. Taking the USB device over requires root,
-  so when you choose **Live camera** macOS shows the standard administrator prompt. Only the small camera helper
-  (`Contents/Helpers/IntelFaceScanHelper`) runs as root; the app itself, Vision, the reconstruction and all file
-  writing run as you. The helper accepts commands only from the app over a private socket, never opens paths the app
+- **Camera access service (one-time setup, no password per session).** macOS attaches its own drivers to the camera and
+  only root may take the USB device over. IntelFaceScan uses the same service as RealSense Viewer: the root
+  LaunchDaemon `realsense-usbd`, which owns the USB device and serves allowlisted programs over XPC. Nothing of
+  IntelFaceScan runs as root and **Live camera** never asks for the administrator password. Once, after installing the
+  app (and again after rebuilding it, or after installing camera access from a RealSense Viewer DMG), install camera
+  access in RealSense Viewer and allow this build of the helper:
+  `sudo scripts/allow-camera-access.sh` (administrator password once). Without the service the app says so instead
+  of connecting. The helper accepts commands only from the app over a private socket, never opens paths the app
   sends, and writes recordings into a file the app opened. Details: [docs/HELPER.md](docs/HELPER.md).
-- **Recordings, datasets and the synthetic demo** need no password.
+- **Recordings, datasets and the synthetic demo** need no password and no service.
 - **Handing the camera back.** When the app quits (⌘Q, closing the window, `kill -TERM`, Ctrl‑C) or you close the
-  camera, the helper stops the streams and re-enumerates the USB device so macOS takes it back (e.g. FaceTime can use
-  it again). If the app ever crashes and the camera stays unusable, run
-  `sudo build/IntelFaceScan.app/Contents/Helpers/IntelFaceScanHelper --release -w` or unplug and replug it.
+  camera, the helper stops the streams and the service hands the camera back to macOS after a short grace period
+  (e.g. FaceTime can use it again). If the camera stays unusable, unplug and replug it.
 - **Never `kill -9` the helper** while it talks to the camera: the D455 firmware can hang until it is replugged.
 - No other permission is needed: the app does not use the macOS camera framework, so there is no camera privacy
   prompt.
@@ -93,7 +96,7 @@ notarized): on another Mac, open it the first time with right-click → **Open**
    rotate; **turn only your head**, keep your shoulders still.
 2. Use **even, diffuse light** (no strong light from one side, no direct sun). Take off glasses; tie back long hair if
    you can (stereo depth sees little of fine hair). Avoid shiny makeup.
-3. Choose **Live camera**, enter the administrator password and wait for the preview. Move until the distance
+3. Choose **Live camera** (camera access must be set up, see above) and wait for the preview. Move until the distance
    indicator is green: about **0.56–0.71 m** with the default configuration, **0.41–0.56 m** with *Close-range mode* on
    (the exact range for your camera is shown under the preview).
 4. Press **Start scan** and look at the camera until the front pose is captured. Then turn your head up, down, left and
@@ -234,7 +237,7 @@ bundle carries them in `Contents/Resources`.
 ## Architecture and docs
 
 ```
-IntelFaceScan.app (you)                                   IntelFaceScanHelper (root, live camera only)
+IntelFaceScan.app (you)                                   IntelFaceScanHelper (you, camera service)
 SwiftUI ─ ScanKit (Vision, guided scan) ─ ReconKit        librealsense 2.58.4 + patches, libusb
      │                                    └ FaceReconCore     streams, presets, filters, align, IMU,
 CameraKit ─────────── AF_UNIX socket (docs/PROTOCOL.md) ──── recording / playback, USB capture + release
@@ -341,17 +344,19 @@ Uruchom aplikację przez `open build/IntelFaceScan.app` albo skopiuj ją do `/Ap
 
 ## Uprawnienia i kamera
 
-- **Hasło administratora.** macOS podłącza do kamery własne sterowniki. Przejęcie urządzenia USB wymaga roota, więc po
-  wybraniu **Kamera na żywo** macOS pokazuje standardowe okno z prośbą o hasło administratora. Jako root działa tylko
-  mały helper kamery (`Contents/Helpers/IntelFaceScanHelper`); sama aplikacja, Vision, rekonstrukcja i zapis plików
-  działają jako Ty. Helper przyjmuje polecenia wyłącznie od aplikacji przez prywatne gniazdo, nigdy nie otwiera
-  ścieżek podanych przez aplikację, a nagrania zapisuje do pliku otwartego przez aplikację. Szczegóły:
-  [docs/HELPER.md](docs/HELPER.md).
-- **Nagrania, zestawy danych i demo syntetyczne** nie wymagają hasła.
+- **Usługa dostępu do kamery (jednorazowa konfiguracja, bez hasła przy każdej sesji).** macOS podłącza do kamery własne
+  sterowniki, a urządzenie USB może przejąć tylko root. IntelFaceScan korzysta z tej samej usługi co RealSense Viewer:
+  demona roota `realsense-usbd`, który trzyma urządzenie USB i obsługuje programy z allowlisty przez XPC. Nic z
+  IntelFaceScan nie działa jako root, a **Kamera na żywo** nie pyta o hasło administratora. Jednorazowo po instalacji
+  aplikacji (i ponownie po jej przebudowaniu albo po instalacji dostępu do kamery z DMG RealSense Viewera) zainstaluj
+  dostęp do kamery w RealSense Viewerze i zezwól na tę wersję helpera: `sudo scripts/allow-camera-access.sh` (hasło
+  administratora raz). Bez usługi aplikacja o tym informuje zamiast się łączyć. Helper przyjmuje polecenia wyłącznie
+  od aplikacji przez prywatne gniazdo, nigdy nie otwiera ścieżek podanych przez aplikację, a nagrania zapisuje do pliku
+  otwartego przez aplikację. Szczegóły: [docs/HELPER.md](docs/HELPER.md).
+- **Nagrania, zestawy danych i demo syntetyczne** nie wymagają hasła ani usługi.
 - **Oddawanie kamery.** Gdy aplikacja się zamyka (⌘Q, zamknięcie okna, `kill -TERM`, Ctrl‑C) albo zamykasz kamerę,
-  helper zatrzymuje strumienie i ponownie enumeruje urządzenie USB, więc macOS je odzyskuje (np. FaceTime może znowu
-  z niej korzystać). Jeśli aplikacja kiedyś się wysypie, a kamera pozostanie nieużywalna, uruchom
-  `sudo build/IntelFaceScan.app/Contents/Helpers/IntelFaceScanHelper --release -w` albo odłącz i podłącz ją ponownie.
+  helper zatrzymuje strumienie, a usługa oddaje kamerę macOS po krótkim czasie (np. FaceTime może znowu z niej
+  korzystać). Jeśli kamera pozostanie nieużywalna, odłącz i podłącz ją ponownie.
 - **Nigdy nie zabijaj helpera przez `kill -9`**, gdy rozmawia z kamerą: firmware D455 może się zawiesić do czasu
   ponownego podłączenia.
 - Inne uprawnienia nie są potrzebne: aplikacja nie używa systemowego frameworka kamery, więc nie ma pytania o dostęp do
@@ -363,7 +368,7 @@ Uruchom aplikację przez `open build/IntelFaceScan.app` albo skopiuj ją do `/Ap
    które się nie obraca; **obracaj tylko głową**, ramiona trzymaj nieruchomo.
 2. Zadbaj o **równe, rozproszone światło** (bez mocnego światła z boku, bez bezpośredniego słońca). Zdejmij okulary;
    jeśli możesz, zwiąż długie włosy (głębia stereo słabo widzi cienkie włosy). Unikaj błyszczącego makijażu.
-3. Wybierz **Kamera na żywo**, wpisz hasło administratora i poczekaj na podgląd. Ustaw się tak, aby wskaźnik
+3. Wybierz **Kamera na żywo** (dostęp do kamery musi być skonfigurowany, patrz wyżej) i poczekaj na podgląd. Ustaw się tak, aby wskaźnik
    odległości był zielony: ok. **0,56–0,71 m** w konfiguracji domyślnej, **0,41–0,56 m** z włączonym *Trybem bliskiego
    zasięgu* (dokładny zakres dla Twojej kamery jest widoczny pod podglądem).
 4. Naciśnij **Rozpocznij skan** i patrz w kamerę, aż poza prosto zostanie zarejestrowana. Potem obracaj głowę w górę,

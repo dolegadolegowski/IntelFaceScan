@@ -2,13 +2,14 @@
 
 `IntelFaceScan.app/Contents/Helpers/IntelFaceScanHelper` is the only process that talks to the RealSense camera.
 macOS attaches its own UVC/HID drivers to the D455, and librealsense (RSUSB backend) can only take the USB device over
-from them as root. So the helper runs as root for the live camera, started with the standard administrator prompt,
-and the app never does. The wire protocol is in [PROTOCOL.md](PROTOCOL.md); this document covers the helper process,
+from them as root. The helper therefore does not touch the USB device itself: the patched librealsense (patches/0004,
+from realsense-viewer-macos) leases it from the camera access service of the RealSense tools (see "Camera access"),
+so the helper and the app run as the user and no administrator password is asked per session. The wire protocol is in [PROTOCOL.md](PROTOCOL.md); this document covers the helper process,
 the app side in `Sources/CameraKit/Helper`, and the threat model.
 
-> 🇵🇱 **Po polsku (skrót):** helper to mały proces C++, jedyny, który używa librealsense. Do kamery na żywo działa jako
-> root (macOS pozwala tylko rootowi przejąć urządzenie USB od systemowego sterownika), uruchamiany standardowym oknem
-> hasła administratora; aplikacja zawsze działa jako użytkownik. Helper łączy się z gniazdem aplikacji tylko po
+> 🇵🇱 **Po polsku (skrót):** helper to mały proces C++, jedyny, który używa librealsense. Działa jako Ty; kamerę na żywo
+> dzierżawi od usługi dostępu do kamery z RealSense Viewera (demon roota `realsense-usbd`, który jako jedyny przejmuje
+> urządzenie USB od systemowego sterownika), więc nie ma hasła administratora przy każdej sesji. Helper łączy się z gniazdem aplikacji tylko po
 > sprawdzeniu ścieżki (bezwzględna, bez dowiązań symbolicznych, katalog użytkownika z prawami 0700) i procesu po drugiej
 > stronie (uid i pid aplikacji), ściśle waliduje każdą wiadomość, nigdy nie otwiera ścieżek podanych przez aplikację
 > (nagrania trafiają do prywatnego katalogu roota i są kopiowane do deskryptora przekazanego przez `SCM_RIGHTS`), ma
@@ -16,10 +17,33 @@ the app side in `Sources/CameraKit/Helper`, and the threat model.
 > SIGTERM/SIGHUP) zatrzymuje strumienie, oddaje kamerę systemowi (re-enumeracja USB) i kończy pracę. Tryb `--fake`
 > generuje syntetyczne klatki bez kamery i bez uprawnień – do testów IPC i rozwoju interfejsu.
 
+## Camera access
+
+The live camera goes through `realsense-usbd`, the root LaunchDaemon (`/Library/PrivilegedHelperTools/io.github.dolegadolegowski.realsense-usbd`,
+Mach service of the same name) that RealSense Viewer installs once (see realsense-viewer-macos, `macos/broker/DESIGN.md`).
+It owns the USB device, and librealsense (patch 0004) talks to it over XPC: the helper never opens the camera itself.
+
+* **Allowlist.** The daemon admits a client only if the cdhash of its executable is on `allowlist.plist` (installed as
+  `/Library/Application Support/RealSense Viewer/usbd.plist`), and only for the console user. IntelFaceScan is signed
+  ad hoc, so **every build of the helper has its own cdhash**: run `sudo scripts/allow-camera-access.sh` once per build
+  (the app bundle carries a copy in `Contents/Resources`). It adds the helper's cdhash to the installed list, keeps the
+  Viewer's entries and installs the result with the Viewer's own `install-camera-access.sh`. Installing camera access
+  from a RealSense Viewer DMG replaces the list: run the script again afterwards. A Developer ID signature with a
+  team-based requirement in the daemon would remove this step.
+* **Without the service** (not installed) the live helper reports "The camera access service is not installed" and
+  the app shows it. When the service runs but rejects this build, no device is listed and the message says to run the
+  script (librealsense logs the reason: "not allowlisted").
+* **Lease and hand-back.** The service leases the camera per client connection and hands it back to macOS a grace
+  period after the last lease ends, also if the helper crashes or is killed. The helper therefore does not
+  re-enumerate USB devices at the end of a session. `IntelFaceScanHelper --release` and `--probe` remain root-only
+  tools for the case that the service is not used.
+* **Standing in for root.** Running the live helper as root is refused; use `sudo IntelFaceScanHelper --probe` (the
+  probe may fall back to in-process libusb as root when the service is not installed).
+
 ## Command line
 
 ```
-IntelFaceScanHelper --socket <path> --uid <uid> --gid <gid> --parent-pid <pid>              live camera (root)
+IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid>                           live camera (user)
 IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> --playback <file> [--no-real-time]
 IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> --fake [--fake-row-padding <bytes>]
 IntelFaceScanHelper --probe ...        camera measurements (capture module, run with sudo); a live probe hands
@@ -32,7 +56,7 @@ IntelFaceScanHelper --help | --version
 
 | Mode | Privileges | Engine |
 |---|---|---|
-| live | requires euid 0, refuses otherwise | `CaptureEngine::create_live` (librealsense) |
+| live | refuses root; `--uid` must be the caller; needs the camera access service | `CaptureEngine::create_live` (librealsense) |
 | playback | refuses root; `--uid` must be the caller | `CaptureEngine::create_playback` |
 | fake | refuses root; `--uid` must be the caller | `create_fake_engine` (`helper/src/fake_engine.h`, no librealsense calls, no USB) |
 
@@ -45,20 +69,14 @@ app shows it: `do shell script` reports it as the error message); afterwards eve
 
 1. The app (`HelperSocketServer`) creates `<realpath of the user's temporary directory>/IntelFaceScan.XXXXXX/` (mode
    0700), binds `camera.sock` in it (0600) and listens with backlog 1.
-2. The app starts the helper: live through `do shell script "exec /usr/bin/env -i '<helper>' --socket ... </dev/null
-   >/dev/null" with administrator privileges with prompt "..."` on its own queue (it blocks for the helper's whole
-   life and reports its exit status; a cancelled prompt is error -128 → `CameraError.authorizationCancelled`);
-   playback/fake through `Process` with an empty environment. The script runs in-process (`NSAppleScript`) in an
-   AppKit application – the app always is one, and the prompt is then the app's – and through `/usr/bin/osascript`
-   in any other process (a command line tool, the test runner), where an in-process `do shell script` can wait
-   forever for an Apple event nobody dispatches; both report the same results.
+2. The app starts the helper through `Process` with an empty environment (live, playback and fake alike). The
+   The old administrator-prompt launch (`HelperLauncher.launchPrivileged`, `do shell script … with administrator
+   privileges`) remains only for `LiveCameraSource.releaseCameraToSystem()`.
 3. The helper hardens itself (below), starts watching `--parent-pid` and its termination signals, validates the socket
    path and connects, then checks the peer: `getpeereid` uid = `--uid`, `LOCAL_PEERPID` = `--parent-pid`.
 4. The app accepts one connection, stops listening (closes and unlinks the socket) and checks the peer:
-   `LOCAL_PEERCRED` effective uid 0 (live) or its own uid, `LOCAL_PEERPID` → `proc_pidpath` is the same file
-   (device + inode) as the helper it launched, and for playback/fake (started with `Process`, so the app knows the
-   pid) that `LOCAL_PEERPID` is the process it launched. The privileged helper's pid is not known to the app (it runs
-   under a root shell), so the live check stops at the executable.
+   `LOCAL_PEERCRED` effective uid = its own uid, `LOCAL_PEERPID` → `proc_pidpath` is the same file
+   (device + inode) as the helper it launched, and that `LOCAL_PEERPID` is the process it launched (all modes are started with `Process`, so the app knows the pid).
 5. `HELLO` (mode `live`, `playback` or `fake`), then commands. The helper creates the engine right away; if that fails
    (no camera plugged in) it reports an `error` event and retries on each command, so the app can ask again after the
    user plugged the camera in without another password prompt.
@@ -210,8 +228,8 @@ that was created but never run is not supported.
 
 ## Threat model
 
-**Asset:** root on the user's Mac. The helper runs as root for as long as the live camera is used and accepts input
-from an unprivileged process.
+**Asset:** the user's account and the camera. The helper runs as the user; root stays with the camera access service,
+which only admits allowlisted cdhashes of the console user.
 
 **Adversaries considered:** other local users and their processes; processes of the same user trying to reach root
 through the helper without the password; a compromised or confused app sending malformed or hostile messages;
