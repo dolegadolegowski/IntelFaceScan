@@ -80,15 +80,9 @@ BUNDLED_BUILD="$(pl_get BuildNumber integer "$BUNDLED")" || die "$BUNDLED: Build
 INSTALLED_HASHES=" "
 ICOUNT="$(pl_get AllowedCDHashes array "$CONF" || echo 0)"
 for ((i = 0; i < ICOUNT; i++)); do INSTALLED_HASHES="$INSTALLED_HASHES$(pl_get "AllowedCDHashes.$i" string "$CONF") "; done
-# Done only when the installed list already holds this helper and every hash of the Viewer app on disk.
-MISSING=0
-for h in "${HASHES[@]}" "$HELPER_CDHASH"; do
-    case "$INSTALLED_HASHES" in *" $h "*) ;; *) MISSING=1 ;; esac
-done
-if [ "$MISSING" = 0 ]; then
-    note "this build of the helper ($HELPER_CDHASH) and the Viewer on disk are already allowed"
-    exit 0
-fi
+case "$INSTALLED_HASHES" in
+    *" $HELPER_CDHASH "*) note "this build of the helper ($HELPER_CDHASH) is already allowed"; exit 0 ;;
+esac
 
 echo "$ME: helper  $HELPER"
 echo "$ME: cdhash  $HELPER_CDHASH"
