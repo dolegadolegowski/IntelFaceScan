@@ -58,8 +58,11 @@ struct CaptureCallbacks
 class CaptureEngine
 {
 public:
-    // Live camera (requires root on macOS: the first stream start captures the USB device from the system drivers
-    // for the lifetime of the process). Throws when no RealSense device is connected.
+    // Live camera. The patched librealsense reaches it through the RealSense camera service (realsense-usbd) when
+    // the service is installed and admits this process: the helper then runs as the user. Otherwise librealsense
+    // opens the USB device itself, which requires root on macOS: the first stream start captures the device from
+    // the system drivers for the lifetime of the process. Throws when no RealSense device is connected, and when one
+    // is connected but cannot be opened (camera_open_error, capture_util.h).
     static std::unique_ptr< CaptureEngine > create_live( CaptureCallbacks callbacks );
 
     // Plays a .db3/.bag recording (never used as root). real_time = false delivers every frame (offline processing).
@@ -86,8 +89,8 @@ public:
     // Auto-exposure ROI given in color pixels; distance_m (<= 0 = unknown) maps it onto the depth sensor.
     virtual void set_auto_exposure_roi( int x, int y, int width, int height, float distance_m ) = 0;
 
-    // Records the raw sensor streams into 'path' (a file inside the helper's root-private temporary directory,
-    // chosen by the helper, never by the app). format: "db3" | "bag". May restart the streams.
+    // Records the raw sensor streams into 'path' (a file inside the helper's private temporary directory, chosen by
+    // the helper, never by the app). format: "db3" | "bag". May restart the streams.
     virtual void start_recording( const std::string & path, const std::string & format ) = 0;
     // Returns once the recording file is complete and closed. Also succeeds (once) when the engine already finished
     // the recording itself, e.g. any command after the camera was unplugged mid-recording ends it: the file is then

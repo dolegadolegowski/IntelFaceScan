@@ -1,12 +1,15 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
-// Minimal test registry for the capture tests (the helper build has no test framework dependency):
+// Minimal test registry for the helper's tests (the helper build has no test framework dependency):
 //   TEST_CASE( name ) { CHECK( a == b ); REQUIRE( ok ); SKIP( "why" ); }
-// capture-tests [substring] runs the tests whose name contains the substring.
+//   int main( int argc, char ** argv ) { return ifs::test::run_tests( argc, argv ); }
+// capture-tests [substring] (and helper-tests [substring]) runs the tests whose name contains the substring.
 
 #pragma once
 
+#include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <sstream>
 #include <stdexcept>
@@ -57,6 +60,55 @@ inline void report_check( const char * file, int line, const std::string & what 
 {
     ++failed_checks();
     std::fprintf( stderr, "    %s:%d: CHECK failed: %s\n", file, line, what.c_str() );
+}
+
+// Runs the registered tests whose name contains argv[1] (all of them without an argument) and returns the exit
+// status of the test program.
+inline int run_tests( int argc, char ** argv )
+{
+    const char * filter = argc > 1 ? argv[1] : nullptr;
+    int failed = 0, passed = 0, skipped = 0;
+    for( auto & t : registry() )
+    {
+        if( filter && ! std::strstr( t.name, filter ) )
+            continue;
+        std::printf( "[ RUN  ] %s\n", t.name );
+        std::fflush( stdout );
+        int before = failed_checks();
+        auto t0 = std::chrono::steady_clock::now();
+        std::string status = "PASS";
+        try
+        {
+            // Benchmarks measure (docs/CAMERA.md) rather than test, and take a minute on a slow CI runner: they run
+            // only when asked for by name, e.g. "capture-tests bench".
+            if( ! filter && std::strncmp( t.name, "bench_", 6 ) == 0 )
+                throw Skipped( "benchmark: run 'capture-tests bench'" );
+            t.body();
+        }
+        catch( const Skipped & e )
+        {
+            status = std::string( "SKIP (" ) + e.what() + ")";
+        }
+        catch( const std::exception & e )
+        {
+            std::fprintf( stderr, "    exception: %s\n", e.what() );
+            ++failed_checks();
+        }
+        double ms = std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t0 ).count();
+        if( failed_checks() != before )
+        {
+            status = "FAIL";
+            ++failed;
+        }
+        else if( status == "PASS" )
+            ++passed;
+        else
+            ++skipped;
+        std::printf( "[ %s ] %s (%.0f ms)\n", status.c_str(), t.name, ms );
+        std::fflush( stdout );
+    }
+    std::printf( "%d passed, %d failed, %d skipped\n", passed, failed, skipped );
+    return failed ? 1 : 0;
 }
 
 }  // namespace test

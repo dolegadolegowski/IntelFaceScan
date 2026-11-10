@@ -8,11 +8,21 @@
 #
 # install/.ifs-sdk-inputs records what the installed SDK was built from (librealsense commit, sha256 of the patches
 # and of this script, build type, deployment target); the SDK is rebuilt when any of it differs.
+# install/libusb/ keeps the static libusb 1.0.30 the librealsense build fetched and built (lib/libusb-1.0.a and
+# include/libusb-1.0/libusb.h): scripts/build.sh links the camera service daemon against it, and the install prefix
+# is all that CI caches of this build.
 #
 # Only the camera helper links librealsense; the SwiftUI app never does (see docs/ARCHITECTURE.md).
-# The patches from patches/ come from https://github.com/dolegadolegowski/realsense-viewer-macos and must not be
-# reverted: they fix double sensor power release (libc++ std::function moves), infinite USB waits, libusb handle
-# thread safety on macOS, the device command queue, and capture the camera once for the lifetime of the process.
+# The patches (scripts/apply-patches.sh applies them, in this order):
+# * patches/0001 comes from https://github.com/dolegadolegowski/realsense-viewer-macos and must not be reverted: it
+#   fixes double sensor power release (libc++ std::function moves), infinite USB waits, libusb handle thread safety
+#   on macOS, the device command queue, and captures the camera once for the lifetime of the process. 0002 and 0003
+#   are this project's fixes for recordings (docs/CAMERA.md).
+# * third_party/realsense-usbd/librealsense/macos-usb-broker.patch is the client of the RealSense camera service
+#   (realsense-usbd, a root LaunchDaemon shared by RealSense applications; the kit in third_party/realsense-usbd is a
+#   copy of realsense-viewer-macos/macos/broker). With it librealsense asks the service for the camera first, so the
+#   helper runs as the user; when the service is not installed or does not admit the user it opens the USB device
+#   itself as before, which needs root.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -50,7 +60,8 @@ sdk_inputs() {
     echo "build_type $BUILD_TYPE"
     echo "deployment_target $DEPLOYMENT_TARGET"
     echo "build-sdk.sh $(shasum -a 256 "$ROOT/scripts/build-sdk.sh" | cut -d ' ' -f 1)"
-    (cd "$ROOT/patches" && shasum -a 256 ./*.patch) | awk '{ sub("^\\./", "", $2); print "patch " $1 " " $2 }'
+    # "patch <sha256> <name>" for patches/*.patch and the camera service client, in the order they are applied
+    "$ROOT/scripts/apply-patches.sh" --list
 }
 INPUTS="$(sdk_inputs)"
 if [ -f "$PREFIX/lib/librealsense2.dylib" ] && [ "${IFS_SDK_REBUILD:-0}" != "1" ] \
@@ -109,6 +120,18 @@ if [ -n "$JSON_HPP" ]; then
     mkdir -p "$PREFIX/include/nlohmann"
     cp -R "$(dirname "$JSON_HPP")/." "$PREFIX/include/nlohmann/"
 fi
+
+# The static libusb for the camera service daemon (see the header): only the archive and the header, not libusb's
+# CMake package files, which name the build folder.
+LIBUSB_BUILT="$BUILD/libusb_install"
+if [ ! -f "$LIBUSB_BUILT/lib/libusb-1.0.a" ] || [ ! -f "$LIBUSB_BUILT/include/libusb-1.0/libusb.h" ]; then
+    echo "error: the librealsense build left no static libusb in $LIBUSB_BUILT" >&2
+    exit 1
+fi
+rm -rf "$PREFIX/libusb"
+mkdir -p "$PREFIX/libusb/lib" "$PREFIX/libusb/include/libusb-1.0"
+cp "$LIBUSB_BUILT/lib/libusb-1.0.a" "$PREFIX/libusb/lib/libusb-1.0.a"
+cp "$LIBUSB_BUILT/include/libusb-1.0/libusb.h" "$PREFIX/libusb/include/libusb-1.0/libusb.h"
 
 printf '%s\n' "$INPUTS" > "$STAMP"
 echo "librealsense installed: $PREFIX"

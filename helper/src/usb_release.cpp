@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <thread>
+#include <unistd.h>
 
 namespace ifs
 {
@@ -184,6 +185,8 @@ int run_release_tool( int argc, char ** argv )
     UsbReleaseResult r = release_realsense_devices( wait ? 5000 : 0, []( const std::string & line ) {
         std::fprintf( stderr, "%s\n", line.c_str() );
     } );
+    if( r.failed && ::geteuid() != 0 )
+        std::fprintf( stderr, "Re-enumerating a USB device needs root: run it with sudo\n" );
     if( r.failed )
         return r.found ? 1 : 2;
     return 0;

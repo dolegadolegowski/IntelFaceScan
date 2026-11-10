@@ -233,9 +233,11 @@ spatial magnitude 1 before giving up resolution.
 ## Measurement procedure
 
 The probe measures through the same engine and filters as the app (`helper/src/probe.cpp`, statistics in
-`capture_measure.cpp`). It needs the live camera, so it runs as root; it only prints (markdown tables, then the
-same as JSON) and never writes files. No other program may use the camera meanwhile (quit IntelFaceScan and the
-RealSense Viewer).
+`capture_measure.cpp`). It needs the live camera: with the RealSense camera service installed
+([CAMERA-SERVICE.md](CAMERA-SERVICE.md); the app installs it at the first *Live camera*) it runs as you, without
+`sudo`, exactly as written below; on a Mac without the service put `sudo` in front of every probe command. It only
+prints (markdown tables, then the same as JSON) and never writes files. No other program may use the camera
+meanwhile (quit IntelFaceScan and the RealSense Viewer).
 
 **Setup.** Build the helper (`scripts/build-sdk.sh`, then `cmake -S helper -B build/helper
 -DIFS_SDK_DIR=$PWD/build/sdk/install && cmake --build build/helper -j`), or use the bundled one
@@ -243,7 +245,7 @@ RealSense Viewer).
 below). Camera directly on a USB 3 port (the enumeration shows `usb_type` 3.x), on a tripod, optical axis
 perpendicular to a flat, matte, textured wall (or a large board; a bare glossy wall is not representative), nothing
 moving, no sunlight on the wall. Let the camera stream for ~10 minutes first (depth drifts while the projector warms
-up), e.g. `sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:0 --raw-only --warmup 10000 >
+up), e.g. `build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:0 --raw-only --warmup 10000 >
 /dev/null` twice (10000 frames = 5.5 min at 30 fps). Measure the distance from the front glass to the wall with a
 tape; the probe reports what it measures as *Median distance*. The first run enables the camera's advanced mode
 (the camera restarts once, 3–8 s; the probe waits).
@@ -255,33 +257,34 @@ frames):
 ```
 # 0. The camera: serial, firmware, USB type, baseline, options, stream modes (the calibrated depth fx of each
 #    resolution is in the measurement results: "fx" / "theory.focal_px")
-sudo build/helper/IntelFaceScanHelper --probe --enumerate > probe-device.md
+build/helper/IntelFaceScanHelper --probe --enumerate > probe-device.md
 
 # 1. Resolution: 1280x720 vs 848x480 (High Accuracy, shift 0), wall at 0.60 m
-sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:0,848x480:ha:0 > probe-resolution-0.60m.md
+build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:0,848x480:ha:0 > probe-resolution-0.60m.md
 
 # 2. Preset: High Accuracy vs High Density (1280x720, shift 50), wall at 0.47 m
-sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:50,1280x720:hd:50 > probe-preset-0.47m.md
+build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:50,1280x720:hd:50 > probe-preset-0.47m.md
 
 # 3. Disparity shift 0 vs 50 (1280x720 High Accuracy): the same distance for both (0.60 m: inside both ranges,
 #    the noise must be equal), then each at its own working distance (shift 50 at 0.47 m, below shift 0's Min-Z)
-sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:0,1280x720:ha:50 > probe-shift-0.60m.md
-sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:0,1280x720:ha:50 > probe-shift-0.47m.md
+build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:0,1280x720:ha:50 > probe-shift-0.60m.md
+build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:0,1280x720:ha:50 > probe-shift-0.47m.md
 
 # 4. Everything at once (8 configurations, ~40 s), once per distance: 0.40, 0.47, 0.60 m
-sudo build/helper/IntelFaceScanHelper --probe --configs \
+build/helper/IntelFaceScanHelper --probe --configs \
   1280x720:ha:0,1280x720:ha:50,1280x720:hd:0,1280x720:hd:50,848x480:ha:0,848x480:ha:50,848x480:hd:0,848x480:hd:50 \
   > probe-all-0.47m.md
 
 # 5. Min-Z of one configuration: start ~0.7 m from the wall; when stderr says "Min-Z test: move ...", move the
 #    camera slowly toward the wall for 30 s (it prints distance and ROI fill once per second)
-sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:50 --minz 30 --raw-only > probe-minz-shift50.md
+build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:50 --minz 30 --raw-only > probe-minz-shift50.md
 
 # 6. Skin: a person's cheek filling the central 10% at 0.47 m, person still
-sudo build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:50,1280x720:hd:50 --roi 0.1 > probe-skin.md
+build/helper/IntelFaceScanHelper --probe --configs 1280x720:ha:50,1280x720:hd:50 --roi 0.1 > probe-skin.md
 
-# The probe hands the camera back to macOS when it ends (USB re-enumeration, as the app's helper does; Ctrl-C
-# included). Only if it says the hand-back failed, or the probe was killed: release it, or unplug and replug it
+# The camera goes back to macOS when the probe ends (Ctrl-C included): the camera service hands it back a few
+# seconds later; a probe run with sudo re-enumerates the USB device itself, as the app's root helper does. Only if a
+# sudo probe says the hand-back failed, or was killed: release the camera, or unplug and replug it
 sudo build/helper/IntelFaceScanHelper --release -w
 ```
 
@@ -289,7 +292,7 @@ Without `--configs` the probe runs the default matrix (1280×720 and 848×480 ×
 shift 0, 50, 100: 12 configurations, ~1 min). Other options: `--frames N` and `--warmup N` (default 30),
 `--roi F` (central fraction of width and height, default 0.3), `--raw-only` / `--filtered-only`, `--json` (JSON
 only). Progress goes to stderr, the report to stdout. Ctrl-C stops cleanly and prints what was measured so far.
-`--playback FILE` measures a recording instead (development; no sudo).
+`--playback FILE` measures a recording instead (development; needs neither the service nor sudo).
 
 **Reading the output.** For each configuration the table has a *raw* row (no filters) and a *filtered* row (the
 face-scan filters without the distance threshold). Columns (JSON keys of `results[].raw` / `.filtered` /

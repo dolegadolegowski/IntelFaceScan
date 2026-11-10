@@ -6,6 +6,11 @@
 // After the capturing process is done the device stays captured: the system drivers are not re-attached and only
 // root can open it until it is re-plugged. Re-enumerating the device releases the capture, re-attaches the system
 // drivers (the camera works as a webcam again) and also resets a camera whose firmware stopped responding.
+//
+// Needs root, and is for a process that captured the camera itself: the live helper on the administrator path, a
+// live probe run with sudo, and recovery (--release). A helper of the user reaches the camera through the RealSense
+// camera service (realsense-usbd), which captures the device and hands it back to macOS itself; re-enumerating a
+// camera the service holds takes it away from the programs using it.
 
 #pragma once
 
@@ -23,9 +28,10 @@ struct UsbReleaseResult
     bool attached = false;  // after the wait: every device has its macOS drivers again
 };
 
-// Re-enumerates every RealSense device that has no macOS driver attached (also one another root process holds:
-// nothing tells them apart from one this process captured, docs/HELPER.md). With wait_ms > 0, waits up to that long
-// until the system drivers are attached again. 'log' receives one line per device and the final state.
+// Re-enumerates every RealSense device that has no macOS driver attached (also one another root process or the
+// camera service holds: nothing tells them apart from one this process captured, docs/HELPER.md). With wait_ms > 0,
+// waits up to that long until the system drivers are attached again. 'log' receives one line per device and the
+// final state.
 UsbReleaseResult release_realsense_devices( int wait_ms, const std::function< void( const std::string & ) > & log );
 
 // `IntelFaceScanHelper --release [-w]`: same lines and exit codes as rs-macos-release, on stderr (the app's

@@ -1,11 +1,17 @@
 # License: Apache 2.0. See LICENSE file in root directory.
 #
-# Capture engine tests and the synthetic recording generator (no camera needed). Standalone project:
+# Capture engine tests, the helper's own tests and the synthetic recording generator (no camera needed). Standalone
+# project:
 #
 #   cmake -S helper/tests -B build/helper-tests -DIFS_SDK_DIR=<librealsense install prefix>
 #   cmake --build build/helper-tests -j
 #   ctest --test-dir build/helper-tests --output-on-failure      (or build/helper-tests/capture-tests [filter])
 #   build/helper-tests/make-test-recording -o head.db3 --frames 90
+#
+# helper-tests (helper_tests.cpp) covers the recording spool and runs the helper binary: its command line, exit
+# status and a live session as the user. It gets the binary in IFS_HELPER_UNDER_TEST, which ctest sets when this
+# folder is built as part of the helper build (below); standalone, those tests are skipped unless it is set by hand:
+#   IFS_HELPER_UNDER_TEST=build/helper/IntelFaceScanHelper build/helper-tests/helper-tests
 #
 # The helper build can include it behind an option (helper/CMakeLists.txt, owned by the platform module):
 #
@@ -57,5 +63,22 @@ set_target_properties(make-test-recording capture-tests PROPERTIES
     BUILD_RPATH "${IFS_SDK_DIR}/lib"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
+# The helper's own tests: the recording spool as the helper compiles it, and the helper process (no librealsense
+# here; nlohmann/json comes with the SDK).
+set(IFS_PROTOCOL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../Sources/IFSProtocol")
+add_executable(helper-tests helper_tests.cpp
+    "${IFS_HELPER_SRC}/security_recording.cpp"
+    "${IFS_HELPER_SRC}/ipc_wire.cpp"
+    "${IFS_PROTOCOL_DIR}/ifs_protocol.c")
+target_include_directories(helper-tests PRIVATE "${IFS_HELPER_SRC}" "${IFS_PROTOCOL_DIR}/include")
+target_include_directories(helper-tests SYSTEM PRIVATE "${IFS_SDK_DIR}/include")
+target_compile_options(helper-tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
+set_target_properties(helper-tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
 enable_testing()
 add_test(NAME capture-tests COMMAND capture-tests)
+add_test(NAME helper-tests COMMAND helper-tests)
+if(TARGET IntelFaceScanHelper)
+    set_tests_properties(helper-tests PROPERTIES
+        ENVIRONMENT "IFS_HELPER_UNDER_TEST=$<TARGET_FILE:IntelFaceScanHelper>")
+endif()

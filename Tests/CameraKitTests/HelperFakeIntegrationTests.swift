@@ -281,10 +281,27 @@ struct HelperFakeIntegrationTests {
     }
 
     @Test func helperChecksPrivilegesAndArguments() throws {
-        var (status, message) = try runHelper(["--socket", "/x/y", "--uid", "0", "--parent-pid", String(getpid()), "--fake"])
+        let uid = String(getuid()), pid = String(getpid())
+        var (status, message) = try runHelper(["--socket", "/x/y", "--uid", "0", "--parent-pid", pid, "--fake"])
         #expect(status == 77 && message.contains("--uid"), "\(message)")
-        (status, message) = try runHelper(["--socket", "/x/y", "--uid", String(getuid()), "--parent-pid", String(getpid())])
-        #expect(status == 77 && message.contains("root"), "\(message)")
+        // The live camera as the user (the camera service path) is no question of privileges any more: the helper
+        // goes on to the socket check (69), with or without --gid, which it accepts and ignores. As for playback
+        // and the fake camera, --uid must be the user who runs it.
+        (status, message) = try runHelper(["--socket", "/x/y", "--uid", uid, "--parent-pid", pid])
+        #expect(status == 69 && !message.contains("root"), "\(message)")
+        (status, message) = try runHelper(["--socket", "/x/y", "--uid", uid, "--gid", String(getgid()),
+                                           "--parent-pid", pid])
+        #expect(status == 69, "\(message)")
+        (status, message) = try runHelper(["--socket", "/x/y", "--uid", "0", "--parent-pid", pid])
+        #expect(status == 77 && message.contains("--uid"), "\(message)")
+        // --no-usb-release belongs to the live camera: a usage error in the other modes.
+        for mode in [["--fake"], ["--playback", "/x"]] {
+            (status, message) = try runHelper(["--socket", "/x/y", "--uid", uid, "--parent-pid", pid,
+                                               "--no-usb-release"] + mode)
+            #expect(status == 64, "\(mode): \(message)")
+        }
+        (status, message) = try runHelper(["--socket", "/x/y", "--uid", uid, "--parent-pid", pid, "--no-usb-release"])
+        #expect(status == 69, "\(message)")
         (status, message) = try runHelper(["--fake", "--playback", "/x"])
         #expect(status == 64, "\(message)")
         (status, message) = try runHelper(["--socket", "/x/y", "--uid", "abc", "--parent-pid", "5", "--fake"])

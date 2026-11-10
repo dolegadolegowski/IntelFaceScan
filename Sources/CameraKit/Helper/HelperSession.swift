@@ -203,6 +203,56 @@ enum HelperTimeouts {
     static let quit: TimeInterval = 10
 }
 
+/// How the live helper is started (docs/HELPER.md, "Two ways to run the live camera").
+enum LiveLaunch: Sendable, Equatable {
+    /// Directly, as the user: the helper's librealsense reaches the camera through the camera service
+    /// (docs/CAMERA-SERVICE.md). No password.
+    case asUser
+    /// As root after the administrator prompt; the helper's librealsense takes the USB device over itself.
+    /// `skipUSBRelease` adds `--no-usb-release`: the helper does not re-enumerate the camera when the session ends,
+    /// because the camera service is alive, serves root and hands the camera back itself (a re-enumeration would
+    /// pull the camera away from it).
+    case administrator(skipUSBRelease: Bool)
+}
+
+/// One launch of the helper: its arguments, who starts it, and what the process that connects must be.
+struct HelperLaunchPlan: Sendable, Equatable {
+    var arguments: [String]
+    /// Through the administrator prompt, as root; otherwise directly (`Process`), as the user.
+    var privileged: Bool
+    /// The effective uid the connected process must have.
+    var expectedPeerUID: uid_t
+    /// The connected process must be the one the app started. The app knows that pid for a helper it started
+    /// directly; the privileged helper runs under a root shell whose pid the app never learns.
+    var verifiesPeerPID: Bool
+    /// How long to wait for the helper to connect: the administrator prompt waits for the user to type the password.
+    var connectTimeout: TimeInterval
+
+    static func make(mode: HelperCameraSession.Mode, liveLaunch: LiveLaunch, socket: String, uid: uid_t = getuid(),
+                     gid: gid_t = getgid(), parentPID: pid_t = getpid()) -> HelperLaunchPlan {
+        var args = ["--socket", socket, "--uid", String(uid)]
+        var privileged = false
+        switch (mode, liveLaunch) {
+        case (.live, .administrator(let skipUSBRelease)):
+            // The root helper's command line has always carried the user's group; the helper started as the user
+            // has no use for it (it accepts and ignores --gid).
+            args += ["--gid", String(gid), "--parent-pid", String(parentPID)]
+            if skipUSBRelease { args.append("--no-usb-release") }
+            privileged = true
+        case (.live, .asUser):
+            args += ["--parent-pid", String(parentPID)]
+        case (.playback(let file, let realTime), _):
+            args += ["--parent-pid", String(parentPID), "--playback", file.path]
+            if !realTime { args.append("--no-real-time") }
+        case (.fake(let padding), _):
+            args += ["--parent-pid", String(parentPID), "--fake"]
+            if padding > 0 { args += ["--fake-row-padding", String(padding)] }
+        }
+        return HelperLaunchPlan(arguments: args, privileged: privileged, expectedPeerUID: privileged ? 0 : uid,
+                                verifiesPeerPID: !privileged, connectTimeout: privileged ? 600 : 20)
+    }
+}
+
 final class HelperCameraSession: @unchecked Sendable {
     enum Mode: Sendable, Equatable {
         case live
@@ -222,25 +272,32 @@ final class HelperCameraSession: @unchecked Sendable {
     private final class Active: @unchecked Sendable {
         let server: HelperSocketServer
         let process: HelperProcessHandle
+        /// Runs as root (the administrator path): the app cannot signal it.
+        let privileged: Bool
         var connection: HelperConnection?
         var hello: HelperHello?
         var byeReceived = false
         var connectionClosed = false
 
-        init(server: HelperSocketServer, process: HelperProcessHandle) {
+        init(server: HelperSocketServer, process: HelperProcessHandle, privileged: Bool) {
             self.server = server
             self.process = process
+            self.privileged = privileged
         }
     }
 
     let mode: Mode
     let helperURL: URL
+    /// Live mode: how the helper is started.
+    let liveLaunch: LiveLaunch
     let frames = Broadcaster<CameraFrame>()
     let events = Broadcaster<CameraEvent>()
-    /// How long to wait for the helper to connect: the live camera waits for the user to type the password.
-    var connectTimeout: TimeInterval
-    /// Tests: starts the helper in place of HelperLauncher (helper, arguments), e.g. a process that never connects.
+    /// Tests: starts the helper in place of both launchers (helper, arguments), e.g. a process that never connects.
     var launchOverride: ((URL, [String]) throws -> HelperProcessHandle)?
+    /// Starts the helper as root after the administrator prompt. Tests replace it: nothing in a test may prompt.
+    var privilegedLauncher: (URL, [String]) -> HelperProcessHandle = {
+        HelperLauncher.launchPrivileged(helper: $0, arguments: $1)
+    }
 
     private let logger = Logger(subsystem: "io.github.dolegadolegowski.IntelFaceScan", category: "camera-helper")
     private let lock = NSLock()
@@ -254,10 +311,11 @@ final class HelperCameraSession: @unchecked Sendable {
     /// A non-real-time playback delivers every frame: frame streams are lossless and the reader waits for them.
     private var losslessFrames: Bool
 
-    init(mode: Mode, helperURL: URL) {
+    /// - Parameter liveLaunch: live mode only. The default never asks for a password.
+    init(mode: Mode, helperURL: URL, liveLaunch: LiveLaunch = .asUser) {
         self.mode = mode
         self.helperURL = helperURL
-        connectTimeout = mode == .live ? 600 : 20
+        self.liveLaunch = liveLaunch
         losslessFrames = Self.startsLossless(mode)
     }
 
@@ -282,12 +340,22 @@ final class HelperCameraSession: @unchecked Sendable {
 
     // MARK: Connecting
 
-    func connect() async throws -> DeviceInfo {
-        if let connection = lock.withLock({ active?.connection }) {
-            return try await queryDevice(connection)
+    /// How many shutdowns have begun. A caller that waits for something of its own before connect() reads it first
+    /// and passes it on, so a shutdown during that wait ends its connect too (LiveCameraSource asks the camera
+    /// service in between).
+    var shutdownCount: UInt64 { lock.withLock { epoch } }
+
+    /// - Parameter count: `shutdownCount` as the caller read it when its connect began. When a shutdown has begun
+    ///   since, nothing is started and the connect fails with CameraError.notConnected, like one during a shutdown.
+    func connect(ifNoShutdownSince count: UInt64? = nil) async throws -> DeviceInfo {
+        let connection: HelperConnection? = try lock.withLock {
+            if let count, count != epoch { throw CameraError.notConnected }
+            return active?.connection
         }
+        if let connection { return try await queryDevice(connection) }
         let task: Task<DeviceInfo, Error> = try lock.withLock {
             if shuttingDown { throw CameraError.notConnected }
+            if let count, count != epoch { throw CameraError.notConnected }
             if let connectTask { return connectTask }
             let started = epoch
             let task = Task.detached { [self] in try await establish(epoch: started) }
@@ -306,28 +374,11 @@ final class HelperCameraSession: @unchecked Sendable {
         lock.withLock { starting }?.server.abort()
     }
 
-    private func resolvedHelperURL() throws -> URL {
+    func resolvedHelperURL() throws -> URL {
         if FileManager.default.isExecutableFile(atPath: helperURL.path) { return helperURL }
         // A development build (swift run, tests) has no bundle: find the helper next to it.
         if helperURL == CameraSources.bundledHelperURL, let found = CameraSources.locateHelper() { return found }
         throw CameraError.helperNotFound(helperURL.path)
-    }
-
-    private func arguments(socket: String, helper: URL) -> [String] {
-        var args = ["--socket", socket, "--uid", String(getuid())]
-        if mode == .live { args += ["--gid", String(getgid())] }
-        args += ["--parent-pid", String(getpid())]
-        switch mode {
-        case .live:
-            break
-        case .playback(let file, let realTime):
-            args += ["--playback", file.path]
-            if !realTime { args.append("--no-real-time") }
-        case .fake(let padding):
-            args.append("--fake")
-            if padding > 0 { args += ["--fake-row-padding", String(padding)] }
-        }
-        return args
     }
 
     private func establish(epoch started: UInt64) async throws -> DeviceInfo {
@@ -335,21 +386,21 @@ final class HelperCameraSession: @unchecked Sendable {
         defer { lock.withLock { if epoch == started { connectTask = nil } } }
         let helper = try resolvedHelperURL()
         let server = try HelperSocketServer()
-        let args = arguments(socket: server.socketPath, helper: helper)
+        let plan = HelperLaunchPlan.make(mode: mode, liveLaunch: liveLaunch, socket: server.socketPath)
         let process: HelperProcessHandle
         do {
             if let launchOverride {
-                process = try launchOverride(helper, args)
+                process = try launchOverride(helper, plan.arguments)
+            } else if plan.privileged {
+                process = privilegedLauncher(helper, plan.arguments)
             } else {
-                process = mode == .live
-                    ? HelperLauncher.launchPrivileged(helper: helper, arguments: args)
-                    : try HelperLauncher.launchAsUser(helper: helper, arguments: args)
+                process = try HelperLauncher.launchAsUser(helper: helper, arguments: plan.arguments)
             }
         } catch {
             server.close()
             throw error
         }
-        let session = Active(server: server, process: process)
+        let session = Active(server: server, process: process, privileged: plan.privileged)
         let raced: Bool = lock.withLock {
             starting = session
             return shuttingDown || epoch != started
@@ -363,7 +414,7 @@ final class HelperCameraSession: @unchecked Sendable {
         }
 
         do {
-            let timeout = connectTimeout
+            let timeout = plan.connectTimeout
             let fd: Int32 = try await Self.blocking {
                 do {
                     return try server.accept(timeout: timeout)
@@ -372,9 +423,17 @@ final class HelperCameraSession: @unchecked Sendable {
                 }
             }
             do {
-                // The pid is known for a helper started directly (playback, fake), not for the privileged one.
-                _ = try HelperSocketServer.verifyPeer(fd: fd, expectedUID: mode == .live ? 0 : getuid(),
-                                                      helperPath: helper.path, expectedPID: process.processIdentifier)
+                // The pid is known for a helper started directly (playback, fake, live through the camera service),
+                // not for the privileged one.
+                var expectedPID: pid_t?
+                if plan.verifiesPeerPID {
+                    guard let started = process.processIdentifier else {
+                        throw CameraError.connectionFailed("the camera helper the app started has no process id")
+                    }
+                    expectedPID = started
+                }
+                _ = try HelperSocketServer.verifyPeer(fd: fd, expectedUID: plan.expectedPeerUID,
+                                                      helperPath: helper.path, expectedPID: expectedPID)
             } catch {
                 Darwin.close(fd)
                 // A helper that exits right after connecting leaves no peer pid to read; its exit status says more.
@@ -714,10 +773,10 @@ final class HelperCameraSession: @unchecked Sendable {
             connection.close()
         }
         if session.connection == nil && !session.process.hasExited {
-            // Never connected, e.g. the administrator prompt is still showing (the handle of a live helper only ends
-            // when the in-process AppleScript returns, after the prompt). Nothing to wait for: the socket is removed
-            // below, so a helper started after all cannot connect and exits, and it also exits with the app.
-            if mode == .live {
+            // Never connected, e.g. the administrator prompt is still showing (the handle of a privileged helper only
+            // ends when the in-process AppleScript returns, after the prompt). Nothing to wait for: the socket is
+            // removed below, so a helper started after all cannot connect and exits, and it also exits with the app.
+            if session.privileged {
                 logger.info("the camera helper never connected; not waiting for it")
             } else {
                 session.process.terminate()
@@ -727,7 +786,7 @@ final class HelperCameraSession: @unchecked Sendable {
                 }
             }
         } else if !session.process.waitForExit(timeout: remaining()) {
-            if mode == .live {
+            if session.privileged {
                 // Root cannot be signalled from here; it exits by itself once it notices the closed socket.
                 logger.error("the camera helper did not exit in time")
             } else {

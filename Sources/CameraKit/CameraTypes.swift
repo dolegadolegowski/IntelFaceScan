@@ -375,11 +375,17 @@ public enum CameraError: Error, LocalizedError, Sendable, Equatable {
     case notConnected
     case unsupported(String)
     case timeout(String)
+    /// The live camera was asked for through the camera service (LiveCameraSource.Access.automatic) and the service
+    /// cannot be used right now; the value says why. Nothing was started: the caller decides (install the service,
+    /// ask the user, or open the camera with `.administrator`).
+    case cameraServiceNotReady(CameraService.Availability)
 
     public var errorDescription: String? {
         switch self {
         case .helperNotFound(let path): return "Camera helper not found: \(path)"
         case .authorizationCancelled: return "Administrator authorization was cancelled."
+        case .cameraServiceNotReady(let availability):
+            return "The RealSense camera service cannot be used: " + CameraService.describe(availability) + "."
         case .launchFailed(let m): return "Could not start the camera helper: \(m)"
         case .connectionFailed(let m): return "Could not connect to the camera helper: \(m)"
         case .protocolError(let m): return "Camera helper protocol error: \(m)"

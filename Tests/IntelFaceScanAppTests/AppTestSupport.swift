@@ -86,12 +86,23 @@ enum AppTest {
     static let helperSkipReason: Comment =
         "IntelFaceScanHelper not built: run the helper CMake build (build/helper) or set IFS_HELPER_PATH"
 
+    /// A camera service that is installed and ready, with no files behind it: a `.live` request goes straight to the
+    /// source factory, and nothing probes, installs or prompts.
+    static let readyCameraService = CameraService(
+        kit: CameraService.Kit(daemon: URL(fileURLWithPath: "/nonexistent/realsense-usbd"),
+                               manifest: URL(fileURLWithPath: "/nonexistent/service.plist"),
+                               installScript: URL(fileURLWithPath: "/nonexistent/install-camera-access.sh")),
+        state: { _ in .ready(serviceVersion: 2) },
+        install: { _, _ in Issue.record("a test ran the camera service installer") },
+        installedServiceVersion: { 2 },
+        openLoginItemsSettings: { Issue.record("a test opened System Settings") })
+
     /// A model with in-memory settings whose sources are recorded: `.live` is the helper's fake camera, `.synthetic`
-    /// the synthetic head at 640×400.
+    /// the synthetic head at 640×400. The camera service is a stand-in that is ready.
     @MainActor
     static func makeModel(shutdownDelay: Double = 0) -> (AppModel, SourceLog) {
         let log = SourceLog()
-        let model = AppModel(defaults: nil) { request in
+        let model = AppModel(defaults: nil, cameraService: readyCameraService) { request, _ in
             let base: CameraSource
             switch request {
             case .live:
@@ -102,7 +113,7 @@ enum AppTest {
                 options.height = 400
                 base = SyntheticCameraSource(options: options)
             default:
-                base = AppModel.makeSource(request)
+                base = AppModel.makeSource(request, liveAccess: .service)
             }
             let tracked = TrackedSource(base, shutdownDelay: shutdownDelay)
             log.sources.append(tracked)

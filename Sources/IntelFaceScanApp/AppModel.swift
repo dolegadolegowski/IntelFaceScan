@@ -8,6 +8,10 @@
 // applicationShouldTerminate from inside a main-queue block, where no main-actor job can run until it gets its
 // reply. Source switches wait for every pending shutdown, so a new helper never meets a camera that the previous
 // one is still releasing.
+//
+// The live camera first asks the shared RealSense camera service (docs/CAMERA-SERVICE.md): ready - the helper runs
+// as the user, no password; not installed - it is installed once (administrator prompt); anything else - a dialog
+// says why and offers what makes sense, among it the helper as root for this one session.
 
 import AppKit
 import CameraKit
@@ -32,16 +36,52 @@ struct TrackingState: Equatable {
 }
 
 struct AppAlert: Identifiable {
+    /// What a button of the alert does after closing it.
+    enum Action: Hashable {
+        /// The live camera from the start: the camera service is checked again and installed when that is the fix.
+        case retryLiveCamera
+        /// The live camera with the helper as root, for this session. `skipUSBRelease`: the camera service is alive
+        /// and hands the camera back itself (CameraService.Advice.administratorAccess).
+        case useAdministratorPassword(skipUSBRelease: Bool)
+        case openLoginItemsSettings
+        /// From the status command: runs the installer whatever the state. `again`: a service is installed already.
+        case installCameraService(again: Bool)
+    }
+
     let id = UUID()
     let title: String
     let message: String
+    /// Buttons before the closing one; none makes a plain alert with OK.
+    var actions: [Action] = []
+    /// The closing button says OK (information) instead of Cancel (a question) although there are actions.
+    var closesWithOK = false
+
+    /// The closing button is OK, comes first and is the default one (Return): a plain alert, and an information
+    /// dialog, where Return must only close (the status dialog's "Install again" leads to an administrator prompt).
+    /// A question has Cancel last and its first action as the default.
+    var closeIsDefault: Bool { actions.isEmpty || closesWithOK }
 }
 
 enum SourceRequest {
+    /// The RealSense camera. How the helper reaches it is decided when the request is opened
+    /// (AppModel.openSource(_:liveAccess:)).
     case live
     case playback(URL)
     case dataset(URL)
     case synthetic
+}
+
+/// What the app is doing while a source is being opened (the progress text of the start screen).
+enum ConnectionStage: Equatable {
+    /// A recording, a dataset, the synthetic head; or a live request that has not got further yet.
+    case connecting
+    case checkingCameraService
+    /// The installer's administrator prompt is showing, or the installer runs.
+    case installingCameraService
+    /// The helper starts as the user and opens the camera through the camera service: no prompt comes.
+    case startingCamera
+    /// The helper starts as root: the administrator prompt is coming or showing.
+    case waitingForPassword
 }
 
 /// What has to finish before the process may exit: camera shutdowns and file writes. Waiting never needs the main
@@ -83,7 +123,9 @@ final class AppModel {
         case welcome, preview, scanning, scanComplete, reconstructing, result
     }
 
-    typealias SourceFactory = @MainActor (SourceRequest) -> CameraSource
+    /// Makes the source of a request. The access is for `.live` only: `.service` or `.administrator`, as the model
+    /// decided (never `.automatic`).
+    typealias SourceFactory = @MainActor (SourceRequest, LiveCameraSource.Access) -> CameraSource
 
     var settings: AppSettings {
         didSet { settingsDidChange(from: oldValue) }
@@ -94,6 +136,9 @@ final class AppModel {
     private(set) var sourceKind: CameraSourceKind?
     private(set) var device: DeviceInfo?
     private(set) var isConnecting = false
+    private(set) var connectionStage: ConnectionStage = .connecting
+    /// The camera service status command is checking or installing: no source opens meanwhile.
+    private(set) var cameraServiceBusy = false
     private(set) var tracking = TrackingState()
     private(set) var hasFrames = false
     private(set) var stats = FrameStats()
@@ -119,13 +164,18 @@ final class AppModel {
     private(set) var resultOptions: ReconstructionOptions?
     private(set) var isQuitting = false
     var displayMode: ModelDisplayMode = .texture
-    var alert: AppAlert?
+    /// The alert on screen; its buttons (and SwiftUI) close it by setting nil. A dialog that waited for that shows
+    /// next (show(_:)).
+    var alert: AppAlert? {
+        didSet { if alert == nil { showWaitingDialog() } }
+    }
 
     let renderer: PreviewRenderer?
     let rendererError: String?
 
     @ObservationIgnored private let defaults: UserDefaults?
     @ObservationIgnored private let sourceFactory: SourceFactory
+    @ObservationIgnored private let cameraService: CameraService
     @ObservationIgnored private var source: CameraSource?
     @ObservationIgnored private var pipeline: FramePipeline?
     @ObservationIgnored private var eventsTask: Task<Void, Never>?
@@ -138,6 +188,8 @@ final class AppModel {
     @ObservationIgnored private var reconstructionID = 0
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private var sourceGeneration = 0
+    /// Dialogs that arrived while an alert was on screen, in order (show(_:)).
+    @ObservationIgnored private var waitingDialogs: [AppAlert] = []
     @ObservationIgnored private var recordingURL: URL?
     /// Shutdowns of detached sources that are still running, by id.
     @ObservationIgnored private var closingTasks: [Int: Task<Void, Never>] = [:]
@@ -151,11 +203,14 @@ final class AppModel {
 
     /// - Parameters:
     ///   - defaults: where the settings persist; nil keeps them in memory (tests, snapshots).
+    ///   - cameraService: the shared RealSense camera service, asked before the live camera opens (tests pass one
+    ///     with stand-ins for the probe and the installer).
     ///   - sourceFactory: makes the camera source for a request.
     ///   - soundPlayer: plays the scan sounds (the app passes SystemScanSoundPlayer; tests none or a recorder).
-    init(defaults: UserDefaults? = .standard, sourceFactory: @escaping SourceFactory = AppModel.makeSource,
-         soundPlayer: ScanSoundPlaying? = nil) {
+    init(defaults: UserDefaults? = .standard, cameraService: CameraService = .standard,
+         sourceFactory: @escaping SourceFactory = AppModel.makeSource, soundPlayer: ScanSoundPlaying? = nil) {
         self.defaults = defaults
+        self.cameraService = cameraService
         self.sourceFactory = sourceFactory
         self.soundPlayer = soundPlayer
         settings = defaults.map { AppSettings.load(from: $0) } ?? AppSettings()
@@ -168,9 +223,9 @@ final class AppModel {
         }
     }
 
-    static func makeSource(_ request: SourceRequest) -> CameraSource {
+    static func makeSource(_ request: SourceRequest, liveAccess: LiveCameraSource.Access) -> CameraSource {
         switch request {
-        case .live: return LiveCameraSource()
+        case .live: return LiveCameraSource(access: liveAccess)
         case .playback(let url): return PlaybackCameraSource(file: url)
         case .dataset(let url): return DatasetCameraSource(directory: url)
         // The UI defaults (stronger shading: Vision finds the face in every pose) and a hold long enough for the
@@ -187,7 +242,13 @@ final class AppModel {
     var canStartScan: Bool { screen == .preview && hasFrames && pipeline != nil }
     var canReturnToPreview: Bool { pipeline != nil }
     /// Opening another source would end a scan or abandon a reconstruction, or a source is still connecting.
-    var canOpenSource: Bool { !isConnecting && !isQuitting && screen != .scanning && screen != .reconstructing }
+    var canOpenSource: Bool {
+        !isConnecting && !cameraServiceBusy && !isQuitting && screen != .scanning && screen != .reconstructing
+    }
+    /// The start screen shows progress instead of the sources.
+    var showsConnectionProgress: Bool { isConnecting || cameraServiceBusy }
+    /// The camera service command needs the camera free: installing restarts the service under a running session.
+    var canShowCameraServiceStatus: Bool { canOpenSource && !hasSource }
     /// "Keep neck and shoulders" was switched on after a scan that cut them off: it applies from the next scan.
     var shouldersMissingFromCapture: Bool {
         settings.keepShoulders && capture != nil && captureKeptShoulders == false && screen != .scanning
@@ -214,13 +275,17 @@ final class AppModel {
         Task { await openSource(request) }
     }
 
-    func openSource(_ request: SourceRequest) async {
+    /// - Parameter liveAccess: for `.live` only. `.automatic` (every request from the UI) asks the camera service
+    ///   first and installs it when that is the fix; `.administrator` is what the dialogs' "Use administrator
+    ///   password this time" opens, without asking the service again.
+    func openSource(_ request: SourceRequest, liveAccess: LiveCameraSource.Access = .automatic) async {
         // A running reconstruction would otherwise finish into the new source's preview or scan.
-        guard !isConnecting, !isQuitting, screen != .reconstructing else { return }
+        guard !isConnecting, !cameraServiceBusy, !isQuitting, screen != .reconstructing else { return }
         detachSource()
         // From here until the new source runs (or fails) no other request starts: two overlapping requests would
         // each create a source and orphan one of them, with a helper (and maybe the camera) nobody shuts down.
         isConnecting = true
+        connectionStage = .connecting
         // The previous helper hands the camera back to macOS first; a new live helper could not capture it before.
         await waitForClosingSources()
         guard !isQuitting else {
@@ -229,7 +294,20 @@ final class AppModel {
         }
         sourceGeneration += 1
         let generation = sourceGeneration
-        let newSource = sourceFactory(request)
+        var access = liveAccess
+        if case .live = request {
+            if access == .automatic {
+                guard let decided = await resolveLiveAccess(generation: generation) else {
+                    // A dialog took over, or the app is quitting (which ended this request already).
+                    if generation == sourceGeneration { isConnecting = false }
+                    return
+                }
+                access = decided
+            }
+            // "Waiting for the administrator password" only when that prompt really comes.
+            connectionStage = access == .service ? .startingCamera : .waitingForPassword
+        }
+        let newSource = sourceFactory(request, access)
         source = newSource
         sourceKind = newSource.kind
         playbackEnded = false
@@ -240,6 +318,9 @@ final class AppModel {
             let info = try await newSource.connect()
             guard generation == sourceGeneration else { return }
             device = info
+            // The helper is connected, so the password (if one was asked for) has been given: configuring and
+            // starting the streams can take several seconds more (the camera restarts for its advanced mode).
+            if newSource.kind == .live { connectionStage = .startingCamera }
             let applied = settings
             do {
                 try await newSource.configure(applied.captureConfiguration)
@@ -261,6 +342,172 @@ final class AppModel {
             guard generation == sourceGeneration else { return }
             present(S.couldNotOpenSource, error)
             detachSource()
+        }
+    }
+
+    // MARK: - Camera service
+
+    /// The camera service part of a live request (docs/CAMERA-SERVICE.md, "At the start of a live session"): how the
+    /// helper reaches the camera, or nil when a dialog took over or the request was overtaken (quitting).
+    private func resolveLiveAccess(generation: Int) async -> LiveCameraSource.Access? {
+        connectionStage = .checkingCameraService
+        var availability = await cameraService.check()
+        guard generation == sourceGeneration else { return nil }
+        var advice = CameraService.advice(for: availability)
+        log.info("camera service: \(CameraService.describe(availability), privacy: .public)")
+        if advice.step == .install {
+            // Straight to the administrator prompt: its text says what is installed and that it is asked once.
+            connectionStage = .installingCameraService
+            do {
+                try await cameraService.install(prompt: S.cameraServiceInstallPrompt)
+            } catch {
+                guard generation == sourceGeneration else { return nil }
+                presentInstallFailure(error, advice: advice)
+                return nil
+            }
+            guard generation == sourceGeneration else { return nil }
+            connectionStage = .checkingCameraService
+            availability = await cameraService.check()
+            guard generation == sourceGeneration else { return nil }
+            advice = CameraService.advice(for: availability)
+            log.info("camera service after the installation: \(CameraService.describe(availability), privacy: .public)")
+            if advice.step == .install {
+                // The installer reported success and the service still cannot be used: no second prompt by itself.
+                present(AppAlert(title: S.cameraServiceNotAnsweringTitle,
+                                 message: S.cameraServiceStillNotUsable(S.cameraServiceState(availability)),
+                                 actions: Self.actions(retry: true, advice: advice)))
+                return nil
+            }
+        }
+        switch advice.step {
+        case .useService:
+            return .service
+        case .useAdministrator:
+            // No service files in this build (swift run without the bundle): as before the camera service existed.
+            log.notice("no camera service files in this build: opening the camera with the administrator password")
+            return advice.administratorAccess
+        case .install, .explain:
+            presentCameraServiceProblem(availability, advice: advice)
+            return nil
+        }
+    }
+
+    private static func actions(retry: Bool, advice: CameraService.Advice) -> [AppAlert.Action] {
+        var actions: [AppAlert.Action] = []
+        if retry { actions.append(.retryLiveCamera) }
+        if advice.offersLoginItemsSettings { actions.append(.openLoginItemsSettings) }
+        if case .administrator(let skipUSBRelease)? = advice.administratorAccess {
+            actions.append(.useAdministratorPassword(skipUSBRelease: skipUSBRelease))
+        }
+        return actions
+    }
+
+    /// The installation was cancelled, refused or failed: install again, the administrator path this time, or cancel.
+    private func presentInstallFailure(_ error: Error, advice: CameraService.Advice) {
+        switch error as? CameraService.InstallError {
+        case .cancelled?:
+            present(AppAlert(title: S.cameraServiceNotInstalledTitle, message: S.cameraServiceInstallCancelled,
+                             actions: Self.actions(retry: true, advice: advice)))
+        case .untrusted(let why)?:
+            // Installing again from the same place fails the same way.
+            present(AppAlert(title: S.cameraServiceUntrustedTitle, message: S.cameraServiceUntrusted(why),
+                             actions: Self.actions(retry: false, advice: advice)))
+        case .failed(let message)?:
+            present(AppAlert(title: S.cameraServiceInstallFailedTitle, message: S.cameraServiceInstallFailed(message),
+                             actions: Self.actions(retry: true, advice: advice)))
+        case nil:
+            present(AppAlert(title: S.cameraServiceInstallFailedTitle,
+                             message: S.cameraServiceInstallFailed(error.localizedDescription),
+                             actions: Self.actions(retry: true, advice: advice)))
+        }
+    }
+
+    /// A state that installing does not fix: says why and offers what the state allows.
+    private func presentCameraServiceProblem(_ availability: CameraService.Availability, advice: CameraService.Advice) {
+        let actions = Self.actions(retry: false, advice: advice)
+        switch availability.state {
+        case .switchedOff?:
+            present(AppAlert(title: S.cameraServiceSwitchedOffTitle, message: S.cameraServiceSwitchedOff,
+                             actions: actions))
+        case .notConsoleUser?:
+            present(AppAlert(title: S.cameraServiceNotConsoleUserTitle, message: S.cameraServiceNotConsoleUser,
+                             actions: actions))
+        case .cameraDisabled?:
+            present(AppAlert(title: S.cameraDisabledTitle, message: S.cameraDisabled, actions: actions))
+        case .tooManyClients?:
+            present(AppAlert(title: S.cameraServiceBusyTitle, message: S.cameraServiceBusy, actions: actions))
+        default:
+            present(AppAlert(title: S.cameraServiceNotAnsweringTitle,
+                             message: S.cameraServiceStillNotUsable(S.cameraServiceState(availability)),
+                             actions: actions))
+        }
+    }
+
+    /// Runs what a button of an alert stands for.
+    func perform(_ action: AppAlert.Action) {
+        alert = nil
+        switch action {
+        case .retryLiveCamera:
+            open(.live)
+        case .useAdministratorPassword(let skipUSBRelease):
+            Task { await openSource(.live, liveAccess: .administrator(skipUSBRelease: skipUSBRelease)) }
+        case .openLoginItemsSettings:
+            cameraService.openLoginItemsSettings()
+        case .installCameraService:
+            Task { await reinstallCameraService() }
+        }
+    }
+
+    /// The camera service command: shows the state, the installed version and the version this copy of the app
+    /// carries, and offers the installation (again).
+    func showCameraServiceStatus() async {
+        guard canShowCameraServiceStatus else { return }
+        cameraServiceBusy = true
+        connectionStage = .checkingCameraService
+        let availability = await cameraService.check()
+        cameraServiceBusy = false
+        guard !isQuitting else { return }
+        var actions: [AppAlert.Action] = []
+        if cameraService.kit != nil {
+            actions.append(.installCameraService(again: availability.state != .notInstalled))
+        }
+        if CameraService.advice(for: availability).offersLoginItemsSettings { actions.append(.openLoginItemsSettings) }
+        let message = S.cameraServiceStatus(state: S.cameraServiceState(availability),
+                                            installed: cameraService.installedServiceVersion,
+                                            bundled: cameraService.bundledServiceVersion)
+        log.info("camera service: \(CameraService.describe(availability), privacy: .public)")
+        show(AppAlert(title: S.cameraServiceTitle, message: message, actions: actions, closesWithOK: true))
+    }
+
+    /// The status command's installation: the installer runs whatever the state (it never replaces a newer service),
+    /// then the status shows again.
+    private func reinstallCameraService() async {
+        guard canShowCameraServiceStatus else { return }
+        cameraServiceBusy = true
+        connectionStage = .installingCameraService
+        var failure: Error?
+        do {
+            try await cameraService.install(prompt: S.cameraServiceInstallPrompt)
+        } catch {
+            failure = error
+        }
+        cameraServiceBusy = false
+        guard !isQuitting else { return }
+        switch failure as? CameraService.InstallError {
+        case .cancelled?:
+            // The user's own choice in a command they started: nothing to explain.
+            break
+        case .untrusted(let why)?:
+            present(S.cameraServiceUntrustedTitle, message: S.cameraServiceUntrusted(why))
+        case .failed(let message)?:
+            present(S.cameraServiceInstallFailedTitle, message: S.cameraServiceInstallFailed(message))
+        case nil:
+            if let failure {
+                present(S.cameraServiceInstallFailedTitle,
+                        message: S.cameraServiceInstallFailed(failure.localizedDescription))
+            } else {
+                await showCameraServiceStatus()
+            }
         }
     }
 
@@ -817,12 +1064,41 @@ final class AppModel {
 
     /// Shows an alert; a second message while one is shown is added to it instead of replacing it.
     func present(_ title: String, message: String) {
-        log.error("\(title, privacy: .public): \(message, privacy: .public)")
+        present(AppAlert(title: title, message: message), addingToShown: true)
+    }
+
+    /// Shows a dialog of its own (the camera service dialogs, with or without buttons): it is never added to the
+    /// alert on screen, it waits until that one is closed (show(_:)). `addingToShown` is for plain messages only.
+    func present(_ new: AppAlert, addingToShown: Bool = false) {
+        log.error("\(new.title, privacy: .public): \(new.message, privacy: .public)")
         guard !isQuitting else { return }
-        if let shown = alert {
-            alert = AppAlert(title: shown.title, message: shown.message + "\n\n" + title + ": " + message)
+        if addingToShown, new.actions.isEmpty, let shown = alert {
+            alert = AppAlert(title: shown.title, message: shown.message + "\n\n" + new.title + ": " + new.message,
+                             actions: shown.actions, closesWithOK: shown.closesWithOK)
         } else {
-            alert = AppAlert(title: title, message: message)
+            show(new)
+        }
+    }
+
+    /// Shows a dialog: at once, or, while an alert is on screen, after that one was closed. SwiftUI takes the text
+    /// and the buttons of an alert when it presents it and ignores later changes, so a dialog added to the alert on
+    /// screen would never show its buttons.
+    private func show(_ dialog: AppAlert) {
+        guard !isQuitting else { return }
+        if alert == nil && waitingDialogs.isEmpty {
+            alert = dialog
+        } else {
+            waitingDialogs.append(dialog)
+        }
+    }
+
+    /// The alert on screen was closed: the dialog that waited longest shows. In a later turn of the main actor: when
+    /// a button closes an alert, SwiftUI also sets the presentation to false, and that must not close the new dialog.
+    private func showWaitingDialog() {
+        guard !waitingDialogs.isEmpty else { return }
+        Task { [weak self] in
+            guard let self, alert == nil, !isQuitting, !waitingDialogs.isEmpty else { return }
+            alert = waitingDialogs.removeFirst()
         }
     }
 

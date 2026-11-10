@@ -1,17 +1,25 @@
 #!/bin/bash
-# Applies patches/*.patch to the librealsense submodule (idempotent) and moves between versions of the patches.
+# Applies the librealsense patches to the submodule (idempotent) and moves between versions of them. The patches, in
+# the order they are applied:
+#   patches/*.patch                                                  macOS support and fixes (0001 comes from
+#                                                                    realsense-viewer-macos, see scripts/build-sdk.sh)
+#   third_party/realsense-usbd/librealsense/macos-usb-broker.patch   the client of the RealSense camera service: part
+#                                                                    of the vendored kit, never edited here (it is
+#                                                                    updated by scripts/sync-camera-service.sh)
 #
 #   scripts/apply-patches.sh            apply every patch that is not applied yet
 #   scripts/apply-patches.sh --reset    restore librealsense's files, then apply every patch again
 #   scripts/apply-patches.sh --revert   only restore librealsense's files (scripts/build.sh, before it checks out
 #                                       another librealsense commit)
+#   scripts/apply-patches.sh --list     print "patch <sha256> <name>" for every patch, in order, and change nothing
+#                                       (scripts/build-sdk.sh: the patches are inputs of the SDK)
 #
 # third_party/librealsense/.ifs-patches records the applied patches (sha256, name) and the files they created. When
-# patches/ no longer matches it (a pull changed, added or removed a patch), the submodule's tracked files are restored
-# from its commit, the files the old patches created are removed, and all patches are applied again. A checkout
-# patched before the record existed is adopted when every patch is applied or applies, and restored the same way
-# otherwise. Edits made by hand inside third_party/librealsense do not survive a restore: changes to librealsense
-# belong in patches/ (they come from realsense-viewer-macos, see scripts/build-sdk.sh, and are never dropped).
+# the patches no longer match it (a pull or a sync of the kit changed, added or removed one), the submodule's tracked
+# files are restored from its commit, the files the old patches created are removed, and all patches are applied
+# again. A checkout patched before the record existed is adopted when every patch is applied or applies, and restored
+# the same way otherwise. Edits made by hand inside third_party/librealsense do not survive a restore: changes to
+# librealsense belong in patches/ (or, for the camera service client, in the kit's own repository).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,12 +30,17 @@ die() { echo "apply-patches.sh: $*" >&2; exit 1; }
 
 MODE="${1:-apply}"
 case "$MODE" in
-    apply|--reset|--revert) ;;
-    *) die "usage: scripts/apply-patches.sh [--reset | --revert]" ;;
+    apply|--reset|--revert|--list) ;;
+    *) die "usage: scripts/apply-patches.sh [--reset | --revert | --list]" ;;
 esac
 
+# The camera service client goes last: it is written against librealsense with patches/ applied.
+KIT_PATCH="$ROOT/third_party/realsense-usbd/librealsense/macos-usb-broker.patch"
 PATCHES=("$ROOT"/patches/*.patch)
 [ -f "${PATCHES[0]}" ] || die "no patches in $ROOT/patches"
+[ -f "$KIT_PATCH" ] || die "$KIT_PATCH is missing (the camera service kit in third_party/realsense-usbd is part of" \
+                           "the repository; scripts/sync-camera-service.sh copies it from realsense-viewer-macos)"
+PATCHES+=("$KIT_PATCH")
 
 # The submodule must be its own git checkout: a restore resets it, which must never reach the superproject.
 is_own_checkout() {
@@ -100,6 +113,7 @@ write_record() {
 }
 
 case "$MODE" in
+    --list) patch_lines; exit 0 ;;
     --revert) restore; exit 0 ;;
     --reset) restore ;;
 esac
@@ -108,7 +122,7 @@ had_record=0
 if [ -f "$RECORD" ]; then
     had_record=1
     if [ "$(grep '^patch ' "$RECORD" || true)" != "$(patch_lines)" ]; then
-        echo "patches/ changed since the patches were applied: restoring librealsense and applying every patch again"
+        echo "the patches changed since they were applied: restoring librealsense and applying every patch again"
         restore
     fi
 fi
@@ -117,7 +131,8 @@ if is_own_checkout && [ -z "$(git -C "$SRC" status --porcelain --untracked-files
     pristine=1
 fi
 if ! apply_all; then
-    NOT_APPLICABLE="patches/ does not apply to librealsense $(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || true)"
+    NOT_APPLICABLE="the patches do not apply to librealsense"
+    NOT_APPLICABLE="$NOT_APPLICABLE $(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || true)"
     [ "$pristine" = 0 ] || die "$NOT_APPLICABLE"
     # Only a checkout patched before the record existed (by an older version of the patches) is restored here; a
     # recorded, current checkout that conflicts has been edited by hand.
@@ -125,7 +140,7 @@ if ! apply_all; then
         die "third_party/librealsense has local changes that conflict with patches/ (changes to librealsense belong" \
             "in patches/); scripts/apply-patches.sh --reset restores it and applies every patch again"
     fi
-    echo "librealsense was patched by an older version of patches/: restoring it and applying every patch again"
+    echo "librealsense was patched by an older version of the patches: restoring it and applying every patch again"
     restore
     apply_all || die "$NOT_APPLICABLE"
 fi

@@ -61,10 +61,19 @@ let package = Package(
                 .linkedFramework("CoreGraphics"),
             ]),
 
-        // Camera access: frame types, the helper connection (live / playback).
+        // Client of the shared RealSense camera service (realsense-usbd): is it installed and answering, install it
+        // once. One vendored file, compiled as it is: third_party/realsense-usbd is a copy that
+        // scripts/sync-camera-service.sh updates and nothing here edits (docs/CAMERA-SERVICE.md).
+        .target(
+            name: "RealSenseCameraClient",
+            path: "third_party/realsense-usbd/client",
+            sources: ["RealSenseCameraAccess.swift"],
+            swiftSettings: [.swiftLanguageMode(.v5)]),
+
+        // Camera access: frame types, the helper connection (live / playback), the camera service decision.
         .target(
             name: "CameraKit",
-            dependencies: ["IFSProtocol"],
+            dependencies: ["IFSProtocol", "RealSenseCameraClient"],
             swiftSettings: [.swiftLanguageMode(.v5)]),
 
         // Guided scan: Vision head pose, scan state machine, quality, coverage, datasets.
@@ -87,7 +96,7 @@ let package = Package(
 
         .executableTarget(
             name: "IntelFaceScanApp",
-            dependencies: ["CameraKit", "ScanKit", "ReconKit", "SyntheticData"],
+            dependencies: ["CameraKit", "ScanKit", "ReconKit", "SyntheticData", "RealSenseCameraClient"],
             swiftSettings: [.swiftLanguageMode(.v5)]),
 
         .executableTarget(
@@ -101,7 +110,7 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(
             name: "CameraKitTests",
-            dependencies: ["CameraKit", "IFSProtocol"],
+            dependencies: ["CameraKit", "IFSProtocol", "RealSenseCameraClient"],
             swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(
             name: "ScanKitTests",
@@ -114,7 +123,8 @@ let package = Package(
         // The app's model, localization and 3D preview (@testable import of the executable target).
         .testTarget(
             name: "IntelFaceScanAppTests",
-            dependencies: ["IntelFaceScanApp", "CameraKit", "ScanKit", "ReconKit", "SyntheticData"],
+            dependencies: ["IntelFaceScanApp", "CameraKit", "ScanKit", "ReconKit", "SyntheticData",
+                           "RealSenseCameraClient"],
             swiftSettings: [.swiftLanguageMode(.v5)]),
     ],
     cLanguageStandard: .c11,

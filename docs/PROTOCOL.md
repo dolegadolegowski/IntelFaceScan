@@ -1,8 +1,9 @@
 # Helper ⇄ app protocol
 
-The camera helper (`IntelFaceScanHelper`, C++, root for the live camera) and the app (`CameraKit`, Swift) talk over
-a local `AF_UNIX`/`SOCK_STREAM` socket. Binary framing is defined in
-[`Sources/IFSProtocol/include/ifs_protocol.h`](../Sources/IFSProtocol/include/ifs_protocol.h):
+The camera helper (`IntelFaceScanHelper`, C++; for the live camera it runs as the user and reaches the camera through
+the RealSense camera service, or as root on the administrator path: [HELPER.md](HELPER.md)) and the app (`CameraKit`,
+Swift) talk over a local `AF_UNIX`/`SOCK_STREAM` socket. The protocol is the same on both paths. Binary framing is
+defined in [`Sources/IFSProtocol/include/ifs_protocol.h`](../Sources/IFSProtocol/include/ifs_protocol.h):
 
 ```
 ifs_wire_header (24 bytes, little endian) | JSON (json_bytes, UTF-8) | payload (payload_bytes)
@@ -24,17 +25,22 @@ ifs_wire_header (24 bytes, little endian) | JSON (json_bytes, UTF-8) | payload (
 1. The app creates a private directory (`0700`) in its per-user temporary directory, binds `camera.sock` in it
    and listens (backlog 1).
 2. The app starts the helper:
-   * live: `do shell script "'<helper>' --socket '<path>' --uid <uid> --gid <gid> --parent-pid <pid>" with
-     administrator privileges` (standard macOS password prompt),
+   * live through the camera service (the normal way, [CAMERA-SERVICE.md](CAMERA-SERVICE.md)): directly as the
+     user, `<helper> --socket <path> --uid <uid> --parent-pid <pid>`; the helper's librealsense reaches the camera
+     through the service,
+   * live on the administrator path (one session, when the service cannot be used): `do shell script "'<helper>'
+     --socket '<path>' --uid <uid> --gid <gid> --parent-pid <pid> [--no-usb-release]" with administrator
+     privileges` (standard macOS password prompt); the helper runs as root and opens the USB device itself,
    * playback: directly as the user: `<helper> --socket <path> --uid <uid> --parent-pid <pid> --playback <file>
      [--no-real-time]`,
    * fake (development and tests, no camera, no librealsense calls): directly as the user, `--fake` instead of
      `--playback <file>`; synthetic frames go through the same IPC code.
 3. The helper validates the socket path (absolute; parent directory owned by `uid`, mode `0700`, not a symlink),
    connects, and checks the peer with `LOCAL_PEERCRED`/`LOCAL_PEERPID`: the peer uid must be `uid` and the peer
-   pid `parent-pid`. The app accepts exactly one connection and checks the peer: euid 0 (live) or its own uid
-   (playback, fake), that the peer executable (`proc_pidpath`) is the bundled helper, and for playback/fake that the
-   peer pid is the process the app started.
+   pid `parent-pid`. The app accepts exactly one connection and checks the peer: euid 0 (the administrator path) or
+   its own uid (every helper it started directly: live through the camera service, playback, fake), that the peer
+   executable (`proc_pidpath`) is the bundled helper, and for a helper it started directly that the peer pid is the
+   process it started.
 4. The helper sends `HELLO`. Then the app sends commands; every command has a unique `request_id` and gets exactly
    one `REPLY`. `FRAMESET`, `EVENT` and `LOG` messages arrive at any time.
    * Validation: a command without an unsigned integer `request_id`, a command with a payload, a body that is not a
@@ -46,9 +52,11 @@ ifs_wire_header (24 bytes, little endian) | JSON (json_bytes, UTF-8) | payload (
    * `CONFIGURE` and `SET_FILTERS`: every key is required except `laser_power` (`null` or absent = maximum);
      `align_to_color` must be `true`; `send_ir` requires `enable_ir`.
 5. End: the app sends `QUIT` (or closes the socket, or exits: the helper watches the socket and `parent-pid`).
-   The helper stops the streams, destroys the librealsense context, re-enumerates the USB device so macOS
-   re-attaches its drivers (same as `rs-macos-release`), sends `BYE` if the socket is still open, and exits.
-   SIGINT/SIGTERM/SIGHUP do the same. The app never needs to (and as a user cannot) kill the root helper.
+   The helper stops the streams and destroys the librealsense context; as root (and without `--no-usb-release`) it
+   re-enumerates the USB device so macOS re-attaches its drivers (same as `rs-macos-release`); it sends `BYE` if the
+   socket is still open, and exits. SIGINT/SIGTERM/SIGHUP do the same. A helper of the user re-enumerates nothing:
+   the camera service hands the camera back to macOS a few seconds after its last client let go. The app never
+   needs to (and as a user cannot) kill the root helper.
 
 ## Messages
 
@@ -56,7 +64,9 @@ ifs_wire_header (24 bytes, little endian) | JSON (json_bytes, UTF-8) | payload (
 ```json
 {"protocol": 1, "helper_version": "0.1.0", "sdk_version": "2.58.4", "pid": 4242, "euid": 0, "mode": "live"}
 ```
-`mode`: `"live"`, `"playback"` or `"fake"` (`DeviceInfo.source` is then `"fake"`).
+`mode`: `"live"`, `"playback"` or `"fake"` (`DeviceInfo.source` is then `"fake"`). `euid`: the user the helper runs
+as; for `"live"` it tells the two paths apart (0 on the administrator path, the app's own uid through the camera
+service), everything else in the protocol is the same on both.
 
 ### BYE (helper → app)
 `{"reason": "the app asked the helper to quit"}` – last message before the helper exits; `reason` is human-readable
@@ -150,7 +160,8 @@ sets the RGB auto-exposure ROI directly and maps the rectangle onto the depth im
 
 ### RECORD_START / RECORD_STOP (live only)
 `RECORD_START` carries a descriptor of a file the app created (as the user, `O_WRONLY|O_CREAT|O_TRUNC`) and
-`{"request_id": 10, "format": "db3"}`. The helper records into its own root-private temporary directory, and on
+`{"request_id": 10, "format": "db3"}`. The helper records into a temporary directory private to the user it runs as
+(root on the administrator path), and on
 `RECORD_STOP` copies the finished file into the descriptor, closes it, deletes the temporary file and replies
 `{"bytes": 123456789}`. The helper never opens a path received from the app. Formats: `db3` (default of
 librealsense 2.58) and `bag`. A recording that ended with the camera (unplugged mid-recording: the next command
