@@ -39,8 +39,10 @@ enum S {
     static var sources: String { tr("Source", "Źródło") }
     static var liveCamera: String { tr("Live camera", "Kamera na żywo") }
     static var liveCameraHint: String {
-        tr("Intel RealSense D455 over USB-C. macOS asks for the administrator password to take over the camera.",
-           "Intel RealSense D455 przez USB-C. macOS poprosi o hasło administratora, aby przejąć kamerę.")
+        tr("Intel RealSense D455 over USB-C. The first use installs the RealSense camera service (an administrator's "
+           + "name and password, once); after that no password is needed.",
+           "Intel RealSense D455 przez USB-C. Przy pierwszym użyciu instalowana jest usługa kamery RealSense (nazwa "
+           + "i hasło administratora, jeden raz); potem hasło nie jest potrzebne.")
     }
     static var openRecording: String { tr("Open recording…", "Otwórz nagranie…") }
     static var openRecordingHint: String { tr("Play a .db3 or .bag recording.", "Odtwórz nagranie .db3 lub .bag.") }
@@ -53,6 +55,23 @@ enum S {
     static var waitingForPassword: String {
         tr("Waiting for the administrator password…", "Oczekiwanie na hasło administratora…")
     }
+    static var checkingCameraService: String {
+        tr("Checking the RealSense camera service…", "Sprawdzanie usługi kamery RealSense…")
+    }
+    static var installingCameraService: String {
+        tr("Installing the RealSense camera service: macOS asks for an administrator's name and password…",
+           "Instalowanie usługi kamery RealSense: macOS prosi o nazwę i hasło administratora…")
+    }
+    static var startingCamera: String { tr("Starting the camera…", "Uruchamianie kamery…") }
+    static func connectionStage(_ stage: ConnectionStage) -> String {
+        switch stage {
+        case .connecting: return connecting
+        case .checkingCameraService: return checkingCameraService
+        case .installingCameraService: return installingCameraService
+        case .startingCamera: return startingCamera
+        case .waitingForPassword: return waitingForPassword
+        }
+    }
     static var welcomeTitle: String { tr("3D head scan", "Skan 3D głowy") }
     static var welcomeSubtitle: String {
         tr("Choose a source to start. The scan guides you through front, up, down, left and right.",
@@ -64,6 +83,149 @@ enum S {
         case .playback(let url): return tr("Recording: ", "Nagranie: ") + url.lastPathComponent
         case .dataset(let url): return tr("Dataset: ", "Zestaw danych: ") + url.lastPathComponent
         case .synthetic: return syntheticDemo
+        }
+    }
+
+    // MARK: Camera service (docs/CAMERA-SERVICE.md)
+    /// The text of the macOS administrator prompt that installs the service.
+    static var cameraServiceInstallPrompt: String {
+        tr("IntelFaceScan wants to install the RealSense camera service. This is needed once: afterwards the camera "
+           + "works without a password, in every application that uses the service.",
+           "IntelFaceScan chce zainstalować usługę kamery RealSense. Wystarczy to zrobić raz: potem kamera działa "
+           + "bez hasła w każdej aplikacji, która korzysta z tej usługi.")
+    }
+    static var cameraServiceNotInstalledTitle: String {
+        tr("The RealSense camera service was not installed", "Usługa kamery RealSense nie została zainstalowana")
+    }
+    static var cameraServiceInstallCancelled: String {
+        tr("The administrator prompt was cancelled. With the service the camera works without a password; installing "
+           + "it takes an administrator's name and password, once.",
+           "Prośba o hasło administratora została anulowana. Z usługą kamera działa bez hasła; jej instalacja "
+           + "wymaga podania nazwy i hasła administratora, jeden raz.")
+    }
+    static var cameraServiceInstallFailedTitle: String {
+        tr("Could not install the RealSense camera service", "Nie można zainstalować usługi kamery RealSense")
+    }
+    /// The installer's own message stays as it is (English).
+    static func cameraServiceInstallFailed(_ detail: String) -> String {
+        tr("The installer reported: \(detail)", "Instalator zgłosił: \(detail)")
+    }
+    static var cameraServiceUntrustedTitle: String {
+        tr("The RealSense camera service cannot be installed from this copy of the app",
+           "Usługi kamery RealSense nie można zainstalować z tej kopii aplikacji")
+    }
+    static func cameraServiceUntrusted(_ detail: String) -> String {
+        tr("An administrator has to move IntelFaceScan to the Applications folder first: the service is only "
+           + "installed from a copy that other users cannot change.\n\n\(detail)",
+           "Administrator musi najpierw przenieść IntelFaceScan do folderu Aplikacje: usługa jest instalowana tylko "
+           + "z kopii, której inni użytkownicy nie mogą zmienić.\n\n\(detail)")
+    }
+    static var cameraServiceSwitchedOffTitle: String {
+        tr("The RealSense camera service is switched off", "Usługa kamery RealSense jest wyłączona")
+    }
+    static var cameraServiceSwitchedOff: String {
+        tr("It was switched off in System Settings > General > Login Items & Extensions. An administrator can switch "
+           + "it on again there.",
+           "Została wyłączona w Ustawieniach systemowych > Ogólne > Rzeczy otwierane podczas logowania "
+           + "i rozszerzenia. Administrator może ją tam ponownie włączyć.")
+    }
+    static var cameraServiceNotConsoleUserTitle: String {
+        tr("The RealSense camera service only serves the user logged in at this Mac's screen",
+           "Usługa kamery RealSense obsługuje tylko użytkownika zalogowanego przy ekranie tego Maca")
+    }
+    static var cameraServiceNotConsoleUser: String {
+        tr("This session is not the one at the screen (for example a remote login, or a user switched to the "
+           + "background), so the camera cannot be used without a password here.",
+           "Ta sesja nie jest sesją przy ekranie (np. logowanie zdalne albo użytkownik przełączony w tło), więc "
+           + "kamery nie można tu używać bez hasła.")
+    }
+    static var cameraDisabledTitle: String {
+        tr("Camera use is disabled on this Mac", "Korzystanie z kamer jest na tym Macu wyłączone")
+    }
+    static var cameraDisabled: String {
+        tr("The administrator of this Mac has disabled cameras (device management or Screen Time). IntelFaceScan "
+           + "cannot use the RealSense camera until that changes.",
+           "Administrator tego Maca wyłączył kamery (zarządzanie urządzeniem lub Czas przed ekranem). IntelFaceScan "
+           + "nie może używać kamery RealSense, dopóki to się nie zmieni.")
+    }
+    static var cameraServiceBusyTitle: String {
+        tr("The RealSense camera service is busy", "Usługa kamery RealSense jest zajęta")
+    }
+    static var cameraServiceBusy: String {
+        tr("Too many programs are connected to it. Quit another program that uses a RealSense camera and try again.",
+           "Połączonych jest z nią zbyt wiele programów. Zamknij inny program, który używa kamery RealSense, "
+           + "i spróbuj ponownie.")
+    }
+    static var cameraServiceNotAnsweringTitle: String {
+        tr("The RealSense camera service cannot be used", "Usługi kamery RealSense nie można używać")
+    }
+    static func cameraServiceStillNotUsable(_ state: String) -> String {
+        tr("The installation finished, but the service cannot be used yet: \(state).",
+           "Instalacja się zakończyła, ale usługi nie można jeszcze używać: \(state).")
+    }
+    /// The state as the end of a sentence ("State: ready (version 2).").
+    static func cameraServiceState(_ availability: CameraService.Availability) -> String {
+        switch availability {
+        case .noKit:
+            return tr("this copy of IntelFaceScan carries no service files",
+                      "ta kopia IntelFaceScan nie zawiera plików usługi")
+        case .state(let state):
+            switch state {
+            case .ready(let version):
+                guard let version else { return tr("ready", "gotowa") }
+                return tr("ready (version \(version))", "gotowa (wersja \(version))")
+            case .notInstalled:
+                return tr("not installed", "niezainstalowana")
+            case .switchedOff:
+                return tr("switched off in System Settings", "wyłączona w Ustawieniach systemowych")
+            case .needsUpdate:
+                return tr("installed, too old for this version of IntelFaceScan",
+                          "zainstalowana, zbyt stara dla tej wersji IntelFaceScan")
+            case .notAnswering(let detail):
+                // The probe's own line stays as it is (English).
+                return tr("installed, not answering", "zainstalowana, nie odpowiada")
+                    + (detail.isEmpty ? "" : " (\(detail))")
+            case .notConsoleUser:
+                return tr("running, but it only serves the user logged in at this Mac's screen",
+                          "działa, ale obsługuje tylko użytkownika zalogowanego przy ekranie tego Maca")
+            case .cameraDisabled:
+                return tr("camera use is disabled on this Mac", "korzystanie z kamer jest na tym Macu wyłączone")
+            case .tooManyClients:
+                return tr("too many programs are connected", "połączonych jest zbyt wiele programów")
+            }
+        }
+    }
+    static var cameraServiceMenu: String { tr("RealSense Camera Service…", "Usługa kamery RealSense…") }
+    static var cameraServiceTitle: String { tr("RealSense camera service", "Usługa kamery RealSense") }
+    /// The status command's text: the state, the installed version and the version this copy of the app carries.
+    static func cameraServiceStatus(state: String, installed: Int?, bundled: Int?) -> String {
+        var lines = [tr("State: \(state).", "Stan: \(state).")]
+        if let installed {
+            lines.append(tr("Installed version: \(installed).", "Zainstalowana wersja: \(installed)."))
+        }
+        if let bundled {
+            lines.append(tr("Version in this copy of IntelFaceScan: \(bundled).",
+                            "Wersja w tej kopii IntelFaceScan: \(bundled)."))
+        }
+        lines.append("")
+        lines.append(tr("With the service, every application that uses it reaches RealSense cameras without a "
+                        + "password. It is installed once, with an administrator's name and password.",
+                        "Dzięki usłudze każda aplikacja, która z niej korzysta, ma dostęp do kamer RealSense bez "
+                        + "hasła. Instaluje się ją raz, podając nazwę i hasło administratora."))
+        return lines.joined(separator: "\n")
+    }
+    static func alertAction(_ action: AppAlert.Action) -> String {
+        switch action {
+        case .retryLiveCamera:
+            return tr("Try again", "Spróbuj ponownie")
+        case .useAdministratorPassword:
+            return tr("Use administrator password this time", "Tym razem użyj hasła administratora")
+        case .openLoginItemsSettings:
+            // The Polish name of the pane ("Rzeczy otwierane podczas logowania i rozszerzenia") is too long for a
+            // button; the button opens that pane of System Settings.
+            return tr("Open Login Items Settings", "Otwórz Ustawienia systemowe")
+        case .installCameraService(let again):
+            return again ? tr("Install again", "Zainstaluj ponownie") : tr("Install", "Zainstaluj")
         }
     }
 

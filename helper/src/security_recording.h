@@ -1,8 +1,9 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
 // Recordings without trusting paths from the app: the engine records into a fresh directory that only the helper's
-// user (root for the live camera) can enter, and the finished file is copied into a descriptor the app opened as
-// itself and passed with SCM_RIGHTS. The helper never opens, creates or deletes a path the app named.
+// user can enter (root on the administrator path; the app's user for a live helper that uses the RealSense camera
+// service and for the fake camera), and the finished file is copied into a descriptor the app opened as itself and
+// passed with SCM_RIGHTS. The helper never opens, creates or deletes a path the app named.
 
 #pragma once
 
@@ -22,9 +23,12 @@ std::string check_recording_destination( int fd );
 class RecordingSpool
 {
 public:
-    // Creates <private base>/ifs-recording.XXXXXX (mkdtemp, mode 0700). The private base is the effective user's
-    // Darwin temporary directory (confstr(_CS_DARWIN_USER_TEMP_DIR): /var/folders/zz/.../T for root), accepted only
-    // when it is owned by the effective user and not accessible to anyone else. Throws std::runtime_error.
+    // Creates <private base>/ifs-recording.XXXXXX (mkdtemp, mode 0700) and locks it (flock) for the life of the
+    // spool. The private base is the effective user's Darwin temporary directory
+    // (confstr(_CS_DARWIN_USER_TEMP_DIR): /var/folders/zz/.../T for root, /var/folders/<..>/T for a user), accepted
+    // only when it is owned by the effective user and not accessible to anyone else. Spools that helpers of the same
+    // user left behind (older than a day and not locked by a running helper) are removed first. Throws
+    // std::runtime_error.
     static std::unique_ptr< RecordingSpool > create( const std::string & format );
 
     ~RecordingSpool();
@@ -43,10 +47,16 @@ public:
     void remove();
 
 private:
-    RecordingSpool( std::string dir, std::string file ) : dir_( std::move( dir ) ), file_( std::move( file ) ) {}
+    RecordingSpool( std::string dir, std::string file, UniqueFd lock )
+        : dir_( std::move( dir ) )
+        , file_( std::move( file ) )
+        , lock_( std::move( lock ) )
+    {
+    }
 
     std::string dir_;
     std::string file_;
+    UniqueFd lock_;  // the spool directory, locked exclusively: this spool is in use
     bool removed_ = false;
 };
 

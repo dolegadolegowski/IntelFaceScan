@@ -6,7 +6,8 @@ import CoreGraphics
 import Foundation
 
 public enum CameraSourceKind: Sendable, Equatable {
-    /// RealSense camera through the privileged helper (asks for the administrator password).
+    /// RealSense camera through the camera helper: as the user through the camera service, or as root after the
+    /// administrator prompt (LiveCameraSource.Access).
     case live
     /// A .db3/.bag recording played through the helper running unprivileged (no password).
     case playback(URL)
@@ -19,12 +20,13 @@ public enum CameraSourceKind: Sendable, Equatable {
 /// A source of synchronized RGB-D framesets.
 ///
 /// Lifecycle: `connect()` -> `configure(_:)` -> `start()` -> frames -> `stop()` -> ... -> `shutdown()`.
-/// `shutdown()` must be called before the app exits: for the live camera it makes the helper stop the streams,
-/// hand the camera back to macOS (so it works as a webcam again) and exit.
+/// `shutdown()` must be called before the app exits: for the live camera it makes the helper stop the streams and
+/// exit, and the camera goes back to macOS (so it works as a webcam again) - handed back by the root helper itself,
+/// or by the camera service a few seconds later.
 public protocol CameraSource: AnyObject, Sendable {
     var kind: CameraSourceKind { get }
 
-    /// Starts the helper (live: administrator prompt) and returns the device description.
+    /// Starts the helper (live with the administrator password: the prompt) and returns the device description.
     func connect() async throws -> DeviceInfo
     /// Applies a configuration; while streaming this may restart the streams.
     func configure(_ configuration: CaptureConfiguration) async throws

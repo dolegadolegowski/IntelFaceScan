@@ -2,11 +2,22 @@
 //
 // IntelFaceScanHelper - the camera helper process (docs/HELPER.md, docs/PROTOCOL.md).
 //
-//   IntelFaceScanHelper --socket <path> --uid <uid> --gid <gid> --parent-pid <pid>            live camera (root)
+//   IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> [--gid <gid>] [--no-usb-release]   live camera
 //   IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> --playback <file> [--no-real-time]
 //   IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> --fake [--fake-row-padding <bytes>]
-//   IntelFaceScanHelper --probe ...                                                            measurements (root)
-//   IntelFaceScanHelper --release [-w]                                                         hand cameras back
+//   IntelFaceScanHelper --probe ...                                                            measurements
+//   IntelFaceScanHelper --release [-w]                                                         hand cameras back (root)
+//
+// The live camera runs in two ways:
+// * As the user, started directly by the app. The patched librealsense reaches the camera through the RealSense
+//   camera service (realsense-usbd, a root LaunchDaemon shared by RealSense applications), which owns the USB device
+//   and hands it back to macOS itself a few seconds after the last program let go of it. Nothing here needs root, and
+//   the helper never re-enumerates USB devices.
+// * As root, started through the administrator prompt: the path for a Mac where the service cannot be used.
+//   librealsense opens the USB device in this process, and the helper re-enumerates it when the session ends so that
+//   macOS gets its drivers back. --no-usb-release skips that: the app passes it when the service is running but does
+//   not admit this user, because root's librealsense then goes through the service too, and a re-enumeration would
+//   pull the camera away from it.
 
 #include "capture_engine.h"
 #include "fake_engine.h"
@@ -52,6 +63,7 @@ struct Options
     bool real_time_flag = false;
     ifs::FakeOptions fake;
     bool padding_flag = false;
+    bool no_usb_release = false;
     bool help = false;
     bool version = false;
 };
@@ -59,13 +71,20 @@ struct Options
 void usage( FILE * out )
 {
     std::fprintf( out,
-                  "usage: IntelFaceScanHelper --socket <path> --uid <uid> --gid <gid> --parent-pid <pid>\n"
+                  "usage: IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> [--gid <gid>] "
+                  "[--no-usb-release]\n"
                   "       IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> --playback <file> "
                   "[--no-real-time]\n"
                   "       IntelFaceScanHelper --socket <path> --uid <uid> --parent-pid <pid> --fake "
                   "[--fake-row-padding <bytes>]\n"
                   "       IntelFaceScanHelper --probe ...\n"
                   "       IntelFaceScanHelper --release [-w]\n"
+                  "The first form is the live camera. As the user (--uid is the caller) it uses the camera through "
+                  "the\n"
+                  "RealSense camera service. As root (the administrator path) it opens the USB device itself and "
+                  "hands the\n"
+                  "camera back to macOS when the session ends (USB re-enumeration), unless --no-usb-release is "
+                  "given.\n"
                   "Started by IntelFaceScan; see docs/HELPER.md.\n" );
 }
 
@@ -171,6 +190,11 @@ bool parse_args( int argc, char ** argv, Options & o, std::string & error )
             if( ! once( has_fake ) )
                 return false;
         }
+        else if( arg == "--no-usb-release" )
+        {
+            if( ! once( o.no_usb_release ) )
+                return false;
+        }
         else
         {
             error = "unknown argument: " + arg;
@@ -195,6 +219,11 @@ bool parse_args( int argc, char ** argv, Options & o, std::string & error )
         error = "--fake-row-padding needs --fake";
         return false;
     }
+    if( o.no_usb_release && o.mode != ifs::HelperMode::live )
+    {
+        error = "--no-usb-release is only for the live camera";
+        return false;
+    }
     if( ! has_socket || ! o.has_uid || ! has_parent )
     {
         error = "--socket, --uid and --parent-pid are required";
@@ -208,23 +237,26 @@ bool parse_args( int argc, char ** argv, Options & o, std::string & error )
     return true;
 }
 
-// Root runs the camera; anything that only reads files or makes frames up never needs it.
+// Only the live camera may run as root (the administrator path); anything that only reads files or makes frames up
+// never does. Every helper that is not root, the live one included (the RealSense camera service path), must be run
+// by the user named with --uid: the socket checks then tie it to that user's app.
 int check_privileges( const Options & o )
 {
-    if( o.mode == ifs::HelperMode::live )
+    if( ::geteuid() == 0 || ::getuid() == 0 )
     {
+        if( o.mode != ifs::HelperMode::live )
+        {
+            std::fprintf( stderr, "IntelFaceScanHelper: refusing to run %s mode as root\n", ifs::mode_name( o.mode ) );
+            return kExitNoPermission;
+        }
         if( ::geteuid() != 0 )
         {
-            std::fprintf( stderr, "IntelFaceScanHelper: the live camera needs root (IntelFaceScan asks for the "
-                                  "administrator password)\n" );
+            // Root that gave up its effective user ID could take it back: neither the user's helper nor root's.
+            std::fprintf( stderr, "IntelFaceScanHelper: the real user ID is root but the effective one is not; run "
+                                  "the live camera as the user or as root\n" );
             return kExitNoPermission;
         }
         return 0;
-    }
-    if( ::geteuid() == 0 || ::getuid() == 0 )
-    {
-        std::fprintf( stderr, "IntelFaceScanHelper: refusing to run %s mode as root\n", ifs::mode_name( o.mode ) );
-        return kExitNoPermission;
     }
     if( o.uid != ::getuid() )
     {
@@ -232,6 +264,15 @@ int check_privileges( const Options & o )
         return kExitNoPermission;
     }
     return 0;
+}
+
+// True when this live helper hands the camera back to macOS itself at the end (USB re-enumeration): it runs as root,
+// so librealsense may have captured the USB device in this process, and the app did not say that the RealSense camera
+// service owns the camera (--no-usb-release). A helper of the user never does: its librealsense got the camera from
+// the service, which hands it back itself, and only root can re-enumerate a device.
+bool releases_usb( const Options & o )
+{
+    return o.mode == ifs::HelperMode::live && ::geteuid() == 0 && ! o.no_usb_release;
 }
 
 ifs::HelperService::EngineFactory make_factory( const Options & o )
@@ -332,7 +373,8 @@ int run_session( const Options & o )
     ifs::HelperService service( connection, o.mode, std::move( factory ), o.real_time );
 
     // From here on every way out, an exception included (e.g. bad_alloc while framing a reply), goes through the
-    // shutdown sequence: a root helper that skipped it would leave the camera captured until it is re-plugged.
+    // shutdown sequence: a root helper that skipped it would leave the camera captured until it is re-plugged (a
+    // helper of the user leaves that to the camera service, which notices that its client is gone).
     std::string reason;
     int status = 0;
     try
@@ -371,7 +413,10 @@ int run_session( const Options & o )
         status = kExitSoftware;
     }
     connection.drop_pending_framesets();
-    if( o.mode == ifs::HelperMode::live )
+    if( o.mode == ifs::HelperMode::live && ::geteuid() == 0 && o.no_usb_release )
+        log( "info", "the camera is not re-enumerated (--no-usb-release): the RealSense camera service hands it "
+                     "back to macOS" );
+    if( releases_usb( o ) )
     {
         // After shutdown_engine(): the librealsense context is gone, nothing uses the device any more. Every
         // RealSense device without a macOS driver is released, not only the one captured here: librealsense does not
@@ -402,8 +447,9 @@ int run_session( const Options & o )
     return status;
 }
 
-// `--probe` on the live camera: the camera is captured from the macOS drivers like in a session, so it is handed back
-// the same way afterwards, whatever the probe's outcome (Ctrl-C included: the probe stops cleanly on SIGINT).
+// `--probe` on the live camera. As root the camera is captured from the macOS drivers like in a session of the
+// administrator path, so it is handed back the same way afterwards, whatever the probe's outcome (Ctrl-C included:
+// the probe stops cleanly on SIGINT). As the user the probe works through the RealSense camera service.
 int run_probe_tool( int argc, char ** argv )
 {
     bool live = false;
@@ -416,7 +462,8 @@ int run_probe_tool( int argc, char ** argv )
     {
         std::fprintf( stderr, "probe: internal error\n" );
     }
-    // Without root nothing could be captured (libusb needs it), and a re-enumeration would fail anyway.
+    // Not root: this process captured nothing. The probe either went through the RealSense camera service, which
+    // hands the camera back itself, or could not open the camera at all; and only root can re-enumerate a device.
     if( live && ::geteuid() == 0 )
     {
         ifs::UsbReleaseResult r;

@@ -1,8 +1,10 @@
 # License: Apache 2.0. See LICENSE file in root directory.
 #
-# Builds the patched librealsense SDK (cached), the camera helper and the Swift package, runs the test suites
-# (no camera: synthetic data and generated datasets), smoke-tests ifscan, builds the app with scripts/build.sh and
-# smoke-tests the bundle (signature, bundled helper and librealsense, no absolute build paths).
+# Builds the patched librealsense SDK (cached), the RealSense camera service daemon, the camera helper and the Swift
+# package, runs the test suites (no camera: synthetic data and generated datasets; the camera service is never
+# installed on the runner: its installer runs as dry runs into a temporary folder), smoke-tests ifscan, builds the
+# app with scripts/build.sh and smoke-tests the bundle (signature, bundled helper, librealsense and camera service
+# files, no absolute build paths).
 # Read-only token, no secrets: safe for pull requests from forks.
 
 name: CI
@@ -66,9 +68,10 @@ jobs:
         run: scripts/test-build-scripts.sh
 
       # The SDK build takes most of the job: cache build/sdk/install keyed on the librealsense submodule commit, the
-      # patches and the build script. Restore and save are separate steps so a failing test does not lose the cache.
-      # The install carries build-sdk.sh's input stamp (.ifs-sdk-inputs: the same commit, patches and script), so a
-      # restored SDK counts as current without any file time games.
+      # patches (patches/ and the camera service client in the vendored kit) and the build scripts. Restore and save
+      # are separate steps so a failing test does not lose the cache. The install carries build-sdk.sh's input stamp
+      # (.ifs-sdk-inputs: the same commit, patches and script), so a restored SDK counts as current without any file
+      # time games, and the static libusb the camera service daemon is linked against (install/libusb).
       - name: Compute the SDK cache key
         id: sdk-key
         run: |
@@ -79,8 +82,8 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: build/sdk/install
-          key: librealsense-v1-${{ runner.os }}-${{ runner.arch }}-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ steps.sdk-key.outputs.librealsense }}-${{ hashFiles('patches/**', 'scripts/build-sdk.sh', 'scripts/apply-patches.sh') }}
-      - name: Build librealsense 2.58.4 with the macOS patches
+          key: librealsense-v1-${{ runner.os }}-${{ runner.arch }}-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ steps.sdk-key.outputs.librealsense }}-${{ hashFiles('patches/**', 'third_party/realsense-usbd/librealsense/**', 'scripts/build-sdk.sh', 'scripts/apply-patches.sh') }}
+      - name: Build librealsense 2.58.4 with the macOS patches and the camera service client
         env:
           SDK_CACHE_HIT: ${{ steps.sdk-cache.outputs.cache-hit }}
         run: |
@@ -98,6 +101,22 @@ jobs:
           path: build/sdk/install
           key: ${{ steps.sdk-cache.outputs.cache-primary-key }}
 
+      # The RealSense camera service the app carries (third_party/realsense-usbd, a copy of the kit whose home is
+      # realsense-viewer-macos): the kit's script builds the daemon against the static libusb of the SDK install, the
+      # way scripts/build.sh does. The daemon's own tests run in the kit's repository; here the kit's test of what an
+      # application ships and runs: the installer, the uninstaller, the manifest script and ensure-camera-access.sh
+      # --check, without root (dry runs into a temporary folder; nothing is installed on the runner).
+      - name: Build the camera service daemon (realsense-usbd)
+        run: |
+          set -euo pipefail
+          third_party/realsense-usbd/build-daemon.sh build/usbd \
+            --libusb "$PWD/build/sdk/install/libusb/lib/libusb-1.0.a" \
+            --librealsense-src third_party/librealsense \
+            --deployment-target "$MACOSX_DEPLOYMENT_TARGET" --daemon-only
+          build/usbd/realsense-usbd --version
+      - name: Test the camera service installer scripts (dry runs, no root)
+        run: third_party/realsense-usbd/tests/test-camera-access.sh build/usbd/realsense-usbd
+
       - name: Build the camera helper
         run: |
           set -euo pipefail
@@ -106,7 +125,10 @@ jobs:
             -DIFS_HELPER_TESTS=ON
           cmake --build build/helper -j "$(sysctl -n hw.ncpu)"
 
-      - name: Run the capture engine tests (synthetic recordings, no camera)
+      # capture-tests: the capture engine on synthetic recordings. helper-tests: the recording spool, and the helper
+      # binary itself run as the runner's user: command line, exit status, and a live session without a camera (the
+      # camera service path: no root, no USB re-enumeration).
+      - name: Run the helper tests (no camera, no root)
         run: ctest --test-dir build/helper --output-on-failure
 
       - name: Build the Swift package
@@ -159,13 +181,13 @@ jobs:
           "$ifscan" info build/ci/ground_truth.obj
 
       # The documented one-command build (docs/ARCHITECTURE.md, "Build"): its tool checks, the SDK (restored above),
-      # the helper, the release Swift build and the app bundle.
+      # the camera service daemon, the helper, the release Swift build and the app bundle.
       - name: Build the app with scripts/build.sh
         id: app
         if: ${{ !cancelled() && steps.swift-build.outcome == 'success' }}
         run: scripts/build.sh
 
-      - name: Smoke-test the app bundle (bundled helper, librealsense and ifscan)
+      - name: Smoke-test the app bundle (bundled helper, librealsense, camera service and ifscan)
         if: ${{ !cancelled() && steps.app.outcome == 'success' }}
         run: |
           set -euo pipefail
@@ -175,6 +197,42 @@ jobs:
           otool -L "$app/Contents/Helpers/IntelFaceScanHelper" > build/ci/helper-libs.txt
           grep -q '@rpath/librealsense2' build/ci/helper-libs.txt
           "$app/Contents/Helpers/IntelFaceScanHelper" --version
+          # The camera service as the app finds it (scripts/bundle-app.sh already checked the manifest against the
+          # signed daemon): the files, the daemon's version line, and the two things the app does with them. The
+          # check asks the bundled daemon about the installed service: none on the runner, exit status 10 (--check
+          # never installs and never asks for a password). The installer, called with the sources the app passes,
+          # accepts the bundled daemon and manifest in a dry run into a folder; a runner whose folders fail the
+          # installer's trust rule would end it with status 3 after writing the same files, which is not this
+          # bundle's fault.
+          usbd="$app/Contents/Helpers/realsense-usbd"
+          kit="$app/Contents/Resources/realsense-usbd"
+          label=io.github.dolegadolegowski.realsense-usbd
+          "$usbd" --version | tee build/ci/usbd-version.txt
+          grep -Eq '^realsense-usbd [0-9]+ protocol [0-9]+-[0-9]+$' build/ci/usbd-version.txt
+          for f in install-camera-access.sh uninstall-camera-access.sh ensure-camera-access.sh; do
+            test -x "$kit/$f"
+          done
+          plutil -lint "$kit/service.plist"
+          rc=0
+          "$kit/ensure-camera-access.sh" --check || rc=$?
+          if [ "$rc" != 10 ]; then
+            echo "::error::ensure-camera-access.sh --check ended with $rc, expected 10 (not installed)"
+            exit 1
+          fi
+          rc=0
+          "$kit/install-camera-access.sh" --dry-run --root "$PWD/build/ci/usbd-root" \
+            --source "$app/Contents/Helpers" --source "$kit" || rc=$?
+          if [ "$rc" = 3 ]; then
+            echo "::warning::the camera service installer reported trust failures for the runner's folders (dry run)"
+          elif [ "$rc" != 0 ]; then
+            echo "::error::install-camera-access.sh --dry-run ended with $rc"
+            exit 1
+          fi
+          installed="build/ci/usbd-root/Library"
+          cmp "$usbd" "$installed/PrivilegedHelperTools/$label"
+          test -f "$installed/LaunchDaemons/$label.plist"
+          test "$(plutil -extract DaemonCDHash raw "$installed/Application Support/$label/usbd.plist")" \
+            = "$(plutil -extract DaemonCDHash raw "$kit/service.plist")"
           # Shipped binaries must not contain absolute build paths (they carry the builder's user name): __FILE__ in
           # C/C++ code, the linker's debug map (bundle-app.sh strips it). -a: macOS grep skips binary files otherwise.
           if grep -rlaF "$HOME/" "$app/Contents"; then

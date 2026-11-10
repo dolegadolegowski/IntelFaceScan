@@ -12,24 +12,40 @@ IntelFaceScan does a 3D scan of a human head with an Intel RealSense D455 (USB�
 │   CameraKit ── AF_UNIX socket (docs/PROTOCOL.md) ──┐   graph, TSDF, MC, UV,    │
 └────────────────────────────────────────────────────┼───  texture, OBJ/PLY) ────┘
                                                      │
-┌────────── Contents/Helpers/IntelFaceScanHelper (root, live camera) ─────────────┐
+┌─────────────── Contents/Helpers/IntelFaceScanHelper (user) ─────────────────────┐
 │ IPC + security (main) ─ CaptureEngine (librealsense 2.58.4 + macOS patches)    │
-│ streams, presets, filters, align, IMU, recording/playback, USB capture/release │
+│ streams, presets, filters, align, IMU, recording/playback                      │
+└────────────────────────────────────────────────────┬─────────────────────────────┘
+                                                     │ XPC (live camera only)
+┌──── realsense-usbd: the shared RealSense camera service (root LaunchDaemon) ────┐
+│ owns the camera over libusb for every RealSense application; USB capture and   │
+│ hand-back; installed once (docs/CAMERA-SERVICE.md); not IntelFaceScan's code   │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 * **Only the helper links librealsense.** macOS attaches UVCAssistant/HID drivers to the camera; libusb has to
-  capture the USB device, which only root may do. The helper is started with the standard administrator
-  prompt (`do shell script … with administrator privileges`, like the realsense-viewer-macos launcher).
+  capture the USB device, which only root may do. That is the job of the **RealSense camera service**
+  (`realsense-usbd`, vendored in `third_party/realsense-usbd`): the helper runs as the user and its patched
+  librealsense reaches the camera through the service over XPC. At the start of a live session the app checks
+  whether the service runs and installs it if not (an administrator's name and password, once);
+  [CAMERA-SERVICE.md](CAMERA-SERVICE.md) has the whole flow.
+* **Fallback: the helper as root, for one session.** Where the service cannot be used (installation cancelled or
+  failed, service switched off, not the user at the Mac's screen, a build without the service files) the app
+  offers the old way: the helper is started with the standard administrator prompt (`do shell script … with
+  administrator privileges`) and its librealsense captures the USB device itself ([HELPER.md](HELPER.md)).
 * **The app never runs as root.** All UI, Vision, reconstruction and file I/O happen in the app as the user.
 * **Playback** of `.db3`/`.bag` recordings uses the same helper binary started directly as the user (no USB,
-  no password), so the post-processing chain is identical for live and recorded data.
-* The camera is captured once per helper lifetime (patched librealsense) and handed back to macOS (USB
-  re-enumeration, as `rs-macos-release`) when the helper exits – on `QUIT`, socket EOF, parent exit, or
-  SIGINT/SIGTERM/SIGHUP. Never `kill -9` the helper during a camera command (can hang the firmware until
-  re-plugged).
+  no service, no password), so the post-processing chain is identical for live and recorded data.
+* The camera goes back to macOS when the helper exits – on `QUIT`, socket EOF, parent exit, or
+  SIGINT/SIGTERM/SIGHUP. Through the service: the service hands it back a few seconds after its last client let
+  go. Root helper: it is captured once per helper lifetime (patched librealsense) and the helper re-enumerates the
+  USB device itself (as `rs-macos-release`). Never `kill -9` the root helper during a camera command (can hang the
+  firmware until re-plugged).
 
 ### Security rules for the root helper
+
+These bind the helper on the administrator path, where it runs as root; started as the user it follows them all
+the same. The camera service has its own rules (`third_party/realsense-usbd/DESIGN.md`).
 
 1. Accept commands only from the app: socket in a `0700` directory owned by the user, peer uid and pid checked,
    strict message validation (sizes, JSON object, known fields), unknown messages are errors.
@@ -45,10 +61,11 @@ IntelFaceScan does a 3D scan of a human head with an Intel RealSense D455 (USB�
 | Module | Path | Language | Owner (work stream) |
 |---|---|---|---|
 | SDK build + patches | `third_party/librealsense`, `patches/`, `scripts/build-sdk.sh`, `scripts/apply-patches.sh` | CMake | platform |
+| RealSense camera service kit (daemon, installer scripts, librealsense client patch, Swift client) | `third_party/realsense-usbd` (a copy of `macos/broker` from realsense-viewer-macos: never edited here, updated with `scripts/sync-camera-service.sh`), `docs/CAMERA-SERVICE.md` | C++/bash/Swift | vendored |
 | Helper main, IPC, security, USB release, fake camera | `helper/CMakeLists.txt`, `helper/src/main.cpp`, `helper/src/ipc_*`, `helper/src/security_*`, `helper/src/usb_release.*`, `helper/src/fake_engine.*`, `docs/HELPER.md` | C++ | platform |
 | Capture engine + measurements | `helper/src/capture_*`, `helper/src/probe.*`, `helper/tests/*` (capture tests, `make-test-recording`), `docs/CAMERA.md` | C++ | capture |
 | Wire protocol | `Sources/IFSProtocol`, `docs/PROTOCOL.md` | C | shared (frozen) |
-| Camera sources (live/playback) | `Sources/CameraKit/Helper/*` | Swift | platform |
+| Camera sources (live/playback), camera service decision | `Sources/CameraKit/Helper/*`, `Sources/CameraKit/CameraService.swift` | Swift | platform |
 | Shared types | `Sources/CameraKit/CameraTypes.swift`, `CameraSource.swift`, `Sources/ScanKit/ScanTypes.swift`, `Sources/ReconKit/ReconTypes.swift`, `Sources/ReconKit/CoreBridge.swift`, `Sources/FaceReconCore/include/*.h`, `Sources/FaceReconCore/src/common/*` | Swift/C | shared (frozen) |
 | Guided scan (Vision, state machine, quality, coverage) | `Sources/ScanKit/Guidance/*` | Swift | ui-scan |
 | SwiftUI app (except the 3D viewer) | `Sources/IntelFaceScanApp/*` | Swift | ui-scan |
@@ -150,9 +167,12 @@ mask/000000.png    8-bit head mask (optional)
 
 ## Build
 
-`scripts/build.sh`: tool checks → submodules → patched librealsense (`scripts/build-sdk.sh`) → helper (CMake) →
-Swift package (`swift build -c release`) → `build/IntelFaceScan.app` (`scripts/bundle-app.sh`: helper in
-`Contents/Helpers`, `librealsense2.X.Y.dylib` in `Contents/Frameworks`, `ifscan` in `Contents/MacOS`, NOTICE and the
+`scripts/build.sh`: tool checks → submodules → patched librealsense (`scripts/build-sdk.sh`; the patches are
+`patches/` plus the camera service client from the kit) → camera service daemon (the kit's `build-daemon.sh`, into
+`build/usbd`) → helper (CMake) → Swift package (`swift build -c release`; the kit's Swift client is the target
+`RealSenseCameraClient`) → `build/IntelFaceScan.app` (`scripts/bundle-app.sh`: helper and `realsense-usbd` in
+`Contents/Helpers`, the service's installer scripts and manifest in `Contents/Resources/realsense-usbd`,
+`librealsense2.X.Y.dylib` in `Contents/Frameworks`, `ifscan` in `Contents/MacOS`, NOTICE and the
 third-party licenses in `Contents/Resources`, ad-hoc signature). It prints the time of each step: from a fresh clone
 on an M3 Ultra (28 cores, Command Line Tools only) 122–153 s in five fresh-clone builds – submodules 0–21 s (about
 20 s when `scripts/build.sh` fetches them, 0–1 s after `git clone --recurse-submodules`, which then takes those 20 s

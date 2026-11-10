@@ -2,6 +2,7 @@
 
 #include "security_recording.h"
 
+#include <sys/file.h>
 #include <sys/param.h>
 #include <sys/stat.h>
 
@@ -95,9 +96,24 @@ void remove_tree( int parent, const std::string & name, int depth )
 constexpr const char * kSpoolPrefix = "ifs-recording.";
 constexpr time_t kStaleSpoolSeconds = 24 * 60 * 60;
 
-// Spools of helpers that ended in the middle of a recording (SIGKILL, crash) stay in a directory only root can
-// enter: invisible to the user, and a recording can be gigabytes. Removed when the next recording starts. Only a
-// helper that owns the camera records, so no other live recording can be using an old spool.
+// Opens a spool directory and locks it exclusively without waiting. Invalid when it cannot be opened or another
+// descriptor holds the lock: the spool of a helper that is still running.
+UniqueFd lock_spool( int parent, const char * name )
+{
+    UniqueFd fd( ::openat( parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC ) );
+    if( fd.valid() && ::flock( fd.get(), LOCK_EX | LOCK_NB ) != 0 )
+    {
+        const int flock_errno = errno;
+        fd.reset();
+        errno = flock_errno;
+    }
+    return fd;
+}
+
+// Spools of helpers that ended in the middle of a recording (SIGKILL, crash) stay behind, and a recording can be
+// gigabytes; root's are in a directory the user cannot even see. Removed when the next recording starts. Helpers of
+// one user share the private directory (the live helper on the camera service path, the fake camera, a second app),
+// so a spool is only removed when no running helper holds its lock, however old it is.
 void remove_stale_spools( const std::string & base )
 {
     UniqueFd dir( ::open( base.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC ) );
@@ -124,7 +140,11 @@ void remove_stale_spools( const std::string & base )
     }
     ::closedir( d );
     for( const std::string & name : stale )
-        remove_tree( dir.get(), name, 4 );
+    {
+        UniqueFd lock = lock_spool( dir.get(), name.c_str() );
+        if( lock.valid() )
+            remove_tree( dir.get(), name, 4 );
+    }
 }
 
 bool regular_file( const std::string & path )
@@ -207,7 +227,15 @@ std::unique_ptr< RecordingSpool > RecordingSpool::create( const std::string & fo
     if( ! ::mkdtemp( buf.data() ) )
         fail( "cannot create the recording directory: " + errno_text() );
     std::string dir( buf.data() );
-    return std::unique_ptr< RecordingSpool >( new RecordingSpool( dir, dir + "/recording." + format ) );
+    UniqueFd lock = lock_spool( AT_FDCWD, dir.c_str() );
+    if( ! lock.valid() )
+    {
+        const std::string reason = errno_text();
+        ::rmdir( dir.c_str() );
+        fail( "cannot lock the recording directory: " + reason );
+    }
+    return std::unique_ptr< RecordingSpool >(
+        new RecordingSpool( dir, dir + "/recording." + format, std::move( lock ) ) );
 }
 
 RecordingSpool::~RecordingSpool()
@@ -264,6 +292,7 @@ void RecordingSpool::remove()
         return;
     removed_ = true;
     remove_tree( AT_FDCWD, dir_, 4 );
+    lock_.reset();
 }
 
 }  // namespace ifs

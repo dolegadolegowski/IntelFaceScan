@@ -3,6 +3,9 @@
 Everything except the live camera is tested without hardware: unit tests per module, procedurally rendered head
 scans with exact ground truth, the raw-session dataset format, accuracy metrics, the `ifscan` command line tool,
 and end-to-end reconstructions. Real recordings are used when you point the tests at them; they never live in git.
+No test needs the RealSense camera service, installs it or shows an administrator prompt: the service's state check
+and installer are replaced by stand-ins, and its installer scripts run as dry runs
+([CAMERA-SERVICE.md](CAMERA-SERVICE.md), "Development and testing without a camera").
 
 ## Running the tests
 
@@ -19,7 +22,7 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
   on an M3 Ultra (28 cores, Command Line Tools), November 2026: ScanKitTests 127 tests ~27 s (Vision),
   ReconKitTests 88 tests ~75–100 s (the longest single test sets it: the combined-imperfections reconstruction of
   `Pipeline robustness`; the two 1280×800 reconstructions of `Pipeline wide side views` run beside it),
-  IntelFaceScanAppTests 40 tests ~8 s, FaceReconCoreTests 93 tests ~9 s, CameraKitTests 77 tests ~27 s (most of it
+  IntelFaceScanAppTests 58 tests ~8 s, FaceReconCoreTests 93 tests ~9 s, CameraKitTests 96 tests ~27 s (most of it
   `Helper playback backpressure`); about 2.5–3 min in all when nothing changed, about 3.5 min from a clean debug
   build (about 40 s of it building).
 * The reconstruction tests of ReconKitTests (the suites and tests marked `.heavyReconstruction`,
@@ -43,13 +46,24 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
   CameraKit helper integration tests when `build/helper/IntelFaceScanHelper` is not built (or `IFS_HELPER_PATH` is
   not set); the playback ones also need `build/helper/tests/make-test-recording` (`-DIFS_HELPER_TESTS=ON`).
   `IFS_HELPER` is the variable `ifscan` and the recording tests use.
-* C++ capture engine tests of the helper (synthetic recordings, no camera): build the helper with
-  `-DIFS_HELPER_TESTS=ON`, then `ctest --test-dir build/helper --output-on-failure` (one ctest entry running the 28
-  `capture-tests`, ~25 s; 27 run by default, because the benchmark is skipped unless run as
-  `build/helper/tests/capture-tests bench`).
+* C++ tests of the helper (no camera, no camera service, no root): build the helper with
+  `-DIFS_HELPER_TESTS=ON`, then `ctest --test-dir build/helper --output-on-failure`. There are two ctest entries.
+  `capture-tests` is the capture engine on synthetic recordings: 29 cases, ~25 s; 28 run by default, because the
+  benchmark is skipped unless run as `build/helper/tests/capture-tests bench`. `helper-tests` has 6 cases and takes
+  under a second: the recording spool that helpers of one user share, the helper's command line and exit status
+  (live mode accepted as the user, `--no-usb-release` for the live camera only), and a live session as the user
+  from `HELLO` to `BYE` that never releases USB. The four cases that run the helper take the binary from
+  `IFS_HELPER_UNDER_TEST`, which ctest sets; `build/helper/tests/helper-tests` run by hand skips them without it.
 * The SDK bookkeeping of the build scripts (moving between versions of `patches/`, the SDK's input stamp):
   `scripts/test-build-scripts.sh`, against a stand-in librealsense in a temporary folder (no network, ~10 s).
-* Do not run anything with `sudo` for tests; only the live camera needs administrator rights.
+* The camera service's installer, uninstaller, manifest script and `ensure-camera-access.sh --check`, as dry runs
+  into a temporary folder (the kit's own test): `third_party/realsense-usbd/tests/test-camera-access.sh
+  build/usbd/realsense-usbd` (`scripts/build.sh` builds that daemon). The daemon's own tests belong to the kit's
+  home repository, realsense-viewer-macos.
+* Do not run anything with `sudo` for tests, and nothing in a test may install the camera service or prompt: the
+  live camera is the only thing that needs the service or administrator rights. A test that would start the
+  administrator launch gets a stand-in (`HelperCameraSession.privilegedLauncher`), and `AppModel` and
+  `LiveCameraSource` take a `CameraService` built from closures.
 
 | Target / file | What it checks |
 |---|---|
@@ -59,10 +73,14 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
 | `ReconKitTests/SyntheticScanTests` | synthetic ground truth: depth equals an independent brute-force ray cast of the ground-truth mesh, back-projected depth lies on the surface, noise statistics, invalid pixels at silhouettes, `HeadPose` sign conventions, determinism, closed outward mesh |
 | `ReconKitTests/CLIArgumentTests`, `CLIToolTests` | `ifscan` parsing (32 invalid command lines), commands run in-process, exit codes, outputs checked before any work (unwritable paths, `--save-dataset` onto the input), ground-truth evaluation of a scan that does not start with the frontal pose (world frames aligned), `synthetic-camera` stopping at `--time-limit`, OBJ dialects |
 | `ReconKitTests/EndToEndSyntheticTests` | synthetic 1280×800 scan → `ReconstructionPipeline` (decimated to 60k triangles before texturing) → rotation error mean < 1°, worst frame < 1.5°, head misalignment < 5 mm, surface distance of the measured part (`ReconMesh.measuredSurface`: without the synthesized closing of the back of the head) mean < 1 mm and p95 < 2.5 mm, export frame upright; the same through `ifscan reconstruct`, and the exported OBJ measured through `--report` matches the report's whole-mesh distance. Enabled by `CoreAvailability` (the core is integrated); recordings from `IFS_TEST_RECORDINGS` |
+| `CameraKitTests/CameraServiceTests` | the RealSense camera service as the app uses it, without the service: what to do about every state (`CameraService.advice(for:)`: use it, install, explain; where the administrator path is allowed and where it needs `--no-usb-release`), the client's state from a probe result, the command line policy (never installs; one line for stderr), stand-in closures for probe and installer, where the service files are taken from (bundle, `$IFS_CAMERA_SERVICE_KIT`, the executable's bundle, `build/IntelFaceScan.app`) and the rule that skips a kit others can replace, and the installer's command line run through `osascript` and the shell without the administrator clause (odd paths, clean environment, failure and cancellation) |
+| `IntelFaceScanAppTests/AppCameraServiceTests` | "Live camera" in `AppModel` with a scripted service and a stand-in camera: ready → the helper as the user and no password text; missing, too old or not answering → installed once, then used; cancelled, failed, refused location, installed but unusable → the dialog and its buttons; switched off → never reinstalled, Login Items settings offered; another session → the administrator path without USB release; camera ban and full service → no administrator path; a build without service files; the status command; every new string in English and Polish |
 | `IntelFaceScanAppTests` | the app executable (`@testable import`): `AppModel` lifecycle with the fake-camera helper (skipped without `build/helper/IntelFaceScanHelper`), settings mapping and loading older stored settings, the scan sounds (which cue when, without playing; one tick per reached pose in any order), the banner listing the open directions with no active pose (English and Polish, the last after "or", the sides person-relative, no list beyond four), the pose guide's arrows only for that instruction and the skip button naming its pose, and the save panel's doubled extension, English/Polish strings, report notes and Polish plurals, result export success and failure paths, the SceneKit preview rendered offscreen; `IFS_APP_FULL_SCAN=1` runs the full guided synthetic scan, reconstruction and OBJ export through `AppModel`. A debug build renders the UI's screens to PNG: `$(swift build --show-bin-path)/IntelFaceScan --render-snapshots <dir>` (add `-AppleLanguages '(pl)'` for Polish); release builds, including the bundled app, ignore the option |
 
 The other suites belong to the modules' work streams: `CameraKitTests` (wire format, JSON, the helper in fake-camera
-mode end to end, session lifecycle, frame broadcasting, playback backpressure, the helper's security checks),
+mode end to end, session lifecycle, the two ways to start the live helper – as the user for the camera service, as
+root after the administrator prompt, whose launcher the tests replace –, frame broadcasting, playback backpressure,
+the helper's security checks),
 `ScanKitTests/Guidance*` (head tracker, masks, quality, scan controller; `Guidance pose recognition`: turns far
 beyond the target, no order after the front pose (a turn toward any unfinished pose makes it the active pose, near
 the front the instruction is to turn in any direction, turned toward a pose beyond its sideways tolerance the hint
@@ -223,9 +241,10 @@ How to record a session that the offline scan can use:
      the app opened, so the recording belongs to you.
    * **RealSense Viewer** from [realsense-viewer-macos](https://github.com/dolegadolegowski/realsense-viewer-macos)
      (same patched librealsense): enable the streams above, press *Record* (`.db3` by default in 2.58, or `.bag`).
-     It asks for the administrator password to capture the camera, and hands it back to macOS when it quits.
-   * **rs-record** (built by `scripts/build-sdk.sh` into `build/sdk/install/bin`): needs root on macOS for USB
-     capture; the default stream profiles differ from the app's, so prefer the app or the viewer.
+     It uses the same camera service as IntelFaceScan (no password once the service is installed).
+   * **rs-record** (built by `scripts/build-sdk.sh` into `build/sdk/install/bin`): reaches the camera through the
+     camera service when it is installed, and needs root without it; the default stream profiles differ from the
+     app's, so prefer the app or the viewer.
 5. Check it: `ifscan info rec.db3` (streams), then `ifscan reconstruct rec.db3 -o /tmp/rec.obj --save-dataset
    /tmp/rec.ifsdataset --report /tmp/rec.json` and look at the accepted keyframes with `ifscan info`.
 
@@ -238,11 +257,16 @@ accepted keyframes each; it needs the helper (`build/helper/IntelFaceScanHelper`
 no secrets. It uses GitHub's `xcode-27` image (Apple Silicon, macOS 27, Xcode 27.x; GitHub names macOS images after
 Xcode since Xcode 27, so there is no `macos-27` label) and selects the newest Xcode 27. Steps: checkout with
 submodules → `scripts/test-build-scripts.sh` → restore `build/sdk/install` from the cache (key: librealsense
-submodule commit + deployment target + hash of `patches/`, `build-sdk.sh`, `apply-patches.sh`) →
+submodule commit + deployment target + hash of `patches/`, the camera service client patch in the kit,
+`build-sdk.sh`, `apply-patches.sh`) →
 `scripts/build-sdk.sh` (a restored SDK carries its input stamp `.ifs-sdk-inputs` and must count as current: a rebuild
-after a cache hit fails the job) → save the cache → helper with its tests (CMake, `-DIFS_HELPER_TESTS=ON`) → `ctest`
+after a cache hit fails the job) → save the cache → the camera service daemon (the kit's `build-daemon.sh`) and the
+kit's installer test (`tests/test-camera-access.sh`: dry runs, nothing is installed on the runner) → helper with its
+tests (CMake, `-DIFS_HELPER_TESTS=ON`) → `ctest`
 → `swift build` → `scripts/test.sh` → `ifscan synth`/`info` smoke test → `scripts/build.sh` (the documented
 one-command build; the SDK comes from the cache) → bundle smoke test (signature, the helper's `@rpath` librealsense,
+the camera service files as the app finds them – the daemon's version line, a state check that reports "not
+installed" without installing or prompting, the installer accepting the bundled daemon and manifest in a dry run –,
 no absolute build paths under `$HOME` in any shipped file, no linker debug map in the bundled Swift executables and
 their dSYMs in `build/dSYMs`, the bundled `ifscan` running `synth` and reading a generated `.db3` through the
 bundled helper) → upload the zipped app. The smoke tests and `scripts/build.sh` also run when a test failed (the job

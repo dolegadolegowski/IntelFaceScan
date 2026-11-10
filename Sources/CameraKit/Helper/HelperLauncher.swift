@@ -1,9 +1,9 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 //
-// Starting the helper. The live camera needs root: the helper runs through
-// `do shell script ... with administrator privileges` (the standard macOS password prompt, as the
-// realsense-viewer-macos launcher does), which blocks until the helper exits, so it runs on its own queue.
-// Playback and the fake camera run the helper directly as the user.
+// Starting the helper. Playback, the fake camera and the live camera through the camera service run the helper
+// directly as the user. The live camera without the service needs root: the helper then runs through
+// `do shell script ... with administrator privileges` (the standard macOS password prompt), which blocks until the
+// helper exits, so it runs on its own queue.
 //
 // The script runs in-process (NSAppleScript) only in an AppKit application (NSApp exists, as in IntelFaceScan.app):
 // there the prompt belongs to the app. Without one - a command line tool, the test runner - an in-process
@@ -30,8 +30,9 @@ final class HelperProcessHandle: @unchecked Sendable {
         condition.withLock { self.process = process }
     }
 
-    /// The helper's own pid when the app started it directly (playback, fake). nil for the privileged helper: the
-    /// administrator launch runs it through a root shell whose pid the app never learns.
+    /// The helper's own pid when the app started it directly (playback, fake, live through the camera service). nil
+    /// for the privileged helper: the administrator launch runs it through a root shell whose pid the app never
+    /// learns.
     var processIdentifier: pid_t? {
         condition.withLock {
             guard let process, process.processIdentifier > 0 else { return nil }
@@ -114,7 +115,10 @@ enum HelperLauncher {
     static let authorizationPrompt =
         "IntelFaceScan needs administrator access to control the RealSense camera over USB."
 
-    private static let authorizationQueue = DispatchQueue(
+    /// Everything that shows an administrator prompt runs here, one after another: the root helper (for its whole
+    /// life), the release tool, and the camera service's installer (CameraService.install). Two prompts never show
+    /// at once, and the in-process AppleScript always runs in the same kind of place.
+    static let authorizationQueue = DispatchQueue(
         label: "io.github.dolegadolegowski.IntelFaceScan.authorization", qos: .userInitiated)
 
     /// POSIX shell single quoting.
@@ -273,7 +277,7 @@ enum HelperLauncher {
         return (number, String(text[marker.upperBound..<open.lowerBound]))
     }
 
-    /// Runs the helper as the user (playback, fake camera, --release without privileges).
+    /// Runs the helper as the user (playback, fake camera, live through the camera service).
     static func launchAsUser(helper: URL, arguments: [String]) throws -> HelperProcessHandle {
         let handle = HelperProcessHandle()
         let process = Process()

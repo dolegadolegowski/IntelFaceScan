@@ -10,8 +10,11 @@ millimeters** that opens in Blender and macOS Preview (MeshLab should read it to
 > **Status:** the whole pipeline is implemented and tested without a camera (synthetic head rendered at 30 fps and
 > analyzed by Apple Vision, recordings played back through the camera helper, 400+ automated tests). Exported models were checked
 > by importing them in Blender 5.0 and rendering them with macOS Quick Look (what Preview uses); MeshLab has not been
-> tried yet. It has **not yet been run against a physical D455**: the camera measurements in
-> [docs/CAMERA.md](docs/CAMERA.md) are still theoretical. See [Accuracy](#accuracy) and [Limitations](#limitations).
+> tried yet. On a physical D455 the **live camera through the camera service** has been run (2026-11-10: the service
+> installed from the app, color and depth at 30 fps without a password, the camera handed back to macOS afterwards;
+> see [docs/CAMERA-SERVICE.md](docs/CAMERA-SERVICE.md#checked-on-a-d455)). The accuracy of a complete scan has **not
+> yet been validated on the camera**, and the camera measurements in [docs/CAMERA.md](docs/CAMERA.md) are still
+> theoretical. See [Accuracy](#accuracy) and [Limitations](#limitations).
 
 ## Contents
 
@@ -44,8 +47,10 @@ millimeters** that opens in Blender and macOS Preview (MeshLab should read it to
 - **Result:** interactive 3D preview (texture / vertex colors / shaded / wireframe), export OBJ+MTL+PNG in mm,
   optional binary PLY and the raw session (keyframes with depth, masks and poses).
 - **Recording and playback** of `.db3` (ROS 2) and `.bag` files, so a session can be reconstructed again later.
-- **Safe camera handling:** the camera is captured once per session by a small privileged helper and handed back to
-  macOS when the app quits, closes the camera, or receives SIGINT/SIGTERM/SIGHUP.
+- **No password at every session:** the camera is reached through the shared RealSense camera service
+  (`realsense-usbd`), which the app installs once; it hands the camera back to macOS when the app quits, closes the
+  camera, or receives SIGINT/SIGTERM/SIGHUP. Where the service cannot be used, a small privileged helper does the
+  same for one session with the administrator password.
 - English and Polish user interface (follows the system language).
 
 ## Requirements
@@ -65,27 +70,51 @@ scripts/build.sh
 ```
 
 `scripts/build.sh` checks the tools first and tells you what is missing, then builds the patched librealsense
-2.58.4, the camera helper, the Swift app and the bundle `build/IntelFaceScan.app`. From a fresh clone it takes about
+2.58.4, the RealSense camera service daemon (`realsense-usbd`, from the kit in `third_party/realsense-usbd`), the
+camera helper, the Swift app and the bundle `build/IntelFaceScan.app`. From a fresh clone it takes about
 2–2.5 minutes on an M3 Ultra; a rebuild without changes takes seconds. `scripts/package.sh` makes a DMG.
 
 Start the app with `open build/IntelFaceScan.app`, or copy it to `/Applications`. The app is signed ad hoc (not
-notarized): on another Mac, open it the first time with right-click → **Open**.
+notarized): on another Mac, open it the first time with right-click → **Open**. To install the camera service the
+app has to be where no other user can change it: copy it to `/Applications` from an administrator's account (a
+build in an administrator's own folder also qualifies; a copy run straight from a download does not).
 
 ## Permissions and the camera
 
-- **Administrator password.** macOS attaches its own drivers to the camera. Taking the USB device over requires root,
-  so when you choose **Live camera** macOS shows the standard administrator prompt. Only the small camera helper
-  (`Contents/Helpers/IntelFaceScanHelper`) runs as root; the app itself, Vision, the reconstruction and all file
-  writing run as you. The helper accepts commands only from the app over a private socket, never opens paths the app
-  sends, and writes recordings into a file the app opened. Details: [docs/HELPER.md](docs/HELPER.md).
-- **Recordings, datasets and the synthetic demo** need no password.
+- **The camera service, installed once.** macOS attaches its own drivers to the camera, and only root may take the
+  USB device over from them. IntelFaceScan leaves that to the **RealSense camera service** (`realsense-usbd`), a
+  small system service shared by RealSense applications (RealSense Viewer for macOS uses the same one). The app
+  checks whether the service runs each time you choose **Live camera**, and not when the app is started. If the
+  service is not there, which normally happens only the first time, macOS asks for **an administrator's name and
+  password, once**, and the app installs it. From then on *Live camera* starts without a password, and nothing of
+  IntelFaceScan runs as root: the app, its camera helper, Vision, the reconstruction and all file writing run as
+  you. If another application already installed a current service, nothing is asked at all. How it works:
+  [docs/CAMERA-SERVICE.md](docs/CAMERA-SERVICE.md).
+- **What is installed.** The daemon `/Library/PrivilegedHelperTools/io.github.dolegadolegowski.realsense-usbd`, its
+  launchd job in `/Library/LaunchDaemons` and its configuration in `/Library/Application Support`; it starts on
+  demand and appears in System Settings > General > Login Items & Extensions. To remove it:
+  `sudo /Applications/IntelFaceScan.app/Contents/Resources/realsense-usbd/uninstall-camera-access.sh` (other
+  RealSense applications lose it too; IntelFaceScan offers to install it again at the next *Live camera*). The menu
+  command **IntelFaceScan > RealSense Camera Service…** shows its state and version whenever no source is open, and
+  installs it from there on request.
+- **Who can use the camera then.** Every program you run while you are logged in at the Mac's screen can use
+  RealSense cameras through the service, without a password, and macOS shows neither a camera prompt nor its camera
+  indicator for it (the service reads the camera over USB, not through the macOS camera framework). One program at
+  a time can use a camera: while another one (RealSense Viewer, for example) streams from it, *Live camera* stops
+  with an error, so stop the camera there first. Other users and remote sessions are not served; a camera ban by
+  device management or Screen Time is honoured.
+- **Without the service.** When the installation is cancelled or fails, the service is switched off, or you are not
+  the user at the screen, the app says so and offers **Use administrator password this time**: the old way, for one
+  session. Only the small camera helper (`Contents/Helpers/IntelFaceScanHelper`) then runs as root; it accepts
+  commands only from the app over a private socket, never opens paths the app sends, and writes recordings into a
+  file the app opened. Details: [docs/HELPER.md](docs/HELPER.md).
+- **Recordings, datasets and the synthetic demo** need neither the service nor a password.
 - **Handing the camera back.** When the app quits (⌘Q, closing the window, `kill -TERM`, Ctrl‑C) or you close the
-  camera, the helper stops the streams and re-enumerates the USB device so macOS takes it back (e.g. FaceTime can use
-  it again). If the app ever crashes and the camera stays unusable, run
+  camera, the helper stops the streams and exits, and the service gives the camera back to macOS a few seconds
+  later (e.g. FaceTime can use it again), also after a crash. On the administrator path the helper re-enumerates
+  the USB device itself; if the app was killed on that path and the camera stays unusable, run
   `sudo build/IntelFaceScan.app/Contents/Helpers/IntelFaceScanHelper --release -w` or unplug and replug it.
-- **Never `kill -9` the helper** while it talks to the camera: the D455 firmware can hang until it is replugged.
-- No other permission is needed: the app does not use the macOS camera framework, so there is no camera privacy
-  prompt.
+- **Never `kill -9` the root helper** while it talks to the camera: the D455 firmware can hang until it is replugged.
 
 ## How to scan
 
@@ -93,9 +122,10 @@ notarized): on another Mac, open it the first time with right-click → **Open**
    rotate; **turn only your head**, keep your shoulders still.
 2. Use **even, diffuse light** (no strong light from one side, no direct sun). Take off glasses; tie back long hair if
    you can (stereo depth sees little of fine hair). Avoid shiny makeup.
-3. Choose **Live camera**, enter the administrator password and wait for the preview. Move until the distance
-   indicator is green: about **0.56–0.71 m** with the default configuration, **0.41–0.56 m** with *Close-range mode* on
-   (the exact range for your camera is shown under the preview).
+3. Choose **Live camera** and wait for the preview (the first time, macOS asks for an administrator's name and
+   password to install the camera service). Move until the distance indicator is green: about **0.56–0.71 m** with
+   the default configuration, **0.41–0.56 m** with *Close-range mode* on (the exact range for your camera is shown
+   under the preview).
 4. Press **Start scan** and look at the camera until the front pose is captured. Then turn your head up, down, left and
    right (and the diagonals if enabled) **in any order**: there is no order to follow. Facing the camera, the
    instruction names the directions still open (more than four: just *in any direction*) and the animated head points to
@@ -159,7 +189,7 @@ meters, the file is in millimeters); the face looks at you in the front view (nu
 
 - In the app: **Record** saves the camera stream as a `.db3` file (ROS 2 format); **Open recording…** plays `.db3` or
   `.bag` (e.g. from realsense-viewer) back through the same post-processing and the same guided scan, without the
-  camera or a password.
+  camera, the camera service or a password.
 - `ifscan` (inside the bundle: `build/IntelFaceScan.app/Contents/MacOS/ifscan`) runs the same pipeline from the
   terminal:
 
@@ -196,7 +226,7 @@ High Density and disparity shift 0 vs 50 on a flat wall and on skin.
 
 ## Limitations
 
-- Not yet validated with a physical D455 (see the status note at the top).
+- The accuracy of a scan is not yet validated with a physical D455 (see the status note at the top).
 - The back of the head is never seen (poses reach ±45° yaw). By default the model is closed there with a smooth
   synthesized surface: plausible, not measured. Turn off *Close the back of the head* (or use `--open-back`) to leave
   it open; small holes are filled either way.
@@ -215,8 +245,9 @@ High Density and disparity shift 0 vs 50 on a flat wall and on skin.
 
 | Library | Used for | Why this one |
 |---|---|---|
-| [librealsense](https://github.com/realsenseai/librealsense) 2.58.4 + macOS patches | camera control, filters, alignment, recording | the official SDK; the patches from [realsense-viewer-macos](https://github.com/dolegadolegowski/realsense-viewer-macos) make it work on Apple Silicon macOS (USB capture once per process, no infinite USB waits, …) |
-| libusb 1.0.30 (static) | USB access for librealsense | what librealsense uses on macOS; linked statically with the Security framework so the bundle has no Homebrew dependency |
+| [librealsense](https://github.com/realsenseai/librealsense) 2.58.4 + macOS patches | camera control, filters, alignment, recording | the official SDK; the patches from [realsense-viewer-macos](https://github.com/dolegadolegowski/realsense-viewer-macos) make it work on Apple Silicon macOS (USB capture once per process, no infinite USB waits, the camera service client, …) |
+| RealSense camera service (`realsense-usbd`) from [realsense-viewer-macos](https://github.com/dolegadolegowski/realsense-viewer-macos) | reaching the camera without root | one root daemon for every RealSense application instead of a root helper and a password per session; vendored unchanged in `third_party/realsense-usbd` (`scripts/sync-camera-service.sh` updates the copy) |
+| libusb 1.0.30 (static) | USB access for librealsense and the camera service | what librealsense uses on macOS; linked statically with the Security framework so the bundle has no Homebrew dependency |
 | Apple Vision | face rectangle, landmarks, head pose, person segmentation | on-device, fast, part of macOS |
 | Metal | TSDF fusion, preview rendering | the native GPU API (no OpenGL); shaders compile at runtime |
 | SceneKit | 3D result preview | native, reads the same mesh data as the export |
@@ -234,14 +265,19 @@ bundle carries them in `Contents/Resources`.
 ## Architecture and docs
 
 ```
-IntelFaceScan.app (you)                                   IntelFaceScanHelper (root, live camera only)
-SwiftUI ─ ScanKit (Vision, guided scan) ─ ReconKit        librealsense 2.58.4 + patches, libusb
+IntelFaceScan.app (you)                                   IntelFaceScanHelper (you)
+SwiftUI ─ ScanKit (Vision, guided scan) ─ ReconKit        librealsense 2.58.4 + patches
      │                                    └ FaceReconCore     streams, presets, filters, align, IMU,
-CameraKit ─────────── AF_UNIX socket (docs/PROTOCOL.md) ──── recording / playback, USB capture + release
+CameraKit ─────────── AF_UNIX socket (docs/PROTOCOL.md) ──── recording / playback
+                                                               │ XPC
+                                          realsense-usbd (root, shared camera service) ── libusb ── camera
 ```
 
+Without the service the helper runs as root for one session and opens the USB device itself.
+
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) – processes, security rules, data flow, conventions
-- [docs/HELPER.md](docs/HELPER.md) – the privileged helper, socket, signals, USB release
+- [docs/CAMERA-SERVICE.md](docs/CAMERA-SERVICE.md) – how the app uses the shared RealSense camera service
+- [docs/HELPER.md](docs/HELPER.md) – the camera helper, socket, signals, the administrator path, USB release
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) – the app ↔ helper wire protocol
 - [docs/CAMERA.md](docs/CAMERA.md) – D455 configuration, theory, measurement procedure
 - [docs/RECONSTRUCTION.md](docs/RECONSTRUCTION.md) – registration, fusion, meshing, measured comparisons
@@ -253,9 +289,11 @@ CameraKit ─────────── AF_UNIX socket (docs/PROTOCOL.md) �
 scripts/test.sh                 # all Swift Testing suites (works with the Command Line Tools only)
 scripts/test.sh --filter ICP    # a subset
 cmake -S helper -B build/helper -DIFS_HELPER_TESTS=ON && cmake --build build/helper -j && ctest --test-dir build/helper
+third_party/realsense-usbd/tests/test-camera-access.sh build/usbd/realsense-usbd   # the service's installer, dry runs
 ```
 
 The **Synthetic demo** source and `ifscan reconstruct synthetic-camera` exercise the whole live flow without a camera.
+No test installs the camera service, asks for a password or needs a camera.
 CI (GitHub Actions, macOS 27 runner) builds everything with `scripts/build.sh` and runs all tests.
 
 ## License
@@ -277,9 +315,11 @@ milimetrach**, który otwiera się w Blenderze i Podglądzie macOS (MeshLab powi
 > **Stan:** cały potok jest zaimplementowany i przetestowany bez kamery (syntetyczna głowa renderowana w 30 fps
 > i analizowana przez Apple Vision, nagrania odtwarzane przez helper kamery, ponad 400 testów automatycznych). Wyeksportowane modele
 > sprawdzono, importując je w Blenderze 5.0 i renderując przez Quick Look macOS (z niego korzysta Podgląd); MeshLaba
-> jeszcze nie próbowano. **Nie był jeszcze uruchomiony z fizyczną kamerą D455**: pomiary kamery w
-> [docs/CAMERA.md](docs/CAMERA.md) są na razie teoretyczne. Zobacz [Dokładność](#dokładność) i
-> [Ograniczenia](#ograniczenia).
+> jeszcze nie próbowano. Z fizyczną kamerą D455 sprawdzono **kamerę na żywo przez usługę kamery** (10.11.2026: usługa
+> zainstalowana z aplikacji, obraz kolorowy i głębia 30 kl./s bez hasła, po sesji kamera wraca do macOS; zob.
+> [docs/CAMERA-SERVICE.md](docs/CAMERA-SERVICE.md#checked-on-a-d455)). Dokładność całego skanu **nie została jeszcze
+> sprawdzona na kamerze**, a pomiary kamery w [docs/CAMERA.md](docs/CAMERA.md) są na razie teoretyczne. Zobacz
+> [Dokładność](#dokładność) i [Ograniczenia](#ograniczenia).
 
 ## Spis treści
 
@@ -311,8 +351,10 @@ milimetrach**, który otwiera się w Blenderze i Podglądzie macOS (MeshLab powi
 - **Wynik:** interaktywny podgląd 3D (tekstura / kolory wierzchołków / cieniowanie / siatka), eksport OBJ+MTL+PNG
   w mm, opcjonalnie binarny PLY i surowa sesja (klatki kluczowe z głębią, maskami i pozami).
 - **Nagrywanie i odtwarzanie** plików `.db3` (ROS 2) i `.bag`, aby sesję można było zrekonstruować ponownie.
-- **Bezpieczna obsługa kamery:** kamerę przejmuje raz na sesję mały uprzywilejowany helper i oddaje ją macOS, gdy
-  aplikacja się zamyka, zamyka kamerę albo dostaje SIGINT/SIGTERM/SIGHUP.
+- **Bez hasła przy każdej sesji:** aplikacja korzysta z kamery przez wspólną usługę kamery RealSense
+  (`realsense-usbd`), którą instaluje raz; usługa oddaje kamerę macOS, gdy aplikacja się zamyka, zamyka kamerę albo
+  dostaje SIGINT/SIGTERM/SIGHUP. Gdy z usługi nie da się skorzystać, to samo robi przez jedną sesję mały
+  uprzywilejowany helper, po podaniu hasła administratora.
 - Interfejs po polsku i po angielsku (według języka systemu).
 
 ## Wymagania
@@ -333,29 +375,56 @@ scripts/build.sh
 ```
 
 `scripts/build.sh` najpierw sprawdza narzędzia i mówi, czego brakuje, potem buduje spatchowany librealsense 2.58.4,
-helper kamery, aplikację Swift i pakiet `build/IntelFaceScan.app`. Ze świeżego klonu trwa to ok. 2–2,5 minuty na
-M3 Ultra; ponowne budowanie bez zmian – kilka sekund. `scripts/package.sh` tworzy DMG.
+demona usługi kamery RealSense (`realsense-usbd`, z zestawu w `third_party/realsense-usbd`), helper kamery,
+aplikację Swift i pakiet `build/IntelFaceScan.app`. Ze świeżego klonu trwa to ok. 2–2,5 minuty na M3 Ultra; ponowne
+budowanie bez zmian – kilka sekund. `scripts/package.sh` tworzy DMG.
 
 Uruchom aplikację przez `open build/IntelFaceScan.app` albo skopiuj ją do `/Applications`. Aplikacja ma podpis ad hoc
-(bez notaryzacji): na innym Macu otwórz ją za pierwszym razem przez prawy przycisk → **Otwórz**.
+(bez notaryzacji): na innym Macu otwórz ją za pierwszym razem przez prawy przycisk → **Otwórz**. Aby zainstalować
+usługę kamery, aplikacja musi leżeć tam, gdzie żaden inny użytkownik nie może jej zmienić: skopiuj ją do
+`/Applications` z konta administratora (wystarczy też build we własnym folderze administratora; kopia uruchomiona
+prosto z pobranego pliku nie wystarczy).
 
 ## Uprawnienia i kamera
 
-- **Hasło administratora.** macOS podłącza do kamery własne sterowniki. Przejęcie urządzenia USB wymaga roota, więc po
-  wybraniu **Kamera na żywo** macOS pokazuje standardowe okno z prośbą o hasło administratora. Jako root działa tylko
-  mały helper kamery (`Contents/Helpers/IntelFaceScanHelper`); sama aplikacja, Vision, rekonstrukcja i zapis plików
-  działają jako Ty. Helper przyjmuje polecenia wyłącznie od aplikacji przez prywatne gniazdo, nigdy nie otwiera
-  ścieżek podanych przez aplikację, a nagrania zapisuje do pliku otwartego przez aplikację. Szczegóły:
+- **Usługa kamery, instalowana raz.** macOS podłącza do kamery własne sterowniki, a przejąć od nich urządzenie USB
+  może tylko root. IntelFaceScan zostawia to **usłudze kamery RealSense** (`realsense-usbd`): małej usłudze
+  systemowej, wspólnej dla aplikacji RealSense (tej samej używa RealSense Viewer dla macOS). Aplikacja sprawdza,
+  czy usługa działa, za każdym razem, gdy wybierasz **Kamera na żywo**, a nie przy uruchomieniu. Jeśli usługi nie
+  ma, co zwykle zdarza się tylko za pierwszym razem, macOS prosi **jeden raz o nazwę i hasło administratora**,
+  a aplikacja ją instaluje. Od tej pory *Kamera na żywo* uruchamia się bez hasła i nic z IntelFaceScan nie działa
+  jako root: aplikacja, jej helper kamery, Vision, rekonstrukcja i zapis plików działają jako Ty. Jeśli aktualną
+  usługę zainstalowała już inna aplikacja, nie pojawia się żadne pytanie. Jak to działa:
+  [docs/CAMERA-SERVICE.md](docs/CAMERA-SERVICE.md) (po angielsku).
+- **Co jest instalowane.** Demon `/Library/PrivilegedHelperTools/io.github.dolegadolegowski.realsense-usbd`, jego
+  zadanie launchd w `/Library/LaunchDaemons` i konfiguracja w `/Library/Application Support`; usługa uruchamia się
+  na żądanie i jest widoczna w Ustawieniach systemowych > Ogólne > Rzeczy otwierane podczas logowania
+  i rozszerzenia. Aby ją usunąć:
+  `sudo /Applications/IntelFaceScan.app/Contents/Resources/realsense-usbd/uninstall-camera-access.sh` (tracą ją też
+  inne aplikacje RealSense; IntelFaceScan zaproponuje ponowną instalację przy następnym wybraniu *Kamera na żywo*).
+  Polecenie menu **IntelFaceScan > Usługa kamery RealSense…** pokazuje jej stan i wersję, gdy żadne źródło nie jest
+  otwarte, i na żądanie ją instaluje.
+- **Kto może wtedy używać kamery.** Każdy program, który uruchamiasz, będąc zalogowanym przy ekranie Maca, może
+  używać kamer RealSense przez usługę, bez hasła, a macOS nie pokazuje przy tym ani pytania o dostęp do kamery, ani
+  wskaźnika kamery (usługa czyta kamerę przez USB, nie przez systemowy framework kamery). Z jednej kamery może
+  w danej chwili korzystać jeden program: gdy obraz pobiera z niej inny program (np. RealSense Viewer), *Kamera na
+  żywo* kończy się błędem, więc najpierw zatrzymaj w nim kamerę. Inni użytkownicy i sesje zdalne nie są
+  obsługiwani; zakaz używania kamer ustawiony przez zarządzanie urządzeniem lub Czas przed ekranem jest
+  respektowany.
+- **Bez usługi.** Gdy instalacja zostanie anulowana albo się nie powiedzie, gdy usługa jest wyłączona albo gdy nie
+  jesteś użytkownikiem zalogowanym przy ekranie, aplikacja o tym informuje i proponuje **Tym razem użyj hasła
+  administratora**: dawny sposób, na jedną sesję. Jako root działa wtedy tylko mały helper kamery
+  (`Contents/Helpers/IntelFaceScanHelper`); przyjmuje polecenia wyłącznie od aplikacji przez prywatne gniazdo, nigdy
+  nie otwiera ścieżek podanych przez aplikację, a nagrania zapisuje do pliku otwartego przez aplikację. Szczegóły:
   [docs/HELPER.md](docs/HELPER.md).
-- **Nagrania, zestawy danych i demo syntetyczne** nie wymagają hasła.
+- **Nagrania, zestawy danych i demo syntetyczne** nie wymagają ani usługi, ani hasła.
 - **Oddawanie kamery.** Gdy aplikacja się zamyka (⌘Q, zamknięcie okna, `kill -TERM`, Ctrl‑C) albo zamykasz kamerę,
-  helper zatrzymuje strumienie i ponownie enumeruje urządzenie USB, więc macOS je odzyskuje (np. FaceTime może znowu
-  z niej korzystać). Jeśli aplikacja kiedyś się wysypie, a kamera pozostanie nieużywalna, uruchom
+  helper zatrzymuje strumienie i kończy pracę, a usługa po kilku sekundach oddaje kamerę macOS (np. FaceTime może
+  znowu z niej korzystać), także po awarii aplikacji. W trybie z hasłem administratora helper sam ponownie enumeruje
+  urządzenie USB; jeśli aplikacja została w tym trybie zabita, a kamera pozostała nieużywalna, uruchom
   `sudo build/IntelFaceScan.app/Contents/Helpers/IntelFaceScanHelper --release -w` albo odłącz i podłącz ją ponownie.
-- **Nigdy nie zabijaj helpera przez `kill -9`**, gdy rozmawia z kamerą: firmware D455 może się zawiesić do czasu
-  ponownego podłączenia.
-- Inne uprawnienia nie są potrzebne: aplikacja nie używa systemowego frameworka kamery, więc nie ma pytania o dostęp do
-  kamery.
+- **Nigdy nie zabijaj helpera działającego jako root przez `kill -9`**, gdy rozmawia z kamerą: firmware D455 może
+  się zawiesić do czasu ponownego podłączenia.
 
 ## Jak skanować
 
@@ -363,9 +432,10 @@ Uruchom aplikację przez `open build/IntelFaceScan.app` albo skopiuj ją do `/Ap
    które się nie obraca; **obracaj tylko głową**, ramiona trzymaj nieruchomo.
 2. Zadbaj o **równe, rozproszone światło** (bez mocnego światła z boku, bez bezpośredniego słońca). Zdejmij okulary;
    jeśli możesz, zwiąż długie włosy (głębia stereo słabo widzi cienkie włosy). Unikaj błyszczącego makijażu.
-3. Wybierz **Kamera na żywo**, wpisz hasło administratora i poczekaj na podgląd. Ustaw się tak, aby wskaźnik
-   odległości był zielony: ok. **0,56–0,71 m** w konfiguracji domyślnej, **0,41–0,56 m** z włączonym *Trybem bliskiego
-   zasięgu* (dokładny zakres dla Twojej kamery jest widoczny pod podglądem).
+3. Wybierz **Kamera na żywo** i poczekaj na podgląd (za pierwszym razem macOS poprosi o nazwę i hasło
+   administratora, aby zainstalować usługę kamery). Ustaw się tak, aby wskaźnik odległości był zielony: ok.
+   **0,56–0,71 m** w konfiguracji domyślnej, **0,41–0,56 m** z włączonym *Trybem bliskiego zasięgu* (dokładny zakres
+   dla Twojej kamery jest widoczny pod podglądem).
 4. Naciśnij **Rozpocznij skan** i patrz w kamerę, aż poza prosto zostanie zarejestrowana. Potem obracaj głowę w górę,
    w dół, w lewo i w prawo (i ukośnie, jeśli pozy ukośne są włączone) **w dowolnej kolejności**: nie ma kolejności do
    przestrzegania. Gdy patrzysz w kamerę, polecenie wymienia kierunki, które jeszcze zostały (gdy jest ich więcej niż
@@ -431,8 +501,8 @@ jako metry, plik jest w milimetrach); w widoku z przodu (numpad 1) twarz patrzy 
 ## Nagrania i wiersz poleceń
 
 - W aplikacji: **Nagrywaj** zapisuje strumień kamery do pliku `.db3` (format ROS 2); **Otwórz nagranie…** odtwarza
-  `.db3` lub `.bag` (np. z realsense-viewer) przez to samo przetwarzanie i ten sam prowadzony skan, bez kamery i bez
-  hasła.
+  `.db3` lub `.bag` (np. z realsense-viewer) przez to samo przetwarzanie i ten sam prowadzony skan, bez kamery, bez
+  usługi kamery i bez hasła.
 - `ifscan` (w pakiecie: `build/IntelFaceScan.app/Contents/MacOS/ifscan`) uruchamia ten sam potok z terminala:
 
 ```bash
@@ -468,7 +538,7 @@ i High Density oraz disparity shift 0 i 50 na płaskiej ścianie i na skórze.
 
 ## Ograniczenia
 
-- Jeszcze niesprawdzona z fizyczną kamerą D455 (zob. informację o stanie na górze).
+- Dokładność skanu nie została jeszcze sprawdzona z fizyczną kamerą D455 (zob. informację o stanie na górze).
 - Tył głowy nigdy nie jest widoczny (pozy sięgają ±45° w poziomie). Domyślnie model jest tam domknięty gładką,
   wygenerowaną powierzchnią: wiarygodną, ale niezmierzoną. Wyłącz *Domknij tył głowy* (albo użyj `--open-back`), aby
   zostawić go otwartym; małe dziury są łatane w obu przypadkach.
@@ -487,8 +557,9 @@ i High Density oraz disparity shift 0 i 50 na płaskiej ścianie i na skórze.
 
 | Biblioteka | Do czego | Dlaczego ta |
 |---|---|---|
-| [librealsense](https://github.com/realsenseai/librealsense) 2.58.4 + patche macOS | sterowanie kamerą, filtry, wyrównanie, nagrywanie | oficjalne SDK; patche z [realsense-viewer-macos](https://github.com/dolegadolegowski/realsense-viewer-macos) pozwalają mu działać na macOS z Apple Silicon (przejęcie USB raz na proces, brak nieskończonych oczekiwań USB, …) |
-| libusb 1.0.30 (statycznie) | dostęp USB dla librealsense | tego używa librealsense na macOS; linkowany statycznie z frameworkiem Security, więc pakiet nie zależy od Homebrew |
+| [librealsense](https://github.com/realsenseai/librealsense) 2.58.4 + patche macOS | sterowanie kamerą, filtry, wyrównanie, nagrywanie | oficjalne SDK; patche z [realsense-viewer-macos](https://github.com/dolegadolegowski/realsense-viewer-macos) pozwalają mu działać na macOS z Apple Silicon (przejęcie USB raz na proces, brak nieskończonych oczekiwań USB, klient usługi kamery, …) |
+| Usługa kamery RealSense (`realsense-usbd`) z [realsense-viewer-macos](https://github.com/dolegadolegowski/realsense-viewer-macos) | dostęp do kamery bez roota | jeden demon roota dla wszystkich aplikacji RealSense zamiast helpera roota i hasła przy każdej sesji; niezmieniona kopia w `third_party/realsense-usbd` (aktualizuje ją `scripts/sync-camera-service.sh`) |
+| libusb 1.0.30 (statycznie) | dostęp USB dla librealsense i usługi kamery | tego używa librealsense na macOS; linkowany statycznie z frameworkiem Security, więc pakiet nie zależy od Homebrew |
 | Apple Vision | prostokąt twarzy, punkty charakterystyczne, poza głowy, segmentacja osoby | na urządzeniu, szybki, część macOS |
 | Metal | fuzja TSDF, renderowanie podglądu | natywne API GPU (bez OpenGL); shadery kompilowane w czasie działania |
 | SceneKit | podgląd 3D wyniku | natywny, czyta te same dane siatki co eksport |
@@ -506,11 +577,13 @@ aplikacji zawiera je w `Contents/Resources`.
 ## Architektura i dokumentacja
 
 Aplikacja (Twoje uprawnienia: SwiftUI, ScanKit z Vision, ReconKit z FaceReconCore, CameraKit) rozmawia przez gniazdo
-AF_UNIX ([docs/PROTOCOL.md](docs/PROTOCOL.md)) z helperem `IntelFaceScanHelper`, który działa jako root tylko dla
-kamery na żywo (librealsense 2.58.4 z patchami, libusb: strumienie, presety, filtry, wyrównanie, IMU, nagrywanie,
-odtwarzanie, przejęcie i oddanie USB). Dokumentacja (po angielsku): [ARCHITECTURE](docs/ARCHITECTURE.md),
-[HELPER](docs/HELPER.md), [PROTOCOL](docs/PROTOCOL.md), [CAMERA](docs/CAMERA.md),
-[RECONSTRUCTION](docs/RECONSTRUCTION.md), [TESTING](docs/TESTING.md).
+AF_UNIX ([docs/PROTOCOL.md](docs/PROTOCOL.md)) z helperem `IntelFaceScanHelper` (librealsense 2.58.4 z patchami:
+strumienie, presety, filtry, wyrównanie, IMU, nagrywanie, odtwarzanie), który też działa jako Ty i sięga do kamery
+przez XPC do wspólnej usługi kamery RealSense (`realsense-usbd`, demon roota z libusb: przejęcie i oddanie USB). Bez
+usługi helper działa jako root przez jedną sesję i sam otwiera urządzenie USB. Dokumentacja (po angielsku):
+[ARCHITECTURE](docs/ARCHITECTURE.md), [CAMERA-SERVICE](docs/CAMERA-SERVICE.md), [HELPER](docs/HELPER.md),
+[PROTOCOL](docs/PROTOCOL.md), [CAMERA](docs/CAMERA.md), [RECONSTRUCTION](docs/RECONSTRUCTION.md),
+[TESTING](docs/TESTING.md).
 
 ## Rozwój
 
@@ -518,9 +591,11 @@ odtwarzanie, przejęcie i oddanie USB). Dokumentacja (po angielsku): [ARCHITECTU
 scripts/test.sh                 # wszystkie zestawy Swift Testing (działa z samymi Command Line Tools)
 scripts/test.sh --filter ICP    # wybrane testy
 cmake -S helper -B build/helper -DIFS_HELPER_TESTS=ON && cmake --build build/helper -j && ctest --test-dir build/helper
+third_party/realsense-usbd/tests/test-camera-access.sh build/usbd/realsense-usbd   # instalator usługi, na sucho
 ```
 
 Źródło **Demo syntetyczne** i `ifscan reconstruct synthetic-camera` sprawdzają cały przepływ na żywo bez kamery.
+Żaden test nie instaluje usługi kamery, nie pyta o hasło i nie potrzebuje kamery.
 CI (GitHub Actions, runner macOS 27) buduje wszystko przez `scripts/build.sh` i uruchamia wszystkie testy.
 
 ## Licencja

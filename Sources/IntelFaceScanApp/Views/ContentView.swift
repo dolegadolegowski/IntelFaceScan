@@ -36,8 +36,20 @@ struct ContentView: View {
         .frame(minWidth: 1040, minHeight: 680)
         .alert(model.alert?.title ?? "", isPresented: Binding(get: { model.alert != nil },
                                                                set: { if !$0 { model.alert = nil } }),
-               presenting: model.alert) { _ in
-            Button(S.ok) { model.alert = nil }
+               presenting: model.alert) { alert in
+            // The camera service dialogs offer what makes sense for their state; a plain alert only closes.
+            // On macOS the first button is the default one (Return) unless another is marked. Information closes on
+            // Return: OK comes first and is marked, so Return never starts "Install again" from the status dialog.
+            if alert.closeIsDefault {
+                Button(S.ok) { model.alert = nil }
+                    .keyboardShortcut(.defaultAction)
+            }
+            ForEach(alert.actions, id: \.self) { action in
+                Button(S.alertAction(action)) { model.perform(action) }
+            }
+            if !alert.closeIsDefault {
+                Button(S.cancel, role: .cancel) { model.alert = nil }
+            }
         } message: { alert in
             Text(alert.message)
         }
@@ -102,8 +114,9 @@ struct WelcomeView: View {
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 560)
             }
-            if model.isConnecting {
-                ProgressView(model.sourceKind == .live ? S.waitingForPassword : S.connecting)
+            if model.showsConnectionProgress {
+                // Says what is really happening: the administrator password only when that prompt comes.
+                ProgressView(S.connectionStage(model.connectionStage))
                     .controlSize(.large)
             } else {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 220, maximum: 280), spacing: 16)], spacing: 16) {

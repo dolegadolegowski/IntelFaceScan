@@ -103,6 +103,11 @@ struct AppCommands: Commands {
     let model: AppModel
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            // State and versions of the shared RealSense camera service; installs it (again) on request.
+            Button(S.cameraServiceMenu) { Task { await model.showCameraServiceStatus() } }
+                .disabled(!model.canShowCameraServiceStatus)
+        }
         CommandGroup(replacing: .newItem) {
             // The same rules as the sidebar's source menu: no switching during a scan or a reconstruction.
             Group {

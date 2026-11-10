@@ -322,6 +322,24 @@ OptionValues options_to_restore( const OptionValues & before, const OptionValues
     return restore;
 }
 
+bool is_usb_access_error( const std::string & librealsense_error )
+{
+    // handle_libusb (patches/0001) when libusb may not take the device from the macOS drivers, and the status
+    // librealsense prints when libusb may not open it at all.
+    return librealsense_error.find( "administrator privileges" ) != std::string::npos
+        || librealsense_error.find( "RS2_USB_STATUS_ACCESS" ) != std::string::npos;
+}
+
+std::string camera_open_error( const std::string & librealsense_error, bool as_root )
+{
+    if( ! as_root && is_usb_access_error( librealsense_error ) )
+        return "The camera could not be opened: the RealSense camera service is not installed or not answering (or "
+               "it does not admit this user), and without the service macOS lets only an administrator open the "
+               "camera. Start the camera again from IntelFaceScan to install or repair the service, or use its "
+               "one-time administrator option.";
+    return "A RealSense camera is connected but could not be opened: " + librealsense_error;
+}
+
 bool FrameCounterMonitor::update( unsigned long long frame_number )
 {
     bool restarted = m_last && frame_number < *m_last;

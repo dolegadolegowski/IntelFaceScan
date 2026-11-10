@@ -1,5 +1,6 @@
 #!/bin/bash
-# Builds IntelFaceScan from scratch: patched librealsense, the camera helper, the Swift app and the app bundle.
+# Builds IntelFaceScan from scratch: patched librealsense, the RealSense camera service daemon (realsense-usbd, from
+# the vendored kit in third_party/realsense-usbd), the camera helper, the Swift app and the app bundle.
 #
 #   scripts/build.sh                 -> build/IntelFaceScan.app
 #   BUILD_TYPE=Debug scripts/build.sh
@@ -82,29 +83,47 @@ else
             || die "$ROOT is not a git checkout and $path is empty (GitHub's source archives do not include submodules): git clone --recursive $REPO_URL"
     done
 fi
+# The camera service kit is not a submodule: its files are part of this repository (a copy of
+# realsense-viewer-macos/macos/broker that scripts/sync-camera-service.sh updates).
+KIT="$ROOT/third_party/realsense-usbd"
+for f in build-daemon.sh make-service-manifest.sh install-camera-access.sh librealsense/macos-usb-broker.patch; do
+    [ -f "$KIT/$f" ] \
+        || die "$KIT/$f is missing: the camera service kit is incomplete (restore third_party/realsense-usbd from" \
+               "git, or update it with scripts/sync-camera-service.sh)"
+done
 step_done "submodules"
 
-# 1. librealsense v2.58.4 + macOS patches
+# 1. librealsense v2.58.4 + macOS patches + the camera service client
 BUILD_TYPE="$BUILD_TYPE" "$ROOT/scripts/build-sdk.sh"
 step_done "librealsense"
 
-# 2. camera helper
+# 2. RealSense camera service: build/usbd/realsense-usbd, built by the kit's own script from the kit's sources. It
+# links the static libusb the librealsense build made (kept in the SDK's install prefix) and system libraries only.
+# The app carries the daemon and installs it once (scripts/bundle-app.sh); the daemon's tests belong to the kit's
+# home repository and are not built here (--daemon-only).
+"$KIT/build-daemon.sh" "$ROOT/build/usbd" \
+    --libusb "$IFS_SDK_DIR/install/libusb/lib/libusb-1.0.a" \
+    --librealsense-src "$ROOT/third_party/librealsense" \
+    --deployment-target "$DEPLOYMENT_TARGET" --daemon-only
+step_done "camera service"
+
+# 3. camera helper
 cmake -S "$ROOT/helper" -B "$ROOT/build/helper" -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DIFS_SDK_DIR="$IFS_SDK_DIR/install" -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
 cmake --build "$ROOT/build/helper" -j "$JOBS"
 step_done "helper"
 
-# 3. Swift app, reconstruction and CLI
+# 4. Swift app, reconstruction and CLI
 CONFIG="$(echo "$BUILD_TYPE" | tr '[:upper:]' '[:lower:]')"
 [ "$CONFIG" = "release" ] || CONFIG=debug
 swift build -c "$CONFIG"
 step_done "swift"
 
-# 4. app bundle
+# 5. app bundle
 SWIFT_CONFIG="$CONFIG" "$ROOT/scripts/bundle-app.sh"
 step_done "bundle"
 
-# 5. disk image (optional)
+# 6. disk image (optional)
 if [ "${PACKAGE:-0}" = "1" ]; then
     "$ROOT/scripts/package.sh"
     step_done "dmg"

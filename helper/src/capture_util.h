@@ -46,6 +46,16 @@ std::optional< rs2_option > option_from_name( const std::string & name );
 // Value of a camera info field, or 'fallback' when the device does not report it.
 std::string camera_info( const rs2::device & device, rs2_camera_info info, const std::string & fallback = "" );
 
+// True when librealsense's error says this process has no right to the USB device: opening the camera in-process
+// (taking it over from the macOS drivers) needs root, patches/0001. A process of the user gets the camera through the
+// RealSense camera service instead, and ends up here only when librealsense could not use the service.
+bool is_usb_access_error( const std::string & librealsense_error );
+
+// The error to report when a connected camera could not be opened ('librealsense_error' is what librealsense said).
+// For a process that is not root and lacks the right to the USB device, it names the cause the user can act on: the
+// RealSense camera service is not installed or not answering.
+std::string camera_open_error( const std::string & librealsense_error, bool as_root );
+
 struct PixelRect
 {
     int x = 0;

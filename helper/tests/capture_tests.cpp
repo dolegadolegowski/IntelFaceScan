@@ -1476,8 +1476,9 @@ TEST_CASE( bench_processing_and_recording )
 
 TEST_CASE( probe_reports_that_it_tried_the_live_camera )
 {
-    // main.cpp hands the camera back to macOS after a live probe; a probe that failed to open the camera (none is
-    // connected here, and tests never run as root) may still have captured part of it, so it counts as well.
+    // main.cpp, as root, hands the camera back to macOS after a live probe; a probe that failed to open the camera
+    // may still have captured part of it, so it counts as well. (Whether the probe succeeds depends on the Mac: it
+    // does with a camera and either root or the RealSense camera service, and fails without a camera.)
     std::vector< std::string > args{ "--enumerate", "--json" };
     std::vector< char * > argv;
     for( auto & a : args )
@@ -1495,8 +1496,33 @@ TEST_CASE( probe_reports_that_it_tried_the_live_camera )
     ::close( saved );
     std::fclose( null );
     CHECK( live );
-    if( ::geteuid() != 0 )
-        CHECK_MSG( rc != 0, "no camera can be opened without root" );
+    CHECK_MSG( rc == 0 || rc == 1, rc );  // the device was listed, or the probe reported why it could not be
+}
+
+TEST_CASE( util_camera_open_error )
+{
+    // What the patched librealsense says when this process may not take the camera from the macOS drivers
+    // (handle-libusb.h, patches/0001), and when libusb may not open it at all.
+    const std::string detach = "macOS requires administrator privileges (sudo) to access RealSense USB devices";
+    const std::string open = "failed to open usb interface: 0, error: RS2_USB_STATUS_ACCESS";
+    const std::string connected = "A RealSense camera is connected but could not be opened: ";
+    CHECK( is_usb_access_error( detach ) );
+    CHECK( is_usb_access_error( open ) );
+    CHECK( ! is_usb_access_error( "failed to open usb interface: 0, error: RS2_USB_STATUS_BUSY" ) );
+    CHECK( ! is_usb_access_error( "" ) );
+
+    // A helper of the user got here because librealsense could not use the camera service: say that, not "sudo".
+    for( const std::string & reason : { detach, open } )
+    {
+        const std::string as_user = camera_open_error( reason, false );
+        CHECK_MSG( as_user.find( "RealSense camera service is not installed or not answering" ) != std::string::npos,
+                   as_user );
+        CHECK_MSG( as_user.find( "sudo" ) == std::string::npos, as_user );
+        // Root needs no service: whatever stopped it is reported as librealsense said it.
+        CHECK( camera_open_error( reason, true ) == connected + reason );
+    }
+    const std::string other = "hwmon command 0x10 failed";
+    CHECK( camera_open_error( other, false ) == connected + other );
 }
 
 TEST_CASE( probe_runs_on_a_recording )
@@ -1554,47 +1580,5 @@ TEST_CASE( probe_runs_on_a_recording )
 
 int main( int argc, char ** argv )
 {
-    const char * filter = argc > 1 ? argv[1] : nullptr;
-    int failed = 0, passed = 0, skipped = 0;
-    for( auto & t : registry() )
-    {
-        if( filter && ! std::strstr( t.name, filter ) )
-            continue;
-        std::printf( "[ RUN  ] %s\n", t.name );
-        std::fflush( stdout );
-        int before = failed_checks();
-        auto t0 = std::chrono::steady_clock::now();
-        std::string status = "PASS";
-        try
-        {
-            // Benchmarks measure (docs/CAMERA.md) rather than test, and take a minute on a slow CI runner: they run
-            // only when asked for by name, e.g. "capture-tests bench".
-            if( ! filter && std::strncmp( t.name, "bench_", 6 ) == 0 )
-                SKIP( "benchmark: run 'capture-tests bench'" );
-            t.body();
-        }
-        catch( const Skipped & e )
-        {
-            status = std::string( "SKIP (" ) + e.what() + ")";
-        }
-        catch( const std::exception & e )
-        {
-            std::fprintf( stderr, "    exception: %s\n", e.what() );
-            ++failed_checks();
-        }
-        double ms = std::chrono::duration< double, std::milli >( std::chrono::steady_clock::now() - t0 ).count();
-        if( failed_checks() != before )
-        {
-            status = "FAIL";
-            ++failed;
-        }
-        else if( status == "PASS" )
-            ++passed;
-        else
-            ++skipped;
-        std::printf( "[ %s ] %s (%.0f ms)\n", status.c_str(), t.name, ms );
-        std::fflush( stdout );
-    }
-    std::printf( "%d passed, %d failed, %d skipped\n", passed, failed, skipped );
-    return failed ? 1 : 0;
+    return run_tests( argc, argv );
 }
