@@ -218,11 +218,22 @@ account logged in at the screen, with the app run from `build/IntelFaceScan.app`
   `rs-macos-selftest` passed all 24 checks without `sudo` (depth, infrared, color, IMU at 400 Hz, presets, recording
   and playback). `ensure-camera-access.sh` printed `ok 2` from both applications.
 
+On 2026-11-11, on the same Mac and camera:
+
+* **Longer streaming.** `IntelFaceScanHelper --probe` (1280×720 High Accuracy, disparity shift 50, depth and color)
+  ran as the user through the service five times back to back, about half an hour in all, without an error. The
+  service stayed at 8.5–9.3 MB and 1–3 % of a core, the helper at 122–124 MB.
+* **Another application's installer over the installed service.** RealSense Viewer's installer, run as root
+  (it carries another build of the same service version), reported that the service was already installed and
+  answering and replaced nothing: the daemon's code hash and the dates of the daemon and of its configuration were
+  unchanged.
+* **The stress self-test of RealSense Viewer's tools** (`rs-macos-selftest --stress`) passed without `sudo` through
+  the service this app had installed: 36 checks, among them every sensor for 60 s at 30.0 fps and a hardware reset.
+
 Not checked yet on hardware: a complete guided scan and a recording through the service, a standard (not
-administrator) account, a second user session, the service switched off in Login Items, an update over an installed
-service (the installer's keep rules ran only as dry runs and in a simulation), a restart of the Mac, the
-administrator path next to an installed service, two cameras, and what the app shows when another program holds
-the camera.
+administrator) account, a second user session, the service switched off in Login Items, an update from an older
+service, a restart of the Mac, the administrator path next to an installed service, two cameras, and what the app
+shows when another program holds the camera.
 
 ## Development and testing without a camera
 
