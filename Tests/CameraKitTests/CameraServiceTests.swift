@@ -392,7 +392,7 @@ struct CameraServiceFilesTests {
         #expect(CameraServiceKit.searchBuildFolders(from: start) == planted)
     }
 
-    @Test func installCommandSurvivesAppleScriptAndShell() throws {
+    @Test func installCommandSurvivesAppleScriptAndShell() async throws {
         // The installer's command line as the client builds it for IntelFaceScan's bundle layout, run through
         // osascript and the shell without the administrator clause: the stand-in installer must get the two source
         // folders byte for byte, whatever the bundle's path contains, and a clean environment.
@@ -424,7 +424,10 @@ struct CameraServiceFilesTests {
         #expect(RealSenseCameraAccess.appleScriptSource(command: command, prompt: "Why")
                 == source + " with administrator privileges with prompt \"Why\"")
 
-        let result = RealSenseCameraAccess.runAppleScript(source, inProcess: false)
+        // One osascript at a time in the test process, and not on a thread of the Swift pool (OSAScriptInTests).
+        let result = try await OSAScriptInTests.serialized {
+            RealSenseCameraAccess.runAppleScript(source, inProcess: false)
+        }
         #expect(result == .success("installed from \(helpers)"), "\(result)")
         var received = try Data(contentsOf: output).split(separator: 0, omittingEmptySubsequences: false).map {
             String(decoding: $0, as: UTF8.self)
@@ -440,12 +443,16 @@ struct CameraServiceFilesTests {
         // A failing installer: its message and status come back (what InstallError.failed carries).
         let failing = try KitFixture.makeBundle(dir.appendingPathComponent("Failing.app"),
                                                 installer: "#!/bin/bash\necho 'camera access: no' >&2\nexit 1\n")
-        let failure = RealSenseCameraAccess.runAppleScript(
-            RealSenseCameraAccess.appleScriptSource(command: RealSenseCameraAccess.installCommand(kit: failing),
-                                                    prompt: "unused", privileged: false), inProcess: false)
+        let failingSource = RealSenseCameraAccess.appleScriptSource(
+            command: RealSenseCameraAccess.installCommand(kit: failing), prompt: "unused", privileged: false)
+        let failure = try await OSAScriptInTests.serialized {
+            RealSenseCameraAccess.runAppleScript(failingSource, inProcess: false)
+        }
         #expect(failure == .failure(number: 1, message: "camera access: no"), "\(failure)")
         // A cancelled prompt is AppleScript's error -128.
-        #expect(RealSenseCameraAccess.runAppleScript("error \"User canceled.\" number -128", inProcess: false)
-                == .failure(number: -128, message: "User canceled."))
+        let cancelled = try await OSAScriptInTests.serialized {
+            RealSenseCameraAccess.runAppleScript("error \"User canceled.\" number -128", inProcess: false)
+        }
+        #expect(cancelled == .failure(number: -128, message: "User canceled."))
     }
 }

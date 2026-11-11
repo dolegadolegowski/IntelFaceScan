@@ -8,6 +8,65 @@ import Foundation
 import Testing
 @testable import CameraKit
 
+/// osascript in tests. Every script of the test process runs on the launcher's serial authorization queue, one at a
+/// time, and the test waits for it on a thread of its own: on the 3-core CI runner several osascript processes
+/// started together (the launcher's queue, the quoting test, the installer command test) each sat idle for minutes,
+/// and the tests that waited for them on threads of the Swift cooperative pool stopped every other test of the
+/// target for six minutes (CI run 42973936645).
+enum OSAScriptInTests {
+    /// How long a test waits for its script: every script queued before it runs first, each several seconds on the
+    /// runner. It only catches an osascript that never ends.
+    static let timeout: TimeInterval = 900
+
+    /// Runs `work` (which may start osascript itself) on the authorization queue, without holding a thread of the
+    /// Swift cooperative pool while it waits its turn or runs.
+    static func serialized<T>(_ work: @escaping () throws -> T) async throws -> T {
+        try await HelperCameraSession.blocking { try HelperLauncher.authorizationQueue.sync(execute: work) }
+    }
+
+    /// Waits for scripts the launcher has queued (HelperLauncher.runAppleScript) off the cooperative pool. When
+    /// one is not done after two minutes, what the osascript processes are doing goes to the log once, so a stuck
+    /// run says why; the wait goes on to `timeout`.
+    static func wait(for handles: [HelperProcessHandle]) async throws -> Bool {
+        try await HelperCameraSession.blocking {
+            let deadline = Date(timeIntervalSinceNow: timeout)
+            var reported = false
+            for handle in handles {
+                while !handle.waitForExit(timeout: 120) {
+                    if !reported {
+                        reported = true
+                        reportStuckScripts()
+                    }
+                    if Date() > deadline { return false }
+                }
+            }
+            return true
+        }
+    }
+
+    private static func reportStuckScripts() {
+        func output(_ tool: String, _ arguments: [String]) -> String {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: tool)
+            process.arguments = arguments
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            guard (try? process.run()) != nil else { return "\(tool) did not start" }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return String(decoding: data, as: UTF8.self)
+        }
+        var lines = ["an osascript run of the tests is not done after 120 s:"]
+        let listed = output("/usr/bin/pgrep", ["-lf", "osascript"])
+        lines.append(listed.isEmpty ? "no osascript process is running" : listed)
+        for pid in listed.split(separator: "\n").compactMap({ $0.split(separator: " ").first }).prefix(2) {
+            lines.append(String(output("/usr/bin/sample", [String(pid), "1", "-mayDie"]).prefix(6000)))
+        }
+        FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n").utf8))
+    }
+}
+
 enum TestHelper {
     /// $IFS_HELPER_PATH or build/helper/IntelFaceScanHelper of this checkout (scripts/build.sh or the helper's CMake
     /// build); the integration tests are skipped without it.
