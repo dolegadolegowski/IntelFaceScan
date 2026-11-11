@@ -252,7 +252,7 @@ struct HelperSecurityPeerTests {
 
 @Suite("Helper security (launch and location)")
 struct HelperSecurityLaunchTests {
-    @Test func quotingSurvivesAppleScriptAndShell() throws {
+    @Test func quotingSurvivesAppleScriptAndShell() async throws {
         // The exact privileged command, run through NSAppleScript and /bin/sh without the administrator clause:
         // every argument must arrive byte for byte, whatever quotes, newlines or shell syntax it contains.
         let dir = try TestHelper.scratchDirectory()
@@ -270,22 +270,30 @@ struct HelperSecurityLaunchTests {
         let source = HelperLauncher.appleScriptSource(command: command, prompt: "unused", privileged: false)
         // osascript, not NSAppleScript: in a process without an AppKit event loop (the test runner) an in-process
         // "do shell script" waits for an Apple event nobody dispatches. The app has the loop; the source is the same.
-        let osascript = Process()
-        osascript.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        osascript.arguments = ["-e", source]
-        let errors = Pipe()
-        osascript.standardError = errors
-        osascript.standardOutput = FileHandle.nullDevice
-        let finished = DispatchSemaphore(value: 0)
-        osascript.terminationHandler = { _ in finished.signal() }
-        try osascript.run()
-        if finished.wait(timeout: .now() + 60) == .timedOut {
-            osascript.terminate()
+        // One osascript at a time in the test process, and not on a thread of the Swift pool (OSAScriptInTests).
+        let run: (status: Int32, stderr: String)? = try await OSAScriptInTests.serialized {
+            let osascript = Process()
+            osascript.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            osascript.arguments = ["-e", source]
+            osascript.standardInput = FileHandle.nullDevice
+            let errors = Pipe()
+            osascript.standardError = errors
+            osascript.standardOutput = FileHandle.nullDevice
+            let finished = DispatchSemaphore(value: 0)
+            osascript.terminationHandler = { _ in finished.signal() }
+            try osascript.run()
+            if finished.wait(timeout: .now() + OSAScriptInTests.timeout) == .timedOut {
+                osascript.terminate()
+                return nil
+            }
+            return (osascript.terminationStatus,
+                    String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
+        }
+        guard let run else {
             Issue.record("osascript did not finish")
             return
         }
-        let stderr = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        #expect(osascript.terminationStatus == 0, "\(stderr)")
+        #expect(run.status == 0, "\(run.stderr)")
         let data = try Data(contentsOf: output)
         var received = data.split(separator: 0, omittingEmptySubsequences: false).map {
             String(decoding: $0, as: UTF8.self)
@@ -334,28 +342,29 @@ struct HelperSecurityLaunchTests {
         }
     }
 
-    @Test func scriptsRunThroughOSAScriptWithoutAppKit() throws {
+    @Test func scriptsRunThroughOSAScriptWithoutAppKit() async throws {
         // The test runner has no NSApplication: the administrator launch would go through /usr/bin/osascript, whose
         // results must mean what the in-process ones mean. The scripts share the launcher's serial authorization
-        // queue with the release test's. On the 3-core runner the first two scripts on that queue took more than
-        // 30 s together at the start of the target, the remaining four under 15 s together, so the first 30 s wait
-        // ran out (CI run 41797620726). The timeouts only catch an osascript that never ends.
+        // queue with the other tests that run osascript (the release tool, the quoting, the installer command). On
+        // the 3-core runner the first two scripts on that queue took more than 30 s together at the start of the
+        // target (CI run 41797620726), and with a dozen scripts queued each took about 35 s, so these three, last in
+        // the queue, started after six minutes (CI run 42973936645). All three are queued at once and waited for
+        // off the Swift cooperative pool (OSAScriptInTests), for as long as the whole queue may take.
         #expect(!HelperLauncher.hasAppKitApplication)
 
         let cancelled = HelperLauncher.runAppleScript("error \"User canceled.\" number -128", inProcess: false)
-        #expect(cancelled.waitForExit(timeout: 120))
-        #expect(cancelled.launchError == .authorizationCancelled)
-
         let failed = HelperLauncher.runAppleScript(
             HelperLauncher.appleScriptSource(command: "echo out; echo 'no camera' >&2; exit 69", prompt: "",
                                              privileged: false), inProcess: false)
-        #expect(failed.waitForExit(timeout: 120))
+        let other = HelperLauncher.runAppleScript("error \"odd\" number -1743", inProcess: false)
+
+        #expect(try await OSAScriptInTests.wait(for: [cancelled, failed, other]), "osascript did not finish")
+        #expect(cancelled.launchError == .authorizationCancelled)
+
         #expect(failed.launchError == nil)
         #expect(failed.exitStatus == 69)
         #expect(failed.diagnostics == "no camera")
 
-        let other = HelperLauncher.runAppleScript("error \"odd\" number -1743", inProcess: false)
-        #expect(other.waitForExit(timeout: 120))
         #expect(other.launchError == .launchFailed("odd (-1743)"))
 
         #expect(HelperLauncher.parseOSAScriptError("0:48: execution error: a (b) c (2)")! == (2, "a (b) c"))

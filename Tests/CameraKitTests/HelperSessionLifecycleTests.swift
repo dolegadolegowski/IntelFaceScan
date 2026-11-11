@@ -17,7 +17,8 @@ private enum StubHelper {
     static var available: Bool { FileManager.default.isExecutableFile(atPath: compiler) }
 
     /// Appends its --socket path to <its own path>.sockets, connects, sends HELLO (mode live, fake with --fake or
-    /// playback with --playback) and exits.
+    /// playback with --playback) and exits; with --stay it exits only when the app closed the connection, so the
+    /// app can still read its pid however late it gets to the peer checks.
     static let source = #"""
     #include <stdint.h>
     #include <stdio.h>
@@ -27,8 +28,10 @@ private enum StubHelper {
     #include <unistd.h>
     int main(int argc, char **argv) {
         const char *path = 0, *mode = "live";
+        int stay = 0;
         for (int i = 1; i < argc; ++i) {
             if (!strcmp(argv[i], "--socket") && i + 1 < argc) path = argv[++i];
+            else if (!strcmp(argv[i], "--stay")) stay = 1;
             else if (!strcmp(argv[i], "--playback")) mode = "playback";
             else if (!strcmp(argv[i], "--fake")) mode = "fake";
         }
@@ -50,6 +53,8 @@ private enum StubHelper {
         struct __attribute__((packed)) { uint32_t magic; uint16_t version, type; uint32_t json_bytes, flags;
                                          uint64_t payload; } h = { 0x31534649u, 1, 1, (uint32_t)n, 0, 0 };
         if (write(s, &h, sizeof h) != (ssize_t)sizeof h || write(s, json, n) != n) return 70;
+        char c;
+        while (stay && read(s, &c, 1) > 0) {}
         return 0;
     }
     """#
@@ -317,7 +322,9 @@ struct HelperLiveLaunchTests {
         let launched = LaunchRecord()
         defer { launched.cleanUp() }
         session.launchOverride = { helper, args in
-            let impostor = try HelperLauncher.launchAsUser(helper: helper, arguments: args)
+            // --stay: on a slow machine the app reaches the pid check after a stand-in that exits by itself is
+            // gone, and then reports that it cannot read the pid instead (CI run 42973936645).
+            let impostor = try HelperLauncher.launchAsUser(helper: helper, arguments: args + ["--stay"])
             let handle = try HelperLauncher.launchAsUser(helper: URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"])
             launched.record(handle, arguments: args, impostor: impostor)
             return handle
