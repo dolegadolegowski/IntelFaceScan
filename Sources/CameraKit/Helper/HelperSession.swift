@@ -481,6 +481,10 @@ final class HelperCameraSession: @unchecked Sendable {
             return try await queryDevice(connection)
         } catch where connection.closed {
             // The helper went away instead of answering: its exit status and stderr say more than the lost socket.
+            // The socket closes before the exit is published (the process is still being reaped, its stderr read to
+            // the end), on a loaded machine by more than launchFailure's half second: the write then failed with
+            // "Broken pipe" and that was reported instead (CI run 43019160213). Waited for off the Swift pool.
+            _ = try? await Self.blocking { process.waitForExit(timeout: 5) }
             throw Self.launchFailure(process, waitingError: error)
         }
     }
