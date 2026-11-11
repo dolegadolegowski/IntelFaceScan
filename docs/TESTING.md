@@ -34,18 +34,22 @@ IFS_TEST_RECORDINGS=~/IntelFaceScanData/recordings scripts/test.sh --filter endT
   41815653340 the runner kept about 70 % of its memory free and used no swap with 3 slots, and ReconKitTests took
   377 s); `IFS_TEST_HEAVY_SLOTS=n` overrides it (with 3: ReconKitTests ~90 s and 1.5 GB at the peak on the M3 Ultra,
   instead of ~65 s and 2.6 GB, also measured before `Pipeline wide side views`).
-* The tests of CameraKitTests that run `/usr/bin/osascript` (the launcher's scripts, the quoting of the privileged
-  command, the installer's command line, the release tool) run it one script at a time on the launcher's serial
-  authorization queue and wait for it on a thread of their own (`OSAScriptInTests` in
-  `Tests/CameraKitTests/HelperTestSupport.swift`). On the 3-core runner several osascript processes started together
-  each sat idle for minutes, and the tests waiting for them held all three threads of the Swift cooperative pool, so
-  no other test of the target finished for six minutes (CI run 42973936645; the machine was idle meanwhile). A
-  script that is not done after two minutes puts the list of osascript processes and a sample of them into the log
-  once; the wait then goes on for up to 15 minutes.
   `cliSyntheticCameraScanStopsAtTheTimeLimit` runs `ifscan reconstruct synthetic-camera` in-process and in real
   time, and takes every slot (exclusive): next to the other reconstructions it took 105–227 s on the runner, and
   twice it had not ended when the step timed out. A `.timeLimit` counts the wait for a slot, so the marked suites
   that have one allow 30 minutes.
+* A test must not wait on a thread of the Swift cooperative pool for something that needs a global dispatch queue:
+  macOS starts no block on those queues while as many pool threads as the Mac has cores are in use, running or
+  blocked. The launcher and the camera service client read osascript's stderr in such a block; on the 3-core runner
+  three test bodies blocked in waits (the launcher's script test, the installer command test and the socket round
+  trip, whose writer was also such a block) kept the readers from starting, so the scripts never ended although
+  osascript had exited and no other test of CameraKitTests finished for six minutes, until the script test's three
+  120 s waits ran out (CI run 42973936645; the machine was idle meanwhile; reproduced on a 28-core Mac by blocking
+  all but three pool threads). The readers and the socket writer are threads now, the helper connection's timeouts
+  have a queue of their own, and the tests that run `/usr/bin/osascript` wait for it on threads of their own
+  (`OSAScriptInTests` in `Tests/CameraKitTests/HelperTestSupport.swift`). A script of the launcher that is not done
+  after two minutes puts its osascript children and a sample of the test process into the log once; the wait then
+  goes on for up to 15 minutes.
 * Skipped, with a reason (`➜ Test ... skipped: "..."`), never failed: benchmarks and measurement sweeps that are
   run by hand (`PipelineBenchmark`, `Mesh performance`, `ReconCaptureRange`, the `IFS_RECON_STUDY=1` tables of
   docs/RECONSTRUCTION.md, `GuidanceSyntheticVisionStudy` with `IFS_VISION_STUDY=1` – `IFS_VISION_STUDY_GRID=1` adds

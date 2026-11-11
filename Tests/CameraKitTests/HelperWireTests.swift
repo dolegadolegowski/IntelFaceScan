@@ -82,13 +82,15 @@ struct HelperWireTests {
         let (a, b) = try socketPair()
         let json = Data(#"{"request_id": 1}"#.utf8)
         let payload = Data((0..<300_000).map { UInt8(truncatingIfNeeded: $0 * 7) })
-        // Large enough that the write blocks until the reader drains it: write from another thread.
+        // Large enough that the write blocks until the reader drains it: write from another thread. A thread, not a
+        // block on a global dispatch queue: such a block does not start while the Swift cooperative pool is full,
+        // and this test then held one of the 3-core runner's three pool threads in the read below (18 to 400 s).
         let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        Thread {
             try? a.writeMessage(type: HelperMessageType.frameset.rawValue, json: json, payload: payload)
             try? a.writeMessage(type: HelperMessageType.queryDevice.rawValue, json: json)
             done.signal()
-        }
+        }.start()
         let first = try #require(try b.readMessage())
         #expect(first.type == HelperMessageType.frameset.rawValue)
         #expect(first.json == json)
