@@ -8,6 +8,12 @@ import Darwin
 import Foundation
 
 final class HelperConnection: @unchecked Sendable {
+    /// The timeouts of commands and of HELLO run here, not on a global dispatch queue: macOS starts no block of the
+    /// global queues while as many threads of the Swift cooperative pool as the Mac has cores are in use, and a
+    /// timeout must fire exactly then (a queue of its own always gets a thread).
+    private static let timeoutQueue = DispatchQueue(
+        label: "io.github.dolegadolegowski.IntelFaceScan.helper-timeouts", qos: .userInitiated)
+
     struct Handlers {
         var frame: (CameraFrame) -> Void = { _ in }
         var event: (WireEvent) -> Void = { _ in }
@@ -84,7 +90,7 @@ final class HelperConnection: @unchecked Sendable {
             completion(.failure(error))
             return
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutItem)
+        Self.timeoutQueue.asyncAfter(deadline: .now() + timeout, execute: timeoutItem)
         writeQueue.async { [self] in
             do {
                 try io.writeMessage(type: type.rawValue, json: json, descriptor: descriptor)
@@ -165,7 +171,7 @@ final class HelperConnection: @unchecked Sendable {
                 deliver(immediate)
                 return
             }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+            Self.timeoutQueue.asyncAfter(deadline: .now() + timeout) {
                 deliver(.failure(CameraError.timeout("the camera helper did not say hello in \(Int(timeout)) s")))
             }
         }

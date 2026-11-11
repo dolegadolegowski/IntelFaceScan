@@ -134,8 +134,12 @@ enum AppTest {
         return true
     }
 
+    /// The timers of wait(for:timeout:). A queue of its own always gets a thread; a global dispatch queue gets none
+    /// while as many threads of the Swift cooperative pool as the Mac has cores are in use.
+    private static let timeoutQueue = DispatchQueue(label: "IntelFaceScanAppTests.timeouts")
+
     /// Waits for `task` at most `timeout` seconds; false when it did not end in time (it keeps running). The timeout
-    /// is a dispatch timer: it fires even when no thread of the Swift cooperative pool is free.
+    /// is a dispatch timer on a queue of its own: it fires even when no thread of the Swift cooperative pool is free.
     static func wait(for task: Task<Void, Never>, timeout: Double) async -> Bool {
         await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             let once = OnceFlag()
@@ -143,7 +147,9 @@ enum AppTest {
                 await task.value
                 if once.claim() { continuation.resume(returning: true) }
             }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+            // Not a global dispatch queue: its blocks do not start while the Swift cooperative pool is full,
+            // which is when this timeout is needed.
+            timeoutQueue.asyncAfter(deadline: .now() + timeout) {
                 if once.claim() { continuation.resume(returning: false) }
             }
         }

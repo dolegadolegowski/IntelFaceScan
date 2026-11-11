@@ -8,11 +8,14 @@ import Foundation
 import Testing
 @testable import CameraKit
 
-/// osascript in tests. Every script of the test process runs on the launcher's serial authorization queue, one at a
-/// time, and the test waits for it on a thread of its own: on the 3-core CI runner several osascript processes
-/// started together (the launcher's queue, the quoting test, the installer command test) each sat idle for minutes,
-/// and the tests that waited for them on threads of the Swift cooperative pool stopped every other test of the
-/// target for six minutes (CI run 42973936645).
+/// osascript in tests. A test never waits for a script on a thread of the Swift cooperative pool: macOS starts no
+/// block on the global dispatch queues while as many pool threads as the Mac has cores are in use, running or
+/// blocked. The launcher and the camera service client used to read osascript's stderr in such a block, so on the
+/// 3-core CI runner three test bodies blocked in waits (two of them for scripts) kept those readers from starting:
+/// the scripts never "finished" although osascript had exited, and no other test of the target ended for six
+/// minutes, until the launcher test's three 120 s waits ran out (CI run 42973936645; the machine was idle
+/// meanwhile). The readers are threads now; the tests still wait on threads of their own and run their scripts in
+/// the order of the launcher's serial authorization queue.
 enum OSAScriptInTests {
     /// How long a test waits for its script: every script queued before it runs first, each several seconds on the
     /// runner. It only catches an osascript that never ends.
@@ -25,8 +28,9 @@ enum OSAScriptInTests {
     }
 
     /// Waits for scripts the launcher has queued (HelperLauncher.runAppleScript) off the cooperative pool. When
-    /// one is not done after two minutes, what the osascript processes are doing goes to the log once, so a stuck
-    /// run says why; the wait goes on to `timeout`.
+    /// one is not done after two minutes, the osascript children and a sample of this process (where the
+    /// authorization queue and the pool threads wait) go to the log once, so a stuck run says why; the wait goes on
+    /// to `timeout`.
     static func wait(for handles: [HelperProcessHandle]) async throws -> Bool {
         try await HelperCameraSession.blocking {
             let deadline = Date(timeIntervalSinceNow: timeout)
@@ -57,12 +61,22 @@ enum OSAScriptInTests {
             process.waitUntilExit()
             return String(decoding: data, as: UTF8.self)
         }
+        let own = ProcessInfo.processInfo.processIdentifier
         var lines = ["an osascript run of the tests is not done after 120 s:"]
-        let listed = output("/usr/bin/pgrep", ["-lf", "osascript"])
-        lines.append(listed.isEmpty ? "no osascript process is running" : listed)
-        for pid in listed.split(separator: "\n").compactMap({ $0.split(separator: " ").first }).prefix(2) {
-            lines.append(String(output("/usr/bin/sample", [String(pid), "1", "-mayDie"]).prefix(6000)))
+        // Only this process's own osascript children, by exact name (a pattern would match unrelated commands).
+        let pids = output("/usr/bin/pgrep", ["-P", String(own), "-x", "osascript"])
+            .split(separator: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+        if pids.isEmpty {
+            lines.append("no osascript child is running: the wait is in this process")
+        } else {
+            lines.append(output("/bin/ps", ["-o", "pid,etime,command", "-p", pids.map(String.init).joined(separator: ",")]))
+            for pid in pids.prefix(2) {
+                lines.append(String(output("/usr/bin/sample", [String(pid), "1", "-mayDie"]).prefix(6000)))
+            }
         }
+        // This process: which threads wait where (the authorization queue's thread, the cooperative pool's).
+        let sample = output("/usr/bin/sample", [String(own), "1", "-mayDie"])
+        lines.append(String((sample.components(separatedBy: "Binary Images:").first ?? sample).prefix(40000)))
         FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n").utf8))
     }
 }

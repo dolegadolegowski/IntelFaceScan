@@ -347,9 +347,10 @@ struct HelperSecurityLaunchTests {
         // results must mean what the in-process ones mean. The scripts share the launcher's serial authorization
         // queue with the other tests that run osascript (the release tool, the quoting, the installer command). On
         // the 3-core runner the first two scripts on that queue took more than 30 s together at the start of the
-        // target (CI run 41797620726), and with a dozen scripts queued each took about 35 s, so these three, last in
-        // the queue, started after six minutes (CI run 42973936645). All three are queued at once and waited for
-        // off the Swift cooperative pool (OSAScriptInTests), for as long as the whole queue may take.
+        // target (CI run 41797620726), and in CI run 42973936645 none of these three was done after 120 s each: the
+        // launcher read osascript's stderr in a block on a global dispatch queue, which does not start while every
+        // thread of the Swift cooperative pool is blocked, and this test was one of three that blocked them. All
+        // three are queued at once and waited for off the pool (OSAScriptInTests).
         #expect(!HelperLauncher.hasAppKitApplication)
 
         let cancelled = HelperLauncher.runAppleScript("error \"User canceled.\" number -128", inProcess: false)

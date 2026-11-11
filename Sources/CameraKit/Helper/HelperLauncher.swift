@@ -236,9 +236,14 @@ enum HelperLauncher {
             handle.markExited(status: -1, error: .launchFailed("/usr/bin/osascript: \(error.localizedDescription)"))
             return
         }
-        // Both pipes at once: a full one would block osascript before it exits.
+        // Both pipes at once: a full one would block osascript before it exits. The second reader is a thread of
+        // its own, not a block on a global dispatch queue: macOS starts no such block while as many threads of the
+        // Swift cooperative pool as the Mac has cores are in use (running or blocked), so the wait below never ended
+        // although osascript had exited (three blocked tests on the 3-core CI runner, run 42973936645).
         let errors = OSAScriptErrorOutput()
-        DispatchQueue.global(qos: .utility).async { errors.read(stderr.fileHandleForReading) }
+        let errorReader = Thread { errors.read(stderr.fileHandleForReading) }
+        errorReader.name = "IntelFaceScan osascript stderr"
+        errorReader.start()
         let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
         let errorData = errors.wait()
         exited.wait()
@@ -304,13 +309,17 @@ enum HelperLauncher {
             throw CameraError.launchFailed("\(helper.path): \(error.localizedDescription)")
         }
         let reader = stderr.fileHandleForReading
-        DispatchQueue.global(qos: .utility).async {
+        // A thread of its own, as in runOSAScript: a block on a global dispatch queue may not start for as long as
+        // the Swift cooperative pool is full, and the exit would then be published without the helper's diagnostics.
+        let stderrReader = Thread {
             while let data = try? reader.read(upToCount: 4096), !data.isEmpty {
                 handle.appendStderr(data)
             }
             try? reader.close()
             stderrDone.signal()
         }
+        stderrReader.name = "IntelFaceScan helper stderr"
+        stderrReader.start()
         return handle
     }
 }
